@@ -1,0 +1,24 @@
+_target_: models.titans_memory.TitansViTPredictor
+
+# Standard ViT parameters
+num_patches: 196
+num_frames: 16
+dim: 384
+depth: 12
+heads: 8
+mlp_dim: 1536
+dim_head: 64
+dropout: 0.1
+emb_dropout: 0.1
+pool: 'cls'
+
+# MAG-specific parameters
+memory_variant: "MAG"
+d_k: 64
+d_v: 64
+window: 512  # sliding window size for short-term attention
+
+# Memory update parameters
+alpha: 0.02
+lr: 0.1
+beta: 0.9
