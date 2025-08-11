@@ -21,7 +21,7 @@ MEM=${MEM:-16G}
 PY_ARGS="${@}"
 
 # Generate random port between 6000-6100
-MASTER_PORT=$((6000 + RANDOM % 101))
+# MASTER_PORT=$((6000 + RANDOM % 101))
 
 ENV_DIR=${ENV_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/envs"}
 PROJECT_DIR=${PROJECT_DIR:-"${HOME}/Projects/dino_wm"}
@@ -37,12 +37,17 @@ fi
 if [ "${TYPE}" = "jupyter" ]; then
     COMMAND="jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
 else
-    COMMAND="HYDRA_FULL_ERROR=1 MASTER_PORT=${MASTER_PORT} DATASET_DIR=${DATA_DIR} python ${PY_FILE} ${PY_ARGS}"
+    # Use torchrun for distributed training
+    if [ "${GPU}" -gt 1 ]; then
+        COMMAND="HYDRA_FULL_ERROR=1 DATASET_DIR=${DATA_DIR} torchrun --nproc_per_node=${GPU} ${PY_FILE} ${PY_ARGS}"
+    else
+        COMMAND="HYDRA_FULL_ERROR=1  DATASET_DIR=${DATA_DIR} python ${PY_FILE} ${PY_ARGS}"
+    fi
 fi
 
 LOG_FILE="output/${TYPE}/${TYPE}_%j.out"
 echo "COMMAND: ${COMMAND}"
-echo "MASTER_PORT: ${MASTER_PORT}"
+# echo "MASTER_PORT: ${MASTER_PORT}"
 
 # write sbatch script
 echo "#!/usr/bin/env zsh
@@ -63,10 +68,9 @@ which python
 echo $CONDA_PREFIX
 
 echo "COMMAND: ${COMMAND}"
-echo "MASTER_PORT: ${MASTER_PORT}"
 
 export DATA_DIR=${DATA_DIR}
-export MASTER_PORT=${MASTER_PORT}
+
 srun bash -c \"${COMMAND}\"
 " > ${TYPE}_${DATETIME}.sbatch
 

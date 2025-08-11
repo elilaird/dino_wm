@@ -833,42 +833,9 @@ def main(cfg: OmegaConf):
     else:
         log.info("CUDA not available, using CPU")
 
-    if world_size < 2:
-        # Single GPU - run directly
-        trainer = Trainer(cfg)
-        trainer.run()
-    else:
-        # Multiple GPUs - spawn processes
-        mp.spawn(main_ddp, args=(world_size, cfg), nprocs=world_size)
-
-
-def main_ddp(rank: int, world_size: int, cfg: OmegaConf) -> None:
-    # Set device BEFORE initializing process group
-    torch.cuda.set_device(rank)
-    
-    # Set up DDP environment variables
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "6006")
-    
-    # Initialize DDP with explicit device_id
-    dist.init_process_group(
-        backend="nccl",
-        rank=rank,
-        world_size=world_size,
-        timeout=timedelta(minutes=5),
-        init_method="env://",
-        device_id=torch.device(f"cuda:{rank}")  # Create torch.device object
-    )
-    
-    # Run training
+    # Always run the trainer - torchrun will handle the distributed setup
     trainer = Trainer(cfg)
     trainer.run()
-    
-    # Clean up
-    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
