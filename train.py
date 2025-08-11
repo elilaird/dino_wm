@@ -121,7 +121,6 @@ class Trainer:
 
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
-
         self.dataloaders = {
             x: torch.utils.data.DataLoader(
                 self.datasets[x],
@@ -358,6 +357,7 @@ class Trainer:
             time.sleep(1)
 
     def run(self):
+        
         if self.accelerator.is_main_process:
             executor = ThreadPoolExecutor(max_workers=4)
             self.job_set = set()
@@ -372,6 +372,7 @@ class Trainer:
         for epoch in range(init_epoch, init_epoch + self.total_epochs):
             self.epoch = epoch
             self.accelerator.wait_for_everyone()
+            
             self.train()
             self.accelerator.wait_for_everyone()
             self.val()
@@ -440,9 +441,11 @@ class Trainer:
         return logs
 
     def train(self):
+
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
+
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             self.model.train()

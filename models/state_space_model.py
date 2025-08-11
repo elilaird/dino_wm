@@ -10,9 +10,10 @@ class StateSpaceModel(nn.Module):
     """
     State Space Model predictor that can replace ViT in the visual world model.
     Uses a linear state space model with learnable parameters.
+    Now supports additive control injection for actions.
     """
     def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, 
-                 state_dim=None, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
+                 state_dim=None, action_dim=0, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
         
@@ -28,6 +29,7 @@ class StateSpaceModel(nn.Module):
         if state_dim is None:
             state_dim = dim
         self.state_dim = state_dim
+        self.action_dim = action_dim
         
         # Position embeddings
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
@@ -41,6 +43,13 @@ class StateSpaceModel(nn.Module):
         self.A = nn.Parameter(torch.randn(state_dim, state_dim) * 0.1)
         self.B = nn.Parameter(torch.randn(state_dim, dim) * 0.1)
         
+        # Additive control injection components
+        if action_dim > 0:
+            self.action_projection = nn.Linear(action_dim, state_dim)
+            self.action_norm = nn.LayerNorm(state_dim)
+            # Control injection matrix (separate from input matrix B)
+            self.C = nn.Parameter(torch.randn(state_dim, state_dim) * 0.1)
+        
         # Initial state
         self.initial_state = nn.Parameter(torch.randn(1, 1, state_dim) * 0.1)
         
@@ -52,9 +61,10 @@ class StateSpaceModel(nn.Module):
         self.input_norm = nn.LayerNorm(dim)
         self.output_norm = nn.LayerNorm(dim)
         
-    def forward(self, x):
+    def forward(self, x, actions=None):
         """
-        x: (b, num_frames * num_patches, dim)
+        x: (b, num_frames * num_patches, dim) - visual/proprio embeddings only
+        actions: (b, num_frames, action_dim) - separate action input (optional)
         """
         b, n, _ = x.shape
         
@@ -71,7 +81,7 @@ class StateSpaceModel(nn.Module):
         # Process each time step
         outputs = []
         for t in range(self.num_frames):
-            # Current input
+            # Current input (visual/proprio only)
             current_input = x[:, t, :, :]  # (b, patches, dim)
             
             # Project input to state space
@@ -85,9 +95,21 @@ class StateSpaceModel(nn.Module):
             state_expanded = state.unsqueeze(2).expand(-1, -1, num_patches, -1)  # (b, 1, patches, state_dim)
             state_expanded = state_expanded.squeeze(1)  # (b, patches, state_dim)
             
-            # State transition
+            # Base state transition: A * state_t + B * visual_input
             state_next = torch.einsum('sd,bps->bpd', self.A, state_expanded) + \
                         torch.einsum('sd,bps->bpd', self.B, input_projected)
+            
+            # ADDITIVE ACTION INJECTION
+            if actions is not None and self.action_dim > 0:
+                current_action = actions[:, t, :]  # (b, action_dim)
+                action_projected = self.action_projection(current_action)  # (b, state_dim)
+                action_projected = self.action_norm(action_projected)
+                
+                # Expand action to match patch dimension
+                action_expanded = action_projected.unsqueeze(1).expand(-1, num_patches, -1)  # (b, patches, state_dim)
+                
+                # Additive control injection: + C * h(action_t)
+                state_next = state_next + torch.einsum('sd,bps->bpd', self.C, action_expanded)
             
             # Apply non-linearity and normalization
             state_next = self.state_norm(state_next)
@@ -115,9 +137,10 @@ class StateSpaceModel(nn.Module):
 class LinearStateSpaceModel(nn.Module):
     """
     Simplified linear state space model for comparison.
+    Now supports additive control injection for actions.
     """
     def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, 
-                 state_dim=None, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
+                 state_dim=None, action_dim=0, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
         
@@ -130,6 +153,7 @@ class LinearStateSpaceModel(nn.Module):
         if state_dim is None:
             state_dim = dim
         self.state_dim = state_dim
+        self.action_dim = action_dim
         
         # Position embeddings
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
@@ -145,12 +169,20 @@ class LinearStateSpaceModel(nn.Module):
         # Input matrix (B)
         self.B = nn.Parameter(torch.randn(state_dim, state_dim) * 0.01)
         
-        # Initial state
-        self.initial_state = nn.Parameter(torch.randn(1, state_dim) * 0.01)
+        # Additive control injection components
+        if action_dim > 0:
+            self.action_projection = nn.Linear(action_dim, state_dim)
+            self.action_norm = nn.LayerNorm(state_dim)
+            # Control injection matrix (separate from input matrix B)
+            self.C = nn.Parameter(torch.randn(state_dim, state_dim) * 0.01)
         
-    def forward(self, x):
+        # Initial state
+        self.initial_state = nn.Parameter(torch.randn(1, 1, state_dim) * 0.01)
+        
+    def forward(self, x, actions=None):
         """
-        x: (b, num_frames * num_patches, dim)
+        x: (b, num_frames * num_patches, dim) - visual/proprio embeddings only
+        actions: (b, num_frames, action_dim) - separate action input (optional)
         """
         b, n, _ = x.shape
         
@@ -162,12 +194,12 @@ class LinearStateSpaceModel(nn.Module):
         x = rearrange(x, 'b (t p) d -> b t p d', t=self.num_frames, p=self.num_patches)
         
         # Initialize state for each batch
-        state = self.initial_state.unsqueeze(0).expand(b, -1)  # (b, state_dim)
+        state = self.initial_state.repeat(b, 1, 1)  # (b, 1, state_dim)
         
         # Process each time step
         outputs = []
         for t in range(self.num_frames):
-            # Current input
+            # Current input (visual/proprio only)
             current_input = x[:, t, :, :]  # (b, patches, dim)
             
             # Project input
@@ -175,11 +207,25 @@ class LinearStateSpaceModel(nn.Module):
             
             # State transition for each patch
             batch_size, num_patches, _ = input_projected.shape
-            state_expanded = state.unsqueeze(1).expand(-1, num_patches, -1)  # (b, patches, state_dim)
+            # Reshape for batch processing
+            state_expanded = state.unsqueeze(2).expand(-1, -1, num_patches, -1)  # (b, 1, patches, state_dim)
+            state_expanded = state_expanded.squeeze(1)  # (b, patches, state_dim)
             
-            # Linear state space update
+            # Linear state space update: A * state_t + B * visual_input
             state_next = torch.einsum('sd,bps->bpd', self.A, state_expanded) + \
                         torch.einsum('sd,bps->bpd', self.B, input_projected)
+            
+            # ADDITIVE ACTION INJECTION
+            if actions is not None and self.action_dim > 0:
+                current_action = actions[:, t, :]  # (b, action_dim)
+                action_projected = self.action_projection(current_action)  # (b, state_dim)
+                action_projected = self.action_norm(action_projected)
+                
+                # Expand action to match patch dimension
+                action_expanded = action_projected.unsqueeze(1).expand(-1, num_patches, -1)  # (b, patches, state_dim)
+                
+                # Additive control injection: + C * h(action_t)
+                state_next = state_next + torch.einsum('sd,bps->bpd', self.C, action_expanded)
             
             # Project back to output dimension
             output = self.output_projection(state_next)  # (b, patches, dim)
@@ -188,7 +234,7 @@ class LinearStateSpaceModel(nn.Module):
             outputs.append(output)
             
             # Update state (average across patches)
-            state = state_next.mean(dim=1)  # (b, state_dim)
+            state = state_next.mean(dim=1, keepdim=True)  # Average across patches
         
         # Concatenate outputs
         output = torch.stack(outputs, dim=1)  # (b, time, patches, dim)
@@ -202,9 +248,10 @@ class LinearStateSpaceModel(nn.Module):
 class RecurrentStateSpaceModel(nn.Module):
     """
     Recurrent state space model with GRU-like gating.
+    Now supports additive control injection for actions.
     """
     def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, 
-                 state_dim=None, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
+                 state_dim=None, action_dim=0, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
         
@@ -217,6 +264,7 @@ class RecurrentStateSpaceModel(nn.Module):
         if state_dim is None:
             state_dim = dim
         self.state_dim = state_dim
+        self.action_dim = action_dim
         
         # Position embeddings
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
@@ -235,16 +283,24 @@ class RecurrentStateSpaceModel(nn.Module):
         self.A = nn.Parameter(torch.randn(state_dim, state_dim) * 0.01)
         self.B = nn.Parameter(torch.randn(state_dim, state_dim) * 0.01)
         
+        # Additive control injection components
+        if action_dim > 0:
+            self.action_projection = nn.Linear(action_dim, state_dim)
+            self.action_norm = nn.LayerNorm(state_dim)
+            # Control injection matrix (separate from input matrix B)
+            self.C = nn.Parameter(torch.randn(state_dim, state_dim) * 0.01)
+        
         # Initial state
-        self.initial_state = nn.Parameter(torch.randn(1, state_dim) * 0.01)
+        self.initial_state = nn.Parameter(torch.randn(1, 1, state_dim) * 0.01)
         
         # Normalization
         self.state_norm = nn.LayerNorm(state_dim)
         self.output_norm = nn.LayerNorm(dim)
         
-    def forward(self, x):
+    def forward(self, x, actions=None):
         """
-        x: (b, num_frames * num_patches, dim)
+        x: (b, num_frames * num_patches, dim) - visual/proprio embeddings only
+        actions: (b, num_frames, action_dim) - separate action input (optional)
         """
         b, n, _ = x.shape
         
@@ -256,12 +312,12 @@ class RecurrentStateSpaceModel(nn.Module):
         x = rearrange(x, 'b (t p) d -> b t p d', t=self.num_frames, p=self.num_patches)
         
         # Initialize state for each batch
-        state = self.initial_state.unsqueeze(0).expand(b, -1)  # (b, state_dim)
+        state = self.initial_state.repeat(b, 1, 1)  # (b, 1, state_dim)
         
         # Process each time step
         outputs = []
         for t in range(self.num_frames):
-            # Current input
+            # Current input (visual/proprio only)
             current_input = x[:, t, :, :]  # (b, patches, dim)
             
             # Project input
@@ -269,7 +325,9 @@ class RecurrentStateSpaceModel(nn.Module):
             
             # State transition for each patch
             batch_size, num_patches, _ = input_projected.shape
-            state_expanded = state.unsqueeze(1).expand(-1, num_patches, -1)  # (b, patches, state_dim)
+            # Reshape for batch processing
+            state_expanded = state.unsqueeze(2).expand(-1, -1, num_patches, -1)  # (b, 1, patches, state_dim)
+            state_expanded = state_expanded.squeeze(1)  # (b, patches, state_dim)
             
             # Concatenate state and input
             combined = torch.cat([state_expanded, input_projected], dim=-1)  # (b, patches, 2*state_dim)
@@ -279,9 +337,21 @@ class RecurrentStateSpaceModel(nn.Module):
             reset = torch.sigmoid(self.reset_gate(combined))
             candidate = torch.tanh(self.candidate_gate(combined))
             
-            # Linear state space component
+            # Linear state space component: A * state_t + B * visual_input
             linear_update = torch.einsum('sd,bps->bpd', self.A, state_expanded) + \
                            torch.einsum('sd,bps->bpd', self.B, input_projected)
+            
+            # ADDITIVE ACTION INJECTION
+            if actions is not None and self.action_dim > 0:
+                current_action = actions[:, t, :]  # (b, action_dim)
+                action_projected = self.action_projection(current_action)  # (b, state_dim)
+                action_projected = self.action_norm(action_projected)
+                
+                # Expand action to match patch dimension
+                action_expanded = action_projected.unsqueeze(1).expand(-1, num_patches, -1)  # (b, patches, state_dim)
+                
+                # Additive control injection: + C * h(action_t)
+                linear_update = linear_update + torch.einsum('sd,bps->bpd', self.C, action_expanded)
             
             # Combine gated and linear updates
             state_next = update * candidate + (1 - update) * linear_update
@@ -295,7 +365,7 @@ class RecurrentStateSpaceModel(nn.Module):
             outputs.append(output)
             
             # Update state (average across patches)
-            state = state_next.mean(dim=1)  # (b, state_dim)
+            state = state_next.mean(dim=1, keepdim=True)  # Average across patches
         
         # Concatenate outputs
         output = torch.stack(outputs, dim=1)  # (b, time, patches, dim)

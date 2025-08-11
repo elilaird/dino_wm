@@ -55,7 +55,9 @@ class Attention(nn.Module):
             nn.Linear(inner_dim, dim),
             nn.Dropout(dropout)
         ) if project_out else nn.Identity()
-        self.bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES).to('cuda')
+
+        bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
+        self.register_buffer("bias", bias)
 
     def forward(self, x):
         (
@@ -63,6 +65,7 @@ class Attention(nn.Module):
             T,
             C,
         ) = x.size()
+
         x = self.norm(x)
 
         qkv = self.to_qkv(x).chunk(3, dim = -1)
@@ -96,7 +99,7 @@ class Transformer(nn.Module):
             x = ff(x) + x
 
         return self.norm(x)
-    
+
 class ViTPredictor(nn.Module):
     def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
@@ -117,4 +120,77 @@ class ViTPredictor(nn.Module):
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x) 
         x = self.transformer(x) 
+        return x
+
+
+class AdditiveControlViTPredictor(nn.Module):
+    """
+    ViT predictor with additive control injection for actions.
+    Separates action processing from visual/proprio processing to avoid gradient entanglement.
+    """
+    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, 
+                 action_dim=0, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
+        super().__init__()
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+        
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.dim = dim
+        self.action_dim = action_dim
+        self.pool = pool
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        
+        # Additive control components
+        if action_dim > 0:
+            self.action_projection = nn.Linear(action_dim, dim)
+            self.action_norm = nn.LayerNorm(dim)
+            
+            # Control injection layers for each transformer layer
+            self.control_injection = nn.ModuleList([
+                nn.Linear(dim, dim) for _ in range(depth)
+            ])
+
+    def forward(self, x, actions=None):
+        """
+        x: (b, num_frames * num_patches, dim) - visual/proprio embeddings only
+        actions: (b, num_frames, action_dim) - separate action input (optional)
+        """
+        b, n, _ = x.shape
+        
+        # Add position embeddings
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        
+        # Process actions if provided
+        if actions is not None and self.action_dim > 0:
+            # Reshape actions to match token sequence
+            actions = rearrange(actions, 'b t d -> b (t p) d', p=1)
+            actions = actions.repeat(1, self.num_patches, 1)
+            
+            # Project actions to embedding dimension
+            action_control = self.action_projection(actions)
+            action_control = self.action_norm(action_control)
+            
+            # Process through transformer with additive control injection
+            for i, (attn, ff) in enumerate(self.transformer.layers):
+                # Standard transformer processing
+                x = attn(x) + x
+                x = ff(x) + x
+                
+                # Additive control injection at each layer
+                if i < len(self.control_injection):
+                    control_injection = self.control_injection[i](action_control)
+                    x = x + control_injection
+        else:
+            # Standard transformer processing without actions
+            x = self.transformer(x)
+            
         return x

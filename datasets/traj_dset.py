@@ -147,6 +147,8 @@ def get_train_val_sliced(
         train_fraction=train_fraction,
         random_seed=random_seed,
     )
+
     train_slices = TrajSlicerDataset(train, num_frames, frameskip)
     val_slices = TrajSlicerDataset(val, num_frames, frameskip)
+
     return train, val, train_slices, val_slices
