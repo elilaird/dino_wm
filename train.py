@@ -22,6 +22,7 @@ from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
+import torch.multiprocessing as mp
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
@@ -35,34 +36,14 @@ class Trainer:
         cfg_dict = cfg_to_dict(cfg)
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
-
-        if HydraConfig.get().mode == RunMode.MULTIRUN:
-            log.info(" Multirun setup begin...")
-            log.info(f"SLURM_JOB_NODELIST={os.environ['SLURM_JOB_NODELIST']}")
-            log.info(f"DEBUGVAR={os.environ['DEBUGVAR']}")
-            # ==== init ddp process group ====
-            os.environ["RANK"] = os.environ["SLURM_PROCID"]
-            os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
-            os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
-            try:
-                dist.init_process_group(
-                    backend="nccl",
-                    init_method="env://",
-                    timeout=timedelta(minutes=5),  # Set a 5-minute timeout
-                )
-                log.info("Multirun setup completed.")
-            except Exception as e:
-                log.error(f"DDP setup failed: {e}")
-                raise
-            torch.distributed.barrier()
-            # # ==== /init ddp process group ====
-
+        
         self.accelerator = Accelerator(log_with="wandb")
         log.info(
             f"rank: {self.accelerator.local_process_index}  model_name: {model_name}"
         )
         self.device = self.accelerator.device
         log.info(f"device: {self.device}   model_name: {model_name}")
+        
         self.base_path = os.path.dirname(os.path.abspath(__file__))
 
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
@@ -81,7 +62,10 @@ class Trainer:
 
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
-            wandb_run_id = None
+
+            # Try to get SLURM job ID, fallback to readable datetime
+            slurm_job_id = os.environ.get("SLURM_JOB_ID")
+            wandb_run_id = f"dino_wm_{slurm_job_id}"
             if os.path.exists("hydra.yaml"):
                 existing_cfg = OmegaConf.load("hydra.yaml")
                 wandb_run_id = existing_cfg["wandb_run_id"]
@@ -291,6 +275,16 @@ class Trainer:
         self.encoder, self.predictor, self.decoder = self.accelerator.prepare(
             self.encoder, self.predictor, self.decoder
         )
+
+        # Add compilation for speed improvements
+        if hasattr(torch, 'compile'):
+            self.encoder = torch.compile(self.encoder, mode="reduce-overhead")
+            if self.predictor is not None:
+                self.predictor = torch.compile(self.predictor, mode="reduce-overhead")
+            if self.decoder is not None:
+                self.decoder = torch.compile(self.decoder, mode="reduce-overhead")
+            log.info("Compiled models for speed improvements")
+
         self.model = hydra.utils.instantiate(
             self.cfg.model,
             encoder=self.encoder,
@@ -304,6 +298,17 @@ class Trainer:
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
         )
+
+        print(f"encoder device: {next(self.model.encoder.parameters()).device}")
+        if self.model.predictor is not None:
+            print(f"predictor device: {next(self.model.predictor.parameters()).device}")
+        if self.model.decoder is not None:
+            print(f"decoder device: {next(self.model.decoder.parameters()).device}")
+        if self.model.proprio_encoder is not None:
+            print(f"proprio_encoder device: {next(self.model.proprio_encoder.parameters()).device}")
+        if self.model.action_encoder is not None:
+            print(f"action_encoder device: {next(self.model.action_encoder.parameters()).device}")
+        print(f"model device: {next(self.model.parameters()).device}")
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
@@ -817,8 +822,53 @@ class Trainer:
 
 @hydra.main(config_path="conf", config_name="train")
 def main(cfg: OmegaConf):
+    # Print available devices information
+    world_size = torch.cuda.device_count()
+    if torch.cuda.is_available():
+        log.info(f"CUDA available: {torch.cuda.is_available()}")
+        log.info(f"CUDA device count: {world_size}")
+        for i in range(world_size):
+            log.info(f"CUDA device {i}: {torch.cuda.get_device_name(i)}")
+            log.info(f"  Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f} GB")
+    else:
+        log.info("CUDA not available, using CPU")
+
+    if world_size < 2:
+        # Single GPU - run directly
+        trainer = Trainer(cfg)
+        trainer.run()
+    else:
+        # Multiple GPUs - spawn processes
+        mp.spawn(main_ddp, args=(world_size, cfg), nprocs=world_size)
+
+
+def main_ddp(rank: int, world_size: int, cfg: OmegaConf) -> None:
+    # Set device BEFORE initializing process group
+    torch.cuda.set_device(rank)
+    
+    # Set up DDP environment variables
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "6006")
+    
+    # Initialize DDP with explicit device_id
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(minutes=5),
+        init_method="env://",
+        device_id=torch.device(f"cuda:{rank}")  # Create torch.device object
+    )
+    
+    # Run training
     trainer = Trainer(cfg)
     trainer.run()
+    
+    # Clean up
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":

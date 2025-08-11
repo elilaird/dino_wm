@@ -40,14 +40,20 @@ class TrajSubset(TrajDataset, Subset):
     """
     def __init__(self, dataset: TrajDataset, indices: Sequence[int]):
         Subset.__init__(self, dataset, indices)
+        self.dataset = dataset
+        self.proprio_dim = dataset.proprio_dim
+        self.action_dim = dataset.action_dim
+        self.state_dim = dataset.state_dim
 
     def get_seq_length(self, idx):
         return self.dataset.get_seq_length(self.indices[idx])
 
-    def __getattr__(self, name):
-        if hasattr(self.dataset, name):
-            return getattr(self.dataset, name)
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    # def __getattr__(self, name):
+    #     # Use getattr with a default to avoid infinite recursion
+    #     try:
+    #         return getattr(self.dataset, name)
+    #     except AttributeError:
+    #         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
 
 class TrajSlicerDataset(TrajDataset):
@@ -98,6 +104,13 @@ class TrajSlicerDataset(TrajDataset):
         act = act[start:end]
         act = rearrange(act, "(n f) d -> n (f d)", n=self.num_frames)  # concat actions
         return tuple([obs, act, state])
+
+    # def __getattr__(self, name):
+    #     # Use getattr with a default to avoid infinite recursion
+    #     try:
+    #         return getattr(self.dataset, name)
+    #     except AttributeError:
+    #         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
 
 def random_split_traj(
