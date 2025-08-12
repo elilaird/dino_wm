@@ -613,6 +613,10 @@ class Trainer:
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
 
+            if self.cfg.has_predictor and i % 100 == 0:  # Log every 100 batches
+                alpha_logs = self.get_alpha_values()
+                self.logs_update({f"train_{k}": [v] for k, v in alpha_logs.items()})
+
     def val(self):
         self.model.eval()
         if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
@@ -713,6 +717,10 @@ class Trainer:
                 )
             loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
+
+            if self.cfg.has_predictor and i == 0:  # Log on first validation batch
+                alpha_logs = self.get_alpha_values()
+                self.logs_update({f"val_{k}": [v] for k, v in alpha_logs.items()})
 
     def openloop_rollout(
         self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
@@ -901,6 +909,19 @@ class Trainer:
             normalize=True,
             value_range=(-1, 1),
         )
+
+    def get_alpha_values(self):
+        """Get current alpha values from the additive control transformer"""
+        if self.cfg.has_predictor and hasattr(self.predictor, 'transformer'):
+            alphas = {}
+            for i, alpha in enumerate(self.predictor.transformer.alphas):
+                alphas[f"alpha_layer_{i}"] = alpha.item()
+                if alpha.grad is not None:
+                    alphas[f"alpha_layer_{i}_grad_norm"] = alpha.grad.norm().item()
+                else:
+                    alphas[f"alpha_layer_{i}_grad_norm"] = 0.0
+            return alphas
+        return {}
 
 
 @hydra.main(config_path="conf", config_name="train")

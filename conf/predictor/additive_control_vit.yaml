@@ -1,16 +1,8 @@
 _target_: models.vit.AdditiveControlViTPredictor
-
-# Standard ViT parameters
-num_patches: 196
-num_frames: 16
-dim: 384
-depth: 12
-heads: 8
-mlp_dim: 1536
-dim_head: 64
+depth: 6
+heads: 16
+mlp_dim: 2048
 dropout: 0.1
-emb_dropout: 0.1
-pool: 'cls'
-
-# Additive control parameters
-action_dim: 10  # match your action_emb_dim from train.yaml
+emb_dropout: 0
+pool: 'mean'
+alpha_init: 0.1

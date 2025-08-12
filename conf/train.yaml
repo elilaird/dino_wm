@@ -33,7 +33,7 @@ hydra:
 training:
   seed: 0
   epochs: 100
-  batch_size: 256 # should >= nodes * tasks_per_nodes (effective batch size = batch_size * n_nodes * n_tasks_per_node)
+  batch_size: 256 # gpu_batch_size
   save_every_x_epoch: 1 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6

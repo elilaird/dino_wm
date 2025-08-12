@@ -46,8 +46,6 @@ else
 fi
 
 LOG_FILE="output/${TYPE}/${TYPE}_%j.out"
-echo "GPU: ${GPU} CPUS: ${CPUS} MEM: ${MEM} PARTITION: ${PARTITION} TIME: ${TIME} COMMAND: ${COMMAND}"
-# echo "MASTER_PORT: ${MASTER_PORT}"
 
 # write sbatch script
 echo "#!/usr/bin/env zsh
@@ -67,7 +65,7 @@ conda activate ${ENV_DIR}/dino_wm
 which python
 echo $CONDA_PREFIX
 
-echo "COMMAND: ${COMMAND}"
+echo "COMMAND: GPU: ${GPU} CPUS: ${CPUS} MEM: ${MEM} PARTITION: ${PARTITION} TIME: ${TIME} COMMAND: ${COMMAND}"
 
 export DATA_DIR=${DATA_DIR}
 

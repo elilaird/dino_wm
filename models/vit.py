@@ -119,8 +119,42 @@ class ViTPredictor(nn.Module):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x) 
-        x = self.transformer(x) 
+        x = self.transformer(x)  
         return x
+
+
+class AdditiveControlTransformer(Transformer):
+
+    def __init__(
+        self,
+        dim,
+        depth,
+        heads,
+        dim_head,
+        mlp_dim,
+        action_emb_dim,
+        alpha_init=0.1,
+        dropout=0.0,
+    ):
+        super().__init__(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.action_emb_dim = action_emb_dim
+        self.injection_layers = nn.ModuleList(
+            [nn.Linear(action_emb_dim, dim) for _ in range(depth)]
+        )
+        # Per-layer alpha parameters
+        self.alphas = nn.ParameterList([
+            nn.Parameter(torch.tensor(alpha_init)) for _ in range(depth)
+        ])
+
+    def forward(self, x, actions):
+        for i, (attn, ff) in enumerate(self.layers):
+            x = attn(x) + x
+            x = ff(x) + x
+            if i < len(self.injection_layers):
+                # apply injection to visual patches only
+                injection = self.injection_layers[i](actions) * self.alphas[i]
+                x = x + torch.cat([injection, torch.zeros_like(x[:, :2])], dim=1)
+        return self.norm(x)
 
 
 class AdditiveControlViTPredictor(nn.Module):
@@ -128,11 +162,24 @@ class AdditiveControlViTPredictor(nn.Module):
     ViT predictor with additive control injection for actions.
     Separates action processing from visual/proprio processing to avoid gradient entanglement.
     """
-    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, 
-                 action_dim=0, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        pool="cls",
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+        alpha_init=0.1
+    ):
         super().__init__()
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
-        
+
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
         NUM_FRAMES = num_frames
@@ -141,56 +188,27 @@ class AdditiveControlViTPredictor(nn.Module):
         self.num_patches = num_patches
         self.num_frames = num_frames
         self.dim = dim
-        self.action_dim = action_dim
         self.pool = pool
 
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
-        
-        # Additive control components
-        if action_dim > 0:
-            self.action_projection = nn.Linear(action_dim, dim)
-            self.action_norm = nn.LayerNorm(dim)
-            
-            # Control injection layers for each transformer layer
-            self.control_injection = nn.ModuleList([
-                nn.Linear(dim, dim) for _ in range(depth)
-            ])
+        self.transformer = AdditiveControlTransformer(dim, depth, heads, dim_head, mlp_dim, dim, alpha_init, dropout)
 
-    def forward(self, x, actions=None):
+    def forward(self, x):
         """
         x: (b, num_frames * num_patches, dim) - visual/proprio embeddings only
         actions: (b, num_frames, action_dim) - separate action input (optional)
         """
         b, n, _ = x.shape
-        
-        # Add position embeddings
+
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
-        
-        # Process actions if provided
-        if actions is not None and self.action_dim > 0:
-            # Reshape actions to match token sequence
-            actions = rearrange(actions, 'b t d -> b (t p) d', p=1)
-            actions = actions.repeat(1, self.num_patches, 1)
-            
-            # Project actions to embedding dimension
-            action_control = self.action_projection(actions)
-            action_control = self.action_norm(action_control)
-            
-            # Process through transformer with additive control injection
-            for i, (attn, ff) in enumerate(self.transformer.layers):
-                # Standard transformer processing
-                x = attn(x) + x
-                x = ff(x) + x
-                
-                # Additive control injection at each layer
-                if i < len(self.control_injection):
-                    control_injection = self.control_injection[i](action_control)
-                    x = x + control_injection
-        else:
-            # Standard transformer processing without actions
-            x = self.transformer(x)
-            
+
+        action_emb = x[:, -1:, :].clone()  # (b, 1, dim)
+        num_visual_tokens = n - 2
+        action_emb = action_emb.repeat(
+            1, num_visual_tokens, 1
+        )  # (b, num_visual_tokens, dim)
+
+        x = self.transformer(x, action_emb)
         return x
