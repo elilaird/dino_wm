@@ -124,12 +124,12 @@ def random_split_traj(
         )
 
     indices = randperm(sum(lengths), generator=generator).tolist()
-    print(
-        [
-            indices[offset - length : offset]
-            for offset, length in zip(_accumulate(lengths), lengths)
-        ]
-    )
+    # print(
+    #     [
+    #         indices[offset - length : offset]
+    #         for offset, length in zip(_accumulate(lengths), lengths)
+    #     ]
+    # )
     return [
         TrajSubset(dataset, indices[offset - length : offset])
         for offset, length in zip(_accumulate(lengths), lengths)

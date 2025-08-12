@@ -14,8 +14,8 @@ if [ "${PARTITION}" = "short" ]; then
 fi
 
 GPU=${GPU:-1}
-CPUS=${CPUS:-16}
-MEM=${MEM:-16G}
+CPUS=${CPUS:-128}
+MEM=${MEM:-96G}
 # CPUS=$((GPU * 8))  # 8 CPU cores per GPU
 # MEM="${MEM:-${$((GPU * 16))}G}"  # 16GB per GPU
 PY_ARGS="${@}"
@@ -46,7 +46,7 @@ else
 fi
 
 LOG_FILE="output/${TYPE}/${TYPE}_%j.out"
-echo "COMMAND: ${COMMAND}"
+echo "GPU: ${GPU} CPUS: ${CPUS} MEM: ${MEM} PARTITION: ${PARTITION} TIME: ${TIME} COMMAND: ${COMMAND}"
 # echo "MASTER_PORT: ${MASTER_PORT}"
 
 # write sbatch script

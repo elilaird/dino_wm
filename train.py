@@ -27,6 +27,50 @@ import torch.multiprocessing as mp
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+def get_memory_str():
+    """Get current GPU memory usage (PyTorch view) as a string"""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        max_allocated = torch.cuda.max_memory_allocated() / 1024**3
+        return (f"GPU: {allocated:.2f} GB alloc "
+                f"(reserved: {reserved:.2f} GB, max: {max_allocated:.2f} GB)")
+    return "GPU: NA"
+
+def _tensor_nbytes(x):
+    # Works for torch.Tensor or numpy.ndarray
+    try:
+        if isinstance(x, torch.Tensor):
+            # numel * bytes per element; for non-contiguous views this is still fine for logical size
+            return x.numel() * x.element_size()
+    except Exception:
+        pass
+    if isinstance(x, np.ndarray):
+        return x.nbytes
+    # Fallback: try to infer from shape & dtype
+    if hasattr(x, "shape") and hasattr(x, "dtype") and hasattr(x.dtype, "itemsize"):
+        import numpy as np
+        return int(np.prod(x.shape)) * int(x.dtype.itemsize)
+    return 0
+
+def estimate_batch_memory_str(obs, act=None, state=None):
+    """Estimate total bytes of the provided batch tensors (inputs only)."""
+    total_bytes = 0
+    
+    # obs can be a tensor, array, or a dict of them
+    if obs is not None:
+        if isinstance(obs, dict):
+            for v in obs.values():
+                total_bytes += _tensor_nbytes(v)
+        else:
+            total_bytes += _tensor_nbytes(obs)
+    
+    total_bytes += _tensor_nbytes(act) if act is not None else 0
+    total_bytes += _tensor_nbytes(state) if state is not None else 0
+    
+    gb = total_bytes / (1024 ** 3)
+    return f"Batch: {gb:.2f} GB"
+
 class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -38,6 +82,7 @@ class Trainer:
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
         
         self.accelerator = Accelerator(log_with="wandb")
+
         log.info(
             f"rank: {self.accelerator.local_process_index}  model_name: {model_name}"
         )
@@ -90,7 +135,7 @@ class Trainer:
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
             OmegaConf.set_struct(cfg, True)
-            wandb.run.name = "{}".format(model_name)
+            wandb.run.name = "{}".format(model_name) + f"_{slurm_job_id}"
             with open(os.path.join(os.getcwd(), "hydra.yaml"), "w") as f:
                 f.write(OmegaConf.to_yaml(cfg, resolve=True))
 
@@ -103,6 +148,10 @@ class Trainer:
             frameskip=self.cfg.frameskip,
         )
 
+        # print length of train and valid datasets
+        log.info(f"Train dataset length: {len(self.datasets['train'])}")
+        log.info(f"Valid dataset length: {len(self.datasets['valid'])}")
+
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
         self.dataloaders = {
@@ -110,8 +159,12 @@ class Trainer:
                 self.datasets[x],
                 batch_size=self.cfg.gpu_batch_size,
                 shuffle=False, # already shuffled in TrajSlicerDataset
-                num_workers=self.cfg.env.num_workers,
+                num_workers=self.cfg.num_workers // 2,
                 collate_fn=None,
+                pin_memory=True,
+                persistent_workers=True,
+                drop_last=True if x == "train" else False,
+                prefetch_factor=2,
             )
             for x in ["train", "valid"]
         }
@@ -364,7 +417,7 @@ class Trainer:
     def run(self):
         
         if self.accelerator.is_main_process:
-            executor = ThreadPoolExecutor(max_workers=4)
+            # executor = ThreadPoolExecutor(max_workers=4)
             self.job_set = set()
             lock = threading.Lock()
 
@@ -378,9 +431,20 @@ class Trainer:
             self.epoch = epoch
             self.accelerator.wait_for_everyone()
             
+            # Start timing the epoch
+            epoch_start_time = time.time()
+            
             self.train()
             self.accelerator.wait_for_everyone()
             self.val()
+            
+            # Calculate epoch execution time
+            epoch_time = time.time() - epoch_start_time
+            
+            # Add epoch time to logs before flashing
+            epoch_time_log = {"epoch_time": [epoch_time]}
+            self.logs_update(epoch_time_log)
+            
             self.logs_flash(step=self.epoch)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
@@ -447,11 +511,18 @@ class Trainer:
 
     def train(self):
 
+        # estimate memory usage per batch
+        torch.cuda.reset_peak_memory_stats()
+        obs, act, state = next(iter(self.dataloaders["train"]))
+        batch_mem = estimate_batch_memory_str(obs, act, state)
+        tqdm.write(f"Batch memory: {batch_mem}")
+
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
 
             obs, act, state = data
+            
             plot = i == 0  # only plot from the first batch
             self.model.train()
             z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
@@ -564,6 +635,12 @@ class Trainer:
             tqdm(self.dataloaders["valid"], desc=f"Epoch {self.epoch} Valid")
         ):
             obs, act, state = data
+            
+            # Update progress bar description with memory info
+            if i == 0:  # Update memory info on first batch
+                gpu_mem = get_memory_str()
+                batch_mem = estimate_batch_memory_str(obs, act, state)
+                tqdm.write(f"Epoch {self.epoch} Valid - {gpu_mem} {batch_mem}")
             plot = i == 0
             self.model.eval()
             z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
@@ -745,8 +822,14 @@ class Trainer:
             to_log = sum / count
             epoch_log[key] = to_log
         epoch_log["epoch"] = step
+        
+        # Add epoch time to the log message if available
+        epoch_time_msg = ""
+        if "epoch_time" in epoch_log:
+            epoch_time_msg = f"  Epoch time: {epoch_log['epoch_time']:.2f}s"
+        
         log.info(f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
-                Validation loss: {epoch_log['val_loss']:.4f}")
+                Validation loss: {epoch_log['val_loss']:.4f}{epoch_time_msg}")
 
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
