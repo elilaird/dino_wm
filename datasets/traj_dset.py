@@ -44,6 +44,13 @@ class TrajSubset(TrajDataset, Subset):
         self.proprio_dim = dataset.proprio_dim
         self.action_dim = dataset.action_dim
         self.state_dim = dataset.state_dim
+        self.state_mean = dataset.state_mean
+        self.state_std = dataset.state_std
+        self.action_mean = dataset.action_mean
+        self.action_std = dataset.action_std
+        self.proprio_mean = dataset.proprio_mean
+        self.proprio_std = dataset.proprio_std
+        self.transform = dataset.transform
 
     def get_seq_length(self, idx):
         return self.dataset.get_seq_length(self.indices[idx])
@@ -87,6 +94,13 @@ class TrajSlicerDataset(TrajDataset):
             self.action_dim = self.dataset.action_dim
 
         self.state_dim = self.dataset.state_dim
+        self.action_mean = self.dataset.action_mean
+        self.action_std = self.dataset.action_std
+        self.proprio_mean = self.dataset.proprio_mean
+        self.proprio_std = self.dataset.proprio_std
+        self.state_mean = self.dataset.state_mean
+        self.state_std = self.dataset.state_std
+        self.transform = self.dataset.transform
 
 
     def get_seq_length(self, idx: int) -> int:
@@ -139,8 +153,8 @@ def random_split_traj(
 def split_traj_datasets(dataset, train_fraction=0.95, random_seed=42):
     dataset_length = len(dataset)
     lengths = [
-        int(train_fraction * dataset_length),
-        dataset_length - int(train_fraction * dataset_length),
+        int(train_fraction * dataset_length) + 1,
+        dataset_length - int(train_fraction * dataset_length) - 1,
     ]
     train_set, val_set = random_split_traj(
         dataset, lengths, generator=torch.Generator().manual_seed(random_seed)
@@ -150,7 +164,7 @@ def split_traj_datasets(dataset, train_fraction=0.95, random_seed=42):
 
 def get_train_val_sliced(
     traj_dataset: TrajDataset,
-    train_fraction: float = 0.9,
+    train_fraction: float = 0.8,
     random_seed: int = 42,
     num_frames: int = 10,
     frameskip: int = 1,

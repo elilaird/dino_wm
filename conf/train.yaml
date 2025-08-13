@@ -6,7 +6,7 @@ defaults:
   - proprio_encoder: proprio
   - decoder: vqvae
   - predictor: vit
-  - override hydra/launcher: submitit_slurm
+  # - override hydra/launcher: submitit_slurm
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
 ckpt_base_path: /projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/checkpoints # put absolute path here
@@ -70,7 +70,7 @@ model:
   train_predictor: True
   train_decoder: True
 
-debug: True 
+debug: False 
 
 # Planning params for planning eval jobs launched during training
 plan_settings: 

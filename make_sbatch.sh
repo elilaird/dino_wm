@@ -16,36 +16,35 @@ fi
 GPU=${GPU:-1}
 CPUS=${CPUS:-128}
 MEM=${MEM:-96G}
-# CPUS=$((GPU * 8))  # 8 CPU cores per GPU
-# MEM="${MEM:-${$((GPU * 16))}G}"  # 16GB per GPU
 PY_ARGS="${@}"
-
-# Generate random port between 6000-6100
-# MASTER_PORT=$((6000 + RANDOM % 101))
 
 ENV_DIR=${ENV_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/envs"}
 PROJECT_DIR=${PROJECT_DIR:-"${HOME}/Projects/dino_wm"}
-# DATA_DIR=${DATA_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/data"}
 DATA_DIR=${DATA_DIR:-"/lustre/smuexa01/client/users/ejlaird/dino_wm_data"}
+MUJOCO_DIR=/users/ejlaird/.mujoco/mujoco210/bin
 
 if [ "${TYPE}" = "eval" ]; then
     PY_FILE="habitat_experiments/eval.py"
+elif [ "${TYPE}" = "plan" ]; then
+    PY_FILE="plan.py"
 elif [ "${TYPE}" = "train" ]; then
-    PY_FILE="train.py"
+    PY_FILE="train.py --config-name train.yaml"
 fi
 
 if [ "${TYPE}" = "jupyter" ]; then
     COMMAND="jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
 else
-    # Use torchrun for distributed training
+    # Use accelerate for distributed training
     if [ "${GPU}" -gt 1 ]; then
-        COMMAND="HYDRA_FULL_ERROR=1 DATASET_DIR=${DATA_DIR} torchrun --nproc_per_node=${GPU} ${PY_FILE} ${PY_ARGS}"
+        COMMAND="HYDRA_FULL_ERROR=1 DATASET_DIR=${DATA_DIR} accelerate launch --mixed_precision=bf16 --num_machines 1 --dynamo_backend no --num_processes=${GPU} ${PY_FILE} ${PY_ARGS}"
     else
         COMMAND="HYDRA_FULL_ERROR=1  DATASET_DIR=${DATA_DIR} python ${PY_FILE} ${PY_ARGS}"
     fi
 fi
 
 LOG_FILE="output/${TYPE}/${TYPE}_%j.out"
+
+echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TIME=${TIME} ./make_sbatch.sh ${COMMAND}"
 
 # write sbatch script
 echo "#!/usr/bin/env zsh
@@ -65,9 +64,10 @@ conda activate ${ENV_DIR}/dino_wm
 which python
 echo $CONDA_PREFIX
 
-echo "COMMAND: GPU: ${GPU} CPUS: ${CPUS} MEM: ${MEM} PARTITION: ${PARTITION} TIME: ${TIME} COMMAND: ${COMMAND}"
+echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TIME=${TIME} ./make_sbatch.sh ${COMMAND}"
 
 export DATA_DIR=${DATA_DIR}
+export MUJOCO_GL=egl
 
 srun bash -c \"${COMMAND}\"
 " > ${TYPE}_${DATETIME}.sbatch

@@ -1,5 +1,5 @@
 import os
-import gym
+import gymnasium as gym
 import json
 import hydra
 import random

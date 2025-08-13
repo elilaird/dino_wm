@@ -148,9 +148,10 @@ class Trainer:
             frameskip=self.cfg.frameskip,
         )
 
-        # print length of train and valid datasets
-        log.info(f"Train dataset length: {len(self.datasets['train'])}")
-        log.info(f"Valid dataset length: {len(self.datasets['valid'])}")
+        if self.accelerator.is_main_process:
+            # print length of train and valid datasets
+            log.info(f"Train dataset length: {len(self.datasets['train'])}")
+            log.info(f"Valid dataset length: {len(self.datasets['valid'])}")
 
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
@@ -158,18 +159,19 @@ class Trainer:
             x: torch.utils.data.DataLoader(
                 self.datasets[x],
                 batch_size=self.cfg.gpu_batch_size,
-                shuffle=False, # already shuffled in TrajSlicerDataset
+                shuffle=True, 
                 num_workers=self.cfg.num_workers // 2,
                 collate_fn=None,
                 pin_memory=True,
                 persistent_workers=True,
-                drop_last=True if x == "train" else False,
+                drop_last=True,
                 prefetch_factor=2,
             )
             for x in ["train", "valid"]
         }
 
-        log.info(f"dataloader batch size: {self.cfg.gpu_batch_size}")
+        if self.accelerator.is_main_process:
+            log.info(f"dataloader batch size: {self.cfg.gpu_batch_size}")
 
         self.dataloaders["train"], self.dataloaders["valid"] = self.accelerator.prepare(
             self.dataloaders["train"], self.dataloaders["valid"]
@@ -352,16 +354,16 @@ class Trainer:
             num_proprio_repeat=self.cfg.num_proprio_repeat,
         )
 
-        print(f"encoder device: {next(self.model.encoder.parameters()).device}")
-        if self.model.predictor is not None:
-            print(f"predictor device: {next(self.model.predictor.parameters()).device}")
-        if self.model.decoder is not None:
-            print(f"decoder device: {next(self.model.decoder.parameters()).device}")
-        if self.model.proprio_encoder is not None:
-            print(f"proprio_encoder device: {next(self.model.proprio_encoder.parameters()).device}")
-        if self.model.action_encoder is not None:
-            print(f"action_encoder device: {next(self.model.action_encoder.parameters()).device}")
-        print(f"model device: {next(self.model.parameters()).device}")
+        # print(f"encoder device: {next(self.model.encoder.parameters()).device}")
+        # if self.model.predictor is not None:
+        #     print(f"predictor device: {next(self.model.predictor.parameters()).device}")
+        # if self.model.decoder is not None:
+        #     print(f"decoder device: {next(self.model.decoder.parameters()).device}")
+        # if self.model.proprio_encoder is not None:
+        #     print(f"proprio_encoder device: {next(self.model.proprio_encoder.parameters()).device}")
+        # if self.model.action_encoder is not None:
+        #     print(f"action_encoder device: {next(self.model.action_encoder.parameters()).device}")
+        # print(f"model device: {next(self.model.parameters()).device}")
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
@@ -600,15 +602,17 @@ class Trainer:
                         }
                         self.logs_update(img_reconstruction_scores)
 
-                self.plot_samples(
-                    obs["visual"],
-                    visual_out,
-                    visual_reconstructed,
-                    self.epoch,
-                    batch=i,
-                    num_samples=self.num_reconstruct_samples,
-                    phase="train",
-                )
+                if self.accelerator.is_main_process:
+                    self.plot_samples(
+                        obs["visual"],
+                        visual_out,
+                        visual_reconstructed,
+                        self.epoch,
+                        batch=i,
+                        num_samples=self.num_reconstruct_samples,
+                        phase="train",
+                    )
+                self.accelerator.wait_for_everyone()
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
@@ -706,19 +710,22 @@ class Trainer:
                         }
                         self.logs_update(img_reconstruction_scores)
 
-                self.plot_samples(
-                    obs["visual"],
-                    visual_out,
-                    visual_reconstructed,
-                    self.epoch,
-                    batch=i,
-                    num_samples=self.num_reconstruct_samples,
-                    phase="valid",
-                )
+                if self.accelerator.is_main_process:
+                    self.plot_samples(
+                        obs["visual"],
+                        visual_out,
+                        visual_reconstructed,
+                        self.epoch,
+                        batch=i,
+                        num_samples=self.num_reconstruct_samples,
+                        phase="valid",
+                    )
+                self.accelerator.wait_for_everyone()
+
             loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
 
-            if self.cfg.has_predictor and i == 0:  # Log on first validation batch
+            if self.cfg.predictor == "additive_control_vit" and self.cfg.has_predictor and i == 0:  # Log on first validation batch
                 alpha_logs = self.get_alpha_values()
                 self.logs_update({f"val_{k}": [v] for k, v in alpha_logs.items()})
 
@@ -802,11 +809,13 @@ class Trainer:
                 if self.cfg.has_decoder:
                     visuals = self.model.decode_obs(z_obses)[0]["visual"]
                     imgs = torch.cat([obs["visual"], visuals[0].cpu()], dim=0)
-                    self.plot_imgs(
-                        imgs,
-                        obs["visual"].shape[0],
-                        f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}.png",
-                    )
+                    if self.accelerator.is_main_process:
+                        self.plot_imgs(
+                            imgs,
+                            obs["visual"].shape[0],
+                            f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}.png",
+                        )
+                    self.accelerator.wait_for_everyone()
         logs = {
             key: sum(values) / len(values) for key, values in logs.items() if values
         }
@@ -893,13 +902,11 @@ class Trainer:
 
         if self.accelerator.is_main_process:
             os.makedirs(phase, exist_ok=True)
-        self.accelerator.wait_for_everyone()
-
-        self.plot_imgs(
-            imgs,
-            num_columns=num_samples * num_frames,
-            img_name=f"{phase}/{phase}_e{str(epoch).zfill(5)}_b{batch}.png",
-        )
+            self.plot_imgs(
+                imgs,
+                num_columns=num_samples * num_frames,
+                img_name=f"{phase}/{phase}_e{str(epoch).zfill(5)}_b{batch}.png",
+            )
 
     def plot_imgs(self, imgs, num_columns, img_name):
         utils.save_image(
@@ -912,7 +919,7 @@ class Trainer:
 
     def get_alpha_values(self):
         """Get current alpha values from the additive control transformer"""
-        if self.cfg.has_predictor and hasattr(self.predictor, 'transformer'):
+        if hasattr(self.predictor, 'transformer') and hasattr(self.predictor.transformer, 'alphas'):
             alphas = {}
             for i, alpha in enumerate(self.predictor.transformer.alphas):
                 alphas[f"alpha_layer_{i}"] = alpha.item()
@@ -926,18 +933,6 @@ class Trainer:
 
 @hydra.main(config_path="conf", config_name="train")
 def main(cfg: OmegaConf):
-    # Print available devices information
-    world_size = torch.cuda.device_count()
-    if torch.cuda.is_available():
-        log.info(f"CUDA available: {torch.cuda.is_available()}")
-        log.info(f"CUDA device count: {world_size}")
-        for i in range(world_size):
-            log.info(f"CUDA device {i}: {torch.cuda.get_device_name(i)}")
-            log.info(f"  Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f} GB")
-    else:
-        log.info("CUDA not available, using CPU")
-
-    # Always run the trainer - torchrun will handle the distributed setup
     trainer = Trainer(cfg)
     trainer.run()
 

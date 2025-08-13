@@ -1,7 +1,7 @@
 # env import
-import gym
+import gymnasium as gym
 import einops
-from gym import spaces
+from gymnasium import spaces
 from pymunk.space_debug_draw_options import SpaceDebugColor
 from pymunk.vec2d import Vec2d
 from typing import Tuple, Sequence, Dict, Union, Optional

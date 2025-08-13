@@ -1,4 +1,4 @@
-from gym.envs.registration import register
+from gymnasium.envs.registration import register
 from .pointmaze import U_MAZE
 register(
     id="pusht",

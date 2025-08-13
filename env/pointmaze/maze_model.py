@@ -1,11 +1,11 @@
 """ A pointmass maze env."""
-from gym.envs.mujoco import mujoco_env
-from gym import utils
+from gymnasium.envs.mujoco import mujoco_env
+from gymnasium import utils
 from d4rl import offline_env
 from .dynamic_mjc import MJCModel
 import numpy as np
 import random
-import gym
+import gymnasium as gym
 
 WALL = 10
 EMPTY = 11
@@ -183,20 +183,26 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle, offline_env.OfflineEnv):
 
         self._target = np.array([0.0,0.0])
         self.return_value = return_value
-                
+
         model = point_maze(maze_spec)
+
+        # if self.return_value == "obs":
+        self.observation_space = gym.spaces.Box(
+            low=0, high=255, shape=(224, 224, 3), dtype=np.uint8
+        )
+
         with model.asfile() as f:
-            mujoco_env.MujocoEnv.__init__(self, model_path=f.name, frame_skip=5)
+            mujoco_env.MujocoEnv.__init__(self, model_path=f.name, frame_skip=5, observation_space=self.observation_space)
         utils.EzPickle.__init__(self)
-        
-        if self.return_value == 'obs':
-            self.observation_space = gym.spaces.Box(
-                low=0,               
-                high=255,           
-                shape=(224, 224, 3), 
-                dtype=np.uint8     
-            )
-            
+
+        # if self.return_value == 'obs':
+        #     self.observation_space = gym.spaces.Box(
+        #         low=0,
+        #         high=255,
+        #         shape=(224, 224, 3),
+        #         dtype=np.uint8
+        #     )
+
         # Set the default goal (overriden by a call to set_target)
         # Try to find a goal if it exists
         self.goal_locations = list(zip(*np.where(self.maze_arr == GOAL)))
@@ -208,11 +214,10 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle, offline_env.OfflineEnv):
             # If no goal, use the first empty tile
             self.set_target(np.array(self.reset_locations[0]).astype(self.observation_space.dtype))
         self.empty_and_goal_locations = self.reset_locations + self.goal_locations
-        
+
         self.seed()
         self.reset_to_state = None
-        
-            
+
     def step(self, action):
         action = np.clip(action, -1.0, 1.0)
         self.clip_velocity()
@@ -294,13 +299,13 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle, offline_env.OfflineEnv):
 
     def viewer_setup(self):
         pass
-    
+
     def set_init_state(self, init_state):
         self.reset_to_state = init_state
         target = init_state[-2:] if init_state is not None else None
         self.set_target(target) 
         self.set_marker()
-    
+
     def reset(self):
         self.sim.reset()
         self.set_init_state(self.reset_to_state)
@@ -324,18 +329,18 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle, offline_env.OfflineEnv):
             obs["visual"] = visual
         state = state[:4] if self.with_target else state
         return obs, state
-    
+
     def _render_frame(self):
         obs = self.sim.render(224, 224)
         return obs
-    
+
     def seed(self, seed=None):
         if seed is None:
             seed = np.random.randint(0, 25536)
         self._seed = seed
         self.np_random = np.random.default_rng(seed)
         self.random_state = np.random.RandomState(seed)
-        
+
     def prepare_for_render(self):
         self.return_value='obs'
         init_state = np.array([1.0856, 1.9746, 0.0098, 0.0217])
@@ -346,5 +351,3 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle, offline_env.OfflineEnv):
         self.sim.render_contexts[0].cam.elevation = -90
         img1 = self.sim.render(224, 224)
         return img, img1
-
-
