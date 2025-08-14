@@ -479,6 +479,7 @@ def planning_main(cfg_dict):
             ]
         )
 
+    print("Build workspace")
     plan_workspace = PlanWorkspace(
         cfg_dict=cfg_dict,
         wm=model,
@@ -489,6 +490,7 @@ def planning_main(cfg_dict):
         wandb_run=wandb_run,
     )
 
+    print("Perform planning")
     logs = plan_workspace.perform_planning()
     return logs
 

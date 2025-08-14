@@ -1,6 +1,6 @@
 import cloudpickle
 import ctypes
-import gym
+import gymnasium as gym
 import numpy as np
 import numpy as np
 import warnings
@@ -287,24 +287,40 @@ def _worker(
                 obs = env.set_init_state(data)
                 p.send(obs)
             elif cmd == "rollout":
-                env_return = env.rollout(data[0], data[1], data[2])
+                # Try unwrapped first, fall back to wrapped
+                try:
+                    env_return = env.unwrapped.rollout(data[0], data[1], data[2])
+                except AttributeError:
+                    env_return = env.rollout(data[0], data[1], data[2])
                 if obs_bufs is not None:
                     _encode_obs(env_return[0], obs_bufs)
                     env_return = (None, *env_return[1:])
                 p.send(env_return)
             elif cmd == "prepare":
-                obs, state_dct = env.prepare(data[0], data[1])
+                try:
+                    obs, state_dct = env.unwrapped.prepare(data[0], data[1])
+                except AttributeError:
+                    obs, state_dct = env.prepare(data[0], data[1])
                 if obs_bufs is not None:
                     _encode_obs(obs, obs_bufs)
                     obs = None
                 p.send((obs, state_dct))
             elif cmd == "sample_random_init_goal_states":
-                state = env.sample_random_init_goal_states(data)
+                try:
+                    state = env.unwrapped.sample_random_init_goal_states(data)
+                except AttributeError:
+                    state = env.sample_random_init_goal_states(data)
                 p.send(state)
             elif cmd == "eval_state":
-                p.send(env.eval_state(data[0], data[1])) 
+                try:
+                    p.send(env.unwrapped.eval_state(data[0], data[1]))
+                except AttributeError:
+                    p.send(env.eval_state(data[0], data[1]))
             elif cmd == "update_env":
-                p.send(env.update_env(data))
+                try:
+                    p.send(env.unwrapped.update_env(data))
+                except AttributeError:
+                    p.send(env.update_env(data))
             else:
                 p.close()
                 raise NotImplementedError

@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import gym
+import gymnasium as gym
 from env.pointmaze.maze_model import MazeEnv
 from utils import aggregate_dct
 

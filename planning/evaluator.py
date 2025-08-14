@@ -91,6 +91,7 @@ class PlanEvaluator:  # evaluator for planning
         Returns
             metrics, and feedback from env
         """
+        print("Evaluate actions")
         n_evals = actions.shape[0]
         if action_len is None:
             action_len = np.full(n_evals, np.inf)

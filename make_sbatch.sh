@@ -44,7 +44,7 @@ fi
 
 LOG_FILE="output/${TYPE}/${TYPE}_%j.out"
 
-echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TIME=${TIME} ./make_sbatch.sh ${COMMAND}"
+echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TIME=${TIME} TYPE=${TYPE} ./make_sbatch.sh ${COMMAND}"
 
 # write sbatch script
 echo "#!/usr/bin/env zsh
@@ -59,7 +59,7 @@ echo "#!/usr/bin/env zsh
 
 module purge
 module load conda
-conda activate ${ENV_DIR}/dino_wm
+conda activate ${ENV_DIR}/dino_clean
 
 which python
 echo $CONDA_PREFIX
@@ -67,8 +67,7 @@ echo $CONDA_PREFIX
 echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TIME=${TIME} ./make_sbatch.sh ${COMMAND}"
 
 export DATA_DIR=${DATA_DIR}
-export MUJOCO_GL=egl
-
+export LD_LIBRARY_PATH=/users/ejlaird/.mujoco/mujoco210/bin:$LD_LIBRARY_PATH
 srun bash -c \"${COMMAND}\"
 " > ${TYPE}_${DATETIME}.sbatch
 
