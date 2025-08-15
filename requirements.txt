@@ -1,0 +1,31 @@
+# Core ML/Deep Learning
+--find-links https://download.pytorch.org/whl/cu121
+torch
+torchvision
+accelerate
+einops
+numpy
+scipy
+
+# Configuration and Experiment Management
+hydra-core
+hydra-colorlog
+omegaconf
+wandb
+submitit
+
+
+mujoco
+gymnasium
+
+# Development and Debugging
+ipython
+ipdb
+jupyter-core
+jupytext
+
+# System and Environment
+setuptools
+wheel
+pip
+tqdm

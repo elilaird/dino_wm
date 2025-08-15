@@ -81,4 +81,4 @@ plan_settings:
   goal_H: [5]
   alpha: [0.1, 1]
 
-num_workers: 8
+num_workers: 5

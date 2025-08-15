@@ -1,6 +1,7 @@
 import os
 import time
 import hydra
+import psutil
 import torch
 import wandb
 import logging
@@ -9,23 +10,39 @@ import threading
 import itertools
 import numpy as np
 from tqdm import tqdm
+
+import multiprocessing as mp
+if mp.get_start_method(allow_none=True) != "spawn":
+    mp.set_start_method("spawn", force=True)
+
+
 from omegaconf import OmegaConf, open_dict
 from einops import rearrange
 from accelerate import Accelerator
 from torchvision import utils
-import torch.distributed as dist
 from pathlib import Path
 from collections import OrderedDict
-from hydra.types import RunMode
-from hydra.core.hydra_config import HydraConfig
-from datetime import timedelta
-from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
-import torch.multiprocessing as mp
+
+CTX = mp.get_context("spawn")
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
+
+def get_all_process_memory_mb():
+    """Return dict with current process memory and total across all children (in MB)."""
+    proc = psutil.Process(os.getpid())
+    mems = {}
+    
+    # Main process
+    mems['main_process_gb'] = proc.memory_info().rss / 1024**3
+    
+    # Child processes (e.g., dataloader workers, torchrun processes)
+    child_memories = [p.memory_info().rss for p in proc.children(recursive=True)]
+    mems['child_processes_gb'] = sum(child_memories) / 1024**3
+    mems['total_gb'] = mems['main_process_gb'] + mems['child_processes_gb']
+    return mems
 
 def get_memory_str():
     """Get current GPU memory usage (PyTorch view) as a string"""
@@ -80,7 +97,7 @@ class Trainer:
         cfg_dict = cfg_to_dict(cfg)
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
-        
+
         self.accelerator = Accelerator(log_with="wandb")
 
         log.info(
@@ -88,7 +105,7 @@ class Trainer:
         )
         self.device = self.accelerator.device
         log.info(f"device: {self.device}   model_name: {model_name}")
-        
+
         self.base_path = os.path.dirname(os.path.abspath(__file__))
 
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
@@ -155,16 +172,18 @@ class Trainer:
 
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
+        nw = max(1, self.cfg.num_workers - 1)
         self.dataloaders = {
             x: torch.utils.data.DataLoader(
                 self.datasets[x],
                 batch_size=self.cfg.gpu_batch_size,
-                shuffle=True, 
-                num_workers=self.cfg.num_workers // 2,
+                shuffle=False, 
+                num_workers=nw if x == "train" else 1,
                 collate_fn=None,
                 pin_memory=True,
-                persistent_workers=True,
-                drop_last=True,
+                # persistent_workers=True,
+                multiprocessing_context=CTX,
+                drop_last=True if x == "train" else False,
                 prefetch_factor=2,
             )
             for x in ["train", "valid"]
@@ -417,8 +436,8 @@ class Trainer:
             time.sleep(1)
 
     def run(self):
-        
-        if self.accelerator.is_main_process:
+
+        if self.cfg.plan_settings.plan_cfg_path is not None and self.accelerator.is_main_process:
             # executor = ThreadPoolExecutor(max_workers=4)
             self.job_set = set()
             lock = threading.Lock()
@@ -432,21 +451,27 @@ class Trainer:
         for epoch in range(init_epoch, init_epoch + self.total_epochs):
             self.epoch = epoch
             self.accelerator.wait_for_everyone()
-            
+
             # Start timing the epoch
             epoch_start_time = time.time()
-            
+
             self.train()
             self.accelerator.wait_for_everyone()
             self.val()
-            
+            # self.accelerator.wait_for_everyone()
+
             # Calculate epoch execution time
             epoch_time = time.time() - epoch_start_time
-            
+
+            # log process memory usage
+            mems = get_all_process_memory_mb()
+            mems_log = {f"mem_{k}": [v] for k, v in mems.items()}
+            self.logs_update(mems_log)
+
             # Add epoch time to logs before flashing
             epoch_time_log = {"epoch_time": [epoch_time]}
             self.logs_update(epoch_time_log)
-            
+
             self.logs_flash(step=self.epoch)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
@@ -513,18 +538,31 @@ class Trainer:
 
     def train(self):
 
-        # estimate memory usage per batch
-        torch.cuda.reset_peak_memory_stats()
-        obs, act, state = next(iter(self.dataloaders["train"]))
-        batch_mem = estimate_batch_memory_str(obs, act, state)
-        tqdm.write(f"Batch memory: {batch_mem}")
+        # # estimate memory usage per batch
+        # torch.cuda.reset_peak_memory_stats()
+        # obs, act, state = next(iter(self.dataloaders["train"]))
+        # batch_mem = estimate_batch_memory_str(obs, act, state)
+        # tqdm.write(f"Batch memory: {batch_mem}")
 
+        steps = 0
+        prev_time = time.perf_counter()
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
+            # A) Input staging time (loader + Accelerate's device placement)
+            # t0 = time.perf_counter()
+            # data_time = t0 - prev_time
 
             obs, act, state = data
-            
+            steps += 1
+            # local_bs = obs['visual'].shape[0]
+
+            # B) Compute timing with CUDA events (precise)
+            # start = torch.cuda.Event(enable_timing=True)
+            # end = torch.cuda.Event(enable_timing=True)
+            # torch.cuda.synchronize(self.accelerator.device)
+            # start.record()
+
             plot = i == 0  # only plot from the first batch
             self.model.train()
             z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
@@ -554,6 +592,15 @@ class Trainer:
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
+
+            # end.record()
+            # torch.cuda.synchronize(self.accelerator.device)
+            # compute_ms = start.elapsed_time(end)
+
+            # if i < 30 or i % 100 == 0:
+            #     tqdm.write(f"[rank {self.accelerator.process_index}] i={i} bs={local_bs} "
+            #             f"data={data_time:.3f}s compute={compute_ms/1e3:.3f}s")
+                
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
@@ -612,7 +659,7 @@ class Trainer:
                         num_samples=self.num_reconstruct_samples,
                         phase="train",
                     )
-                self.accelerator.wait_for_everyone()
+                # self.accelerator.wait_for_everyone()
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
@@ -620,6 +667,8 @@ class Trainer:
             if self.cfg.has_predictor and i % 100 == 0:  # Log every 100 batches
                 alpha_logs = self.get_alpha_values()
                 self.logs_update({f"train_{k}": [v] for k, v in alpha_logs.items()})
+            
+            prev_time = time.perf_counter()
 
     def val(self):
         self.model.eval()
@@ -643,12 +692,12 @@ class Trainer:
             tqdm(self.dataloaders["valid"], desc=f"Epoch {self.epoch} Valid")
         ):
             obs, act, state = data
-            
-            # Update progress bar description with memory info
-            if i == 0:  # Update memory info on first batch
-                gpu_mem = get_memory_str()
-                batch_mem = estimate_batch_memory_str(obs, act, state)
-                tqdm.write(f"Epoch {self.epoch} Valid - {gpu_mem} {batch_mem}")
+
+            # # Update progress bar description with memory info
+            # if i == 0:  # Update memory info on first batch
+            #     gpu_mem = get_memory_str()
+            #     batch_mem = estimate_batch_memory_str(obs, act, state)
+            #     tqdm.write(f"Epoch {self.epoch} Valid - {gpu_mem} {batch_mem}")
             plot = i == 0
             self.model.eval()
             z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
@@ -710,17 +759,15 @@ class Trainer:
                         }
                         self.logs_update(img_reconstruction_scores)
 
-                if self.accelerator.is_main_process:
-                    self.plot_samples(
-                        obs["visual"],
-                        visual_out,
-                        visual_reconstructed,
-                        self.epoch,
-                        batch=i,
-                        num_samples=self.num_reconstruct_samples,
-                        phase="valid",
-                    )
-                self.accelerator.wait_for_everyone()
+                self.plot_samples(
+                    obs["visual"],
+                    visual_out,
+                    visual_reconstructed,
+                    self.epoch,
+                    batch=i,
+                    num_samples=self.num_reconstruct_samples,
+                    phase="valid",
+                )
 
             loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
@@ -815,7 +862,7 @@ class Trainer:
                             obs["visual"].shape[0],
                             f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}.png",
                         )
-                    self.accelerator.wait_for_everyone()
+                    # self.accelerator.wait_for_everyone()
         logs = {
             key: sum(values) / len(values) for key, values in logs.items() if values
         }
@@ -839,12 +886,12 @@ class Trainer:
             to_log = sum / count
             epoch_log[key] = to_log
         epoch_log["epoch"] = step
-        
+
         # Add epoch time to the log message if available
         epoch_time_msg = ""
         if "epoch_time" in epoch_log:
             epoch_time_msg = f"  Epoch time: {epoch_log['epoch_time']:.2f}s"
-        
+
         log.info(f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
                 Validation loss: {epoch_log['val_loss']:.4f}{epoch_time_msg}")
 
