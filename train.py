@@ -241,6 +241,7 @@ class Trainer:
                     ckpt[k] = self.accelerator.unwrap_model(self.__dict__[k])
                 else:
                     ckpt[k] = self.__dict__[k]
+               
             torch.save(ckpt, "checkpoints/model_latest.pth")
             torch.save(ckpt, f"checkpoints/model_{self.epoch}.pth")
             log.info("Saved model to {}".format(os.getcwd()))
@@ -260,7 +261,9 @@ class Trainer:
             log.warning("Keys not found in ckpt: %s", not_in_ckpt)
 
     def init_models(self):
-        model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
+        model_ckpt = (
+            Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
+        )
         if model_ckpt.exists():
             self.load_ckpt(model_ckpt)
             log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
@@ -281,7 +284,7 @@ class Trainer:
         )
         proprio_emb_dim = self.proprio_encoder.emb_dim
         print(f"Proprio encoder type: {type(self.proprio_encoder)}")
-        self.proprio_encoder = self.accelerator.prepare(self.proprio_encoder)
+        # self.proprio_encoder = self.accelerator.prepare(self.proprio_encoder)
 
         self.action_encoder = hydra.utils.instantiate(
             self.cfg.action_encoder,
@@ -291,7 +294,7 @@ class Trainer:
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
 
-        self.action_encoder = self.accelerator.prepare(self.action_encoder)
+        # self.action_encoder = self.accelerator.prepare(self.action_encoder)
 
         if self.accelerator.is_main_process:
             self.wandb_run.watch(self.action_encoder)
@@ -346,18 +349,23 @@ class Trainer:
             if not self.train_decoder:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
-        self.encoder, self.predictor, self.decoder = self.accelerator.prepare(
-            self.encoder, self.predictor, self.decoder
+
+        self.encoder, self.predictor, self.decoder, self.proprio_encoder, self.action_encoder = self.accelerator.prepare(
+            self.encoder, self.predictor, self.decoder, self.proprio_encoder, self.action_encoder
         )
 
-        # Add compilation for speed improvements
-        if hasattr(torch, 'compile'):
-            self.encoder = torch.compile(self.encoder, mode="reduce-overhead")
-            if self.predictor is not None:
-                self.predictor = torch.compile(self.predictor, mode="reduce-overhead")
-            if self.decoder is not None:
-                self.decoder = torch.compile(self.decoder, mode="reduce-overhead")
-            log.info("Compiled models for speed improvements")
+        # # Add compilation for speed improvements
+        # if hasattr(torch, "compile"):
+        #     self.encoder = torch.compile(self.encoder, mode="reduce-overhead")
+        #     if self.predictor is not None:
+        #         self.predictor = torch.compile(
+        #             self.predictor, mode="reduce-overhead"
+        #         )
+        #     if self.decoder is not None:
+        #         self.decoder = torch.compile(
+        #             self.decoder, mode="reduce-overhead"
+        #         )
+        #     log.info("Compiled models for speed improvements")
 
         self.model = hydra.utils.instantiate(
             self.cfg.model,
@@ -372,17 +380,6 @@ class Trainer:
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
         )
-
-        # print(f"encoder device: {next(self.model.encoder.parameters()).device}")
-        # if self.model.predictor is not None:
-        #     print(f"predictor device: {next(self.model.predictor.parameters()).device}")
-        # if self.model.decoder is not None:
-        #     print(f"decoder device: {next(self.model.decoder.parameters()).device}")
-        # if self.model.proprio_encoder is not None:
-        #     print(f"proprio_encoder device: {next(self.model.proprio_encoder.parameters()).device}")
-        # if self.model.action_encoder is not None:
-        #     print(f"action_encoder device: {next(self.model.action_encoder.parameters()).device}")
-        # print(f"model device: {next(self.model.parameters()).device}")
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
@@ -458,7 +455,7 @@ class Trainer:
             self.train()
             self.accelerator.wait_for_everyone()
             self.val()
-            # self.accelerator.wait_for_everyone()
+            self.accelerator.wait_for_everyone()
 
             # Calculate epoch execution time
             epoch_time = time.time() - epoch_start_time
@@ -503,6 +500,7 @@ class Trainer:
                     )
                     with lock:
                         self.job_set.update(jobs)
+
 
     def err_eval_single(self, z_pred, z_tgt):
         logs = {}
@@ -550,18 +548,18 @@ class Trainer:
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
             # A) Input staging time (loader + Accelerate's device placement)
-            # t0 = time.perf_counter()
-            # data_time = t0 - prev_time
+            t0 = time.perf_counter()
+            data_time = t0 - prev_time
 
             obs, act, state = data
             steps += 1
-            # local_bs = obs['visual'].shape[0]
+            local_bs = obs['visual'].shape[0]
 
             # B) Compute timing with CUDA events (precise)
-            # start = torch.cuda.Event(enable_timing=True)
-            # end = torch.cuda.Event(enable_timing=True)
-            # torch.cuda.synchronize(self.accelerator.device)
-            # start.record()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            torch.cuda.synchronize(self.accelerator.device)
+            start.record()
 
             plot = i == 0  # only plot from the first batch
             self.model.train()
@@ -593,14 +591,14 @@ class Trainer:
                 key: value.mean().item() for key, value in loss_components.items()
             }
 
-            # end.record()
-            # torch.cuda.synchronize(self.accelerator.device)
-            # compute_ms = start.elapsed_time(end)
+            end.record()
+            torch.cuda.synchronize(self.accelerator.device)
+            compute_ms = start.elapsed_time(end)
 
-            # if i < 30 or i % 100 == 0:
-            #     tqdm.write(f"[rank {self.accelerator.process_index}] i={i} bs={local_bs} "
-            #             f"data={data_time:.3f}s compute={compute_ms/1e3:.3f}s")
-                
+            if i < 30 or i % 100 == 0:
+                tqdm.write(f"[rank {self.accelerator.process_index}] i={i} bs={local_bs} "
+                        f"data={data_time:.3f}s compute={compute_ms/1e3:.3f}s")
+
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
@@ -667,7 +665,7 @@ class Trainer:
             if self.cfg.has_predictor and i % 100 == 0:  # Log every 100 batches
                 alpha_logs = self.get_alpha_values()
                 self.logs_update({f"train_{k}": [v] for k, v in alpha_logs.items()})
-            
+
             prev_time = time.perf_counter()
 
     def val(self):
