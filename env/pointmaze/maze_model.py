@@ -157,6 +157,57 @@ OPEN = \
         "#######"
 
 
+DEFAULT_CAMERA_CONFIG_LOOKUP = {
+    U_MAZE: {
+        "azimuth": 90,
+        "elevation": -90,
+        "distance": 10.0,
+        "lookat": [3, 3, 0],
+    },
+    MEDIUM_MAZE: {
+        "azimuth": 90,
+        "elevation": -90,
+        "distance": 11.0,
+        "lookat": [4.5, 4.5, 2],
+    },
+    LARGE_MAZE: {
+        "azimuth": 90,
+        "elevation": -90,
+        "distance": 11.0,
+        "lookat": [5, 6.5, 5],
+    },
+    U_MAZE_EVAL: {
+        "azimuth": 90,
+        "elevation": -90,
+        "distance": 10.0,
+        "lookat": [3, 3, 0],
+    },
+    MEDIUM_MAZE_EVAL: {
+        "azimuth": 90,
+        "elevation": -90,
+        "distance": 11.0,
+        "lookat": [4.5, 4.5, 2],
+    },
+    LARGE_MAZE_EVAL: {
+        "azimuth": 90,
+        "elevation": -90,
+        "distance": 11.0,
+        "lookat": [5, 6.5, 5],
+    },
+    OPEN: {
+        "azimuth": 90,
+        "elevation": -90,
+        "distance": 11.0,
+        "lookat": [3, 4, 0],
+    },
+    SMALL_MAZE: {
+        "azimuth": 90,
+        "elevation": -90,
+        "distance": 11.0,
+        "lookat": [3, 3.5, 0],
+    },
+}
+
 STATE_RANGES = np.array([
     [0.39318362, 3.2198412],  # Range for first dimension
     [0.62660956, 3.2187355],  # Range for second dimension
@@ -196,12 +247,7 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         )
 
         # Configure camera settings for top-down view
-        default_camera_config = {
-            "azimuth": 90,
-            "elevation": -90,
-            "distance": 10.0,
-            "lookat": [0, 0, 0]
-        }
+        camera_config = DEFAULT_CAMERA_CONFIG_LOOKUP[maze_spec]
 
         with model.asfile() as f:
             mujoco_env.MujocoEnv.__init__(
@@ -212,7 +258,7 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle):
                 width=224,
                 height=224,
                 render_mode="rgb_array",
-                default_camera_config=default_camera_config
+                default_camera_config=camera_config
             )
         utils.EzPickle.__init__(self)
 
