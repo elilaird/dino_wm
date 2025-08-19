@@ -20,6 +20,14 @@ def generate_mask_matrix(npatch, nwindow):
     mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
     return mask
 
+def generate_sliding_window_mask(seq_len, window_size):
+    """Generate mask for sliding window attention"""
+    mask = torch.zeros(seq_len, seq_len)
+    for i in range(seq_len):
+        start = max(0, i - window_size + 1)
+        mask[i, start:i+1] = 1
+    return mask.unsqueeze(0).unsqueeze(0)
+
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout = 0.):
         super().__init__()
@@ -82,6 +90,50 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
+class SlidingWindowAttention(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, window_size=8, dropout=0.):
+        super().__init__()
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == dim)
+
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        self.window_size = window_size
+
+        self.norm = nn.LayerNorm(dim)
+
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        ) if project_out else nn.Identity()
+
+    def forward(self, x):
+        B, T, C = x.size()
+
+        x = self.norm(x)
+
+        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), qkv)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+
+        # Apply sliding window mask
+        if T > self.window_size:
+            mask = generate_sliding_window_mask(T, self.window_size).to(x.device)
+            dots = dots.masked_fill(mask == 0, float("-inf"))
+
+        attn = self.attend(dots)
+        attn = self.dropout(attn)
+
+        out = torch.matmul(attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
 class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
         super().__init__()
@@ -100,8 +152,125 @@ class Transformer(nn.Module):
 
         return self.norm(x)
 
+class SlidingWindowTransformer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, window_size=8, dropout=0.):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                SlidingWindowAttention(dim, heads=heads, dim_head=dim_head, window_size=window_size, dropout=dropout),
+                FeedForward(dim, mlp_dim, dropout=dropout)
+            ]))
+
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+
+        return self.norm(x)
+
 class ViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0., n_persist=0):
+    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
+        super().__init__()
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames # + n_persist
+        NUM_PATCHES = num_patches
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * (num_patches), dim)) # dim for the pos encodings
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.pool = pool
+        # self.n_persist = n_persist
+        # if n_persist > 0:
+        #     self.persistent_tokens = nn.Parameter(torch.randn(1, n_persist, dim))
+        # else:
+        #     self.persistent_tokens = None
+
+    def forward(self, x): # x: (b, window_size * H/patch_size * W/patch_size, 384)
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x) 
+
+        # # add persistent tokens
+        # if self.persistent_tokens is not None:
+        #     x = torch.cat([self.persistent_tokens.repeat(b, 1, 1), x], dim=1)
+
+        x = self.transformer(x)  
+
+        # # drop persistent tokens
+        # if self.persistent_tokens is not None:
+        #     x = x[:, self.n_persist:, :]
+        return x
+
+
+class ViTPredictorWithPersistentTokens(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        pool="cls",
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+        n_persist=0
+    ):
+        super().__init__()
+        assert pool in {
+            "cls",
+            "mean",
+        }, "pool type must be either cls (cls token) or mean (mean pooling)"
+
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames + n_persist
+        NUM_PATCHES = num_patches
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * (num_patches), dim)
+        )  # dim for the pos encodings
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = Transformer(
+            dim, depth, heads, dim_head, mlp_dim, dropout
+        )
+        self.pool = pool
+        self.n_persist = n_persist
+        if n_persist > 0:
+            self.persistent_tokens = nn.Parameter(
+                torch.randn(1, n_persist, dim)
+            )
+        else:
+            self.persistent_tokens = None
+
+    def forward(
+        self, x
+    ):  # x: (b, window_size * H/patch_size * W/patch_size, 384)
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+
+        # add persistent tokens
+        if self.persistent_tokens is not None:
+            x = torch.cat([self.persistent_tokens.repeat(b, 1, 1), x], dim=1)
+
+        x = self.transformer(x)
+
+        # drop persistent tokens
+        if self.persistent_tokens is not None:
+            x = x[:, self.n_persist :, :]
+        return x
+
+
+class SlidingWindowViTPredictor(nn.Module):
+    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0., n_persist=0, window_size=8):
         super().__init__()
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
         
@@ -110,9 +279,9 @@ class ViTPredictor(nn.Module):
         NUM_FRAMES = num_frames + n_persist
         NUM_PATCHES = num_patches
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * (num_patches), dim)) # dim for the pos encodings
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * (num_patches), dim))
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.transformer = SlidingWindowTransformer(dim, depth, heads, dim_head, mlp_dim, window_size, dropout)
         self.pool = pool
         self.n_persist = n_persist
         if n_persist > 0:
@@ -120,7 +289,7 @@ class ViTPredictor(nn.Module):
         else:
             self.persistent_tokens = None
 
-    def forward(self, x): # x: (b, window_size * H/patch_size * W/patch_size, 384)
+    def forward(self, x):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x) 

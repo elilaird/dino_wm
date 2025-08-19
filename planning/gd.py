@@ -98,6 +98,33 @@ class GDPlanner(BasePlanner):
             loss = self.objective_fn(i_z_obses, z_obs_g_detached)  # (n_evals, )
             total_loss = loss.mean() * n_evals  # loss for each eval is independent
             total_loss.backward()
+            
+            # Monitor gradients for vanishing/exploding gradients
+            if actions.grad is not None:
+                grad_norm = actions.grad.norm()
+                grad_max = actions.grad.abs().max()
+                grad_mean = actions.grad.abs().mean()
+                grad_std = actions.grad.std()
+                
+                # Check for vanishing gradients (very small gradients)
+                vanishing_threshold = 1e-8
+                is_vanishing = grad_norm < vanishing_threshold
+                
+                # Check for exploding gradients (very large gradients)
+                exploding_threshold = 1e3
+                is_exploding = grad_norm > exploding_threshold
+                
+                # Log gradient statistics
+                grad_logs = {
+                    f"{self.logging_prefix}/grad_norm": grad_norm.item(),
+                    f"{self.logging_prefix}/grad_max": grad_max.item(),
+                    f"{self.logging_prefix}/grad_mean": grad_mean.item(),
+                    f"{self.logging_prefix}/grad_std": grad_std.item(),
+                    f"{self.logging_prefix}/grad_vanishing": is_vanishing,
+                    f"{self.logging_prefix}/grad_exploding": is_exploding,
+                }
+                self.wandb_run.log(grad_logs)
+            
             with torch.no_grad():
                 actions_new = actions - optimizer.param_groups[0]["lr"] * actions.grad
                 actions_new += (

@@ -9,14 +9,17 @@ TIME=${TIME:-2-00:00:00}
 PARTITION=${PARTITION:-batch}
 TYPE=${TYPE:-train} # jupyter, eval, test
 
-if [ "${PARTITION}" = "short" ]; then
-    TIME="0-04:00:00"
-fi
+
 
 GPU=${GPU:-1}
 CPUS=${CPUS:-128}
 MEM=${MEM:-96G}
 PY_ARGS="${@}"
+
+if [ "${PARTITION}" = "short" ]; then
+    TIME="0-04:00:00"
+    CPUS=16
+fi
 
 ENV_DIR=${ENV_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/envs"}
 PROJECT_DIR=${PROJECT_DIR:-"${HOME}/Projects/dino_wm"}

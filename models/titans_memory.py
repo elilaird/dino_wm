@@ -4,130 +4,141 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple, Optional
 from einops import rearrange, repeat
+from .vit import Attention, FeedForward
 
-class TitansMemory(nn.Module):
-    """
-    Per-sequence memory: y = W q, with inner-loop update on each step:
-      W_t = (1 - alpha)*W_{t-1} + momentum - lr * grad_{W} ||W k_t - v_t||^2
-    Vectorized across the batch. Reset between sequences.
-    """
-    def __init__(self, d_k: int, d_v: int, alpha: float = 0.02, lr: float = 0.1, beta: float = 0.9):
+
+class DeepMemory(nn.Module):
+    def __init__(self, dim, num_layers, hidden_dim, alpha, theta, eta, from_base=True):
         super().__init__()
-        self.d_k, self.d_v = d_k, d_v
-        self.alpha = alpha  # forget
-        self.lr = lr        # inner-loop step size
-        self.beta = beta    # momentum
+        self.dim = dim
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
+        self.alpha = alpha
+        self.theta = theta
+        self.eta = eta
+        self.act = nn.SiLU()
+        self.from_base = from_base
+        
+        self.base_layers = nn.ModuleList([])
+        for i in range(num_layers):
+            if i == 0:
+                self.base_layers.append(nn.Linear(dim, hidden_dim))
+            elif i == num_layers - 1:
+                self.base_layers.append(nn.Linear(hidden_dim, dim))
+            else:
+                self.base_layers.append(nn.Linear(hidden_dim, hidden_dim))
 
-    def reset(self, B: int, device=None, dtype=None):
-        self.W = torch.zeros(B, self.d_v, self.d_k, device=device, dtype=dtype)
-        self.m = torch.zeros_like(self.W)  # momentum buffer
+        # register buffer for fast update weights based on base layer weights
+        for i, layer in enumerate(self.base_layers):
+            self.register_buffer(
+                f"Memory_W_{i}_fast", layer.weight.data.detach().clone()
+            )
+            self.register_buffer(
+                f"Memory_b_{i}_fast", layer.bias.data.detach().clone()
+            )
+            self.register_buffer(
+                f"Momentum_W_{i}_fast", layer.weight.data.detach().clone()
+            )
+            self.register_buffer(
+                f"Momentum_b_{i}_fast", layer.bias.data.detach().clone()
+            )
 
-    def read(self, q: Tensor) -> Tensor:
-        # q: [B, L, d_k]
-        return torch.einsum('bvk,blk->blv', self.W, q)  # [B, L, d_v]
+    @torch.no_grad()
+    def reset_weights(self):
+        for i, layer in enumerate(self.base_layers):
+            W = getattr(self, f"Memory_W_{i}_fast")
+            b = getattr(self, f"Memory_b_{i}_fast")
+            M = getattr(self, f"Momentum_W_{i}_fast")
+            m = getattr(self, f"Momentum_b_{i}_fast")
+            if self.from_base:
+                W.copy_(layer.weight.data)
+                b.copy_(layer.bias.data)
+            else:
+                W.zero_()
+                b.zero_()
+            M.zero_()
+            m.zero_()
 
-    def update_step(self, k: Tensor, v: Tensor):
-        """
-        One online step given the *current* (k, v).
-        k: [B, d_k], v: [B, d_v]
-        Loss: ||W k - v||^2 (per batch item)
-        grad_W = 2 * (Wk - v) k^T
-        """
-        Wk = torch.einsum('bvk,bk->bv', self.W, k)              # [B, d_v]
-        resid = (Wk - v)                                        # [B, d_v]
-        grad = 2.0 * torch.einsum('bv,bk->bvk', resid, k)       # [B, d_v, d_k]
+    def fast_params(self):
+        params = []
+        for i, _ in enumerate(self.base_layers):
+            params.append(
+                (
+                    getattr(self, f"Memory_W_{i}_fast"),
+                    getattr(self, f"Memory_b_{i}_fast"),
+                )
+            )
+        return params
 
-        # Momentum + forget (all ops are differentiable; no .data/.detach here)
-        self.m = self.beta * self.m + (1 - self.beta) * grad
-        self.W = (1.0 - self.alpha) * self.W - self.lr * self.m
+    def fast_params_flattened(self):
+        params = []
+        for i in range(self.num_layers):
+            params.extend(
+                (
+                    getattr(self, f"Memory_W_{i}_fast"),
+                    getattr(self, f"Memory_b_{i}_fast"),
+                )
+            )
+        return params
 
-    def update_window(self, K: Tensor, V: Tensor, n_inner: int = 1):
-        """
-        K: [B, C, d_k], V: [B, C, d_v] for a window/chunk of length C.
-        Loss: ||W K^T - V^T||_F^2 (batched)
-        grad_W = 2 * (W K^T - V^T) K  (properly batched)
-        We can take a few inner steps (n_inner) if desired.
-        """
-        for _ in range(n_inner):
-            # [B, d_v, C] = [B, d_v, d_k] @ [B, d_k, C]
-            K_t = K.transpose(1, 2)                 # [B, d_k, C]
-            VK = torch.einsum('bvk,bkc->bvc', self.W, K_t)  # [B, d_v, C]
-            V_t = V.transpose(1, 2)                 # [B, d_v, C]
-            E = (VK - V_t)                          # [B, d_v, C]
+    def moments_flattened(self):
+        params = []
+        for i in range(self.num_layers):
+            params.extend(
+                (
+                    getattr(self, f"Momentum_W_{i}_fast"),
+                    getattr(self, f"Momentum_b_{i}_fast"),
+                )
+            )
+        return params
 
-            # grad = 2 * E @ K^T  -> [B, d_v, d_k]
-            grad = 2.0 * torch.einsum('bvc,bck->bvk', E, K)  # [B, d_v, d_k]
-
-            # Simple gradient descent (omit momentum/forget for window updates)
-            self.W = self.W - self.lr * grad
-
-
-class KVQProj(nn.Module):
-    """Key/Value/Query projections for memory"""
-    def __init__(self, d_in: int, d_k: int, d_v: int):
-        super().__init__()
-        self.k = nn.Linear(d_in, d_k)
-        self.v = nn.Linear(d_in, d_v)
-        self.q = nn.Linear(d_in, d_k)
-
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
-        return self.k(x), self.v(x), self.q(x)  # [B, L, d_k/d_v]
-
-
-class FeedForward(nn.Module):
-    """Feed-forward network for transformer blocks"""
-    def __init__(self, dim, hidden_dim, dropout=0.):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, dim),
-            nn.Dropout(dropout)
-        )
+    def base_params(self):
+        params = []
+        for _, layer in enumerate(self.base_layers):
+            params.append((layer.weight, layer.bias))
+        return params
 
     def forward(self, x):
-        return self.net(x)
+        for i, (W, b) in enumerate(self.fast_params()):
+            x = x @ W.t() + b
+            if i < self.num_layers - 1:
+                x = self.act(x)
+        return x
 
+    def read(self, x):
+        return self.forward(x)
 
-class Attention(nn.Module):
-    """Standard multi-head attention"""
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.):
-        super().__init__()
-        inner_dim = dim_head * heads
-        project_out = not (heads == 1 and dim_head == dim)
+    def _loss(self, k, v):
+        return torch.mean((self.forward(k) - v) ** 2)
 
-        self.heads = heads
-        self.scale = dim_head ** -0.5
+    def write(self, k, v):
+        k = k.detach()
+        v = v.detach()
+        weights = []
 
-        self.norm = nn.LayerNorm(dim)
-        self.attend = nn.Softmax(dim=-1)
-        self.dropout = nn.Dropout(dropout)
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, dim),
-            nn.Dropout(dropout)
-        ) if project_out else nn.Identity()
+        for w in self.fast_params_flattened():
+            w.requires_grad_(True)
+            weights.append(w)
 
-    def forward(self, x, mask=None):
-        B, T, C = x.size()
-        x = self.norm(x)
+        loss = self._loss(k, v)
+        grads = torch.autograd.grad(
+            loss, weights, retain_graph=False, create_graph=False
+        )
 
-        qkv = self.to_qkv(x).chunk(3, dim=-1)
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), qkv)
+        # turn off gradients
+        for w in weights:
+            w.requires_grad_(False)
+        for s in self.moments_flattened():
+            s.requires_grad_(False)
 
-        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-        
-        if mask is not None:
-            dots = dots.masked_fill(mask == 0, float("-inf"))
+        for w, grad, s in zip(weights, grads, self.moments_flattened()):
+            # surprise momentum update
+            s.mul_(self.eta).add_(grad, alpha=-self.theta)
 
-        attn = self.attend(dots)
-        attn = self.dropout(attn)
+            # forget + surprise step
+            w.mul_(1 - self.alpha).add_(s)
 
-        out = torch.matmul(attn, v)
-        out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.to_out(out)
+        return loss
 
 
 # ============================================================================
@@ -139,48 +150,79 @@ class MACBlock(nn.Module):
     Memory-as-Context: concatenate memory readout as extra tokens in each segment,
     then apply full causal attention within the segment.
     """
-    def __init__(self, dim, heads, dim_head, mlp_dim, d_k, d_v, n_persist=16, 
-                 alpha=0.02, lr=0.1, beta=0.9, dropout=0.):
+    def __init__(self, dim, heads, mem_layers, mem_hidden_dim, ff_mlp_dim, chunk_size,n_persist=16, 
+                 alpha=0.02, theta=0.1, eta=0.9, dropout=0., from_base=True):
         super().__init__()
-        self.mem = TitansMemory(d_k, d_v, alpha, lr, beta)
-        self.proj = KVQProj(dim, d_k, d_v)
-        self.attn = Attention(dim, heads, dim_head, dropout)
-        self.ff = FeedForward(dim, mlp_dim, dropout)
+
+        self.chunk_size = chunk_size
+
+        # Memory-as-Context
+        self.mem = DeepMemory(dim, mem_layers, mem_hidden_dim, alpha, theta, eta, from_base)
+        self.to_qkv = nn.Linear(dim, dim * 3, bias = False)
+        self.theta = nn.Parameter(torch.tensor(theta)) # surprise gradient step size
+        self.eta = nn.Parameter(torch.tensor(eta)) # surprise decay
+        self.alpha = nn.Parameter(torch.tensor(alpha)) # forget weight
+
+        # Core
+        self.attn = Attention(dim, heads, dropout=dropout)
+        self.ff = FeedForward(dim, ff_mlp_dim, dropout)
+
+        # Persistent tokens
         self.P = nn.Parameter(torch.randn(1, n_persist, dim))  # persistent tokens
-        self.out = nn.Linear(d_v, dim)  # memory→token projection
-        self.n_persist = n_persist
+        self.n_persist = n_persist    
+
+    def reset_memory(self):
+        self.mem.reset_weights()
 
     def forward(self, x):
         """
         x: [B, T, dim] - one segment/chunk
         """
         B, T, _ = x.shape
-        if not hasattr(self.mem, "W"):
-            self.mem.reset(B, x.device, x.dtype)
+        assert T % self.chunk_size == 0, "Chunk size must divide sequence length"
+        
+        # reset memory for batch
+        self.reset_memory()
 
-        K, V, Q = self.proj(x)  # [B, T, d_k/d_v]
-        
+        # inner loop (train memory on sequence)
+        memory_tokens = []
+        for chunk_idx in range(0, T, self.chunk_size):
+            chunk = x[:, chunk_idx:chunk_idx + self.chunk_size, :]
+            Q_c, K_c, V_c = self.to_qkv(chunk).chunk(3, dim = -1)
+            
+            token = self.mem.read(Q_c)
+            
+
+
+            # memory gate
+            chunk = chunk * self.mem.read(new_Q)
+        Q, K, V = self.to_qkv(x).chunk(3, dim = -1)
+
         # Read memory and create summary token
-        h = self.mem.read(Q).mean(dim=1, keepdim=True)  # [B, 1, d_v]
-        memory_token = self.out(h)  # [B, 1, dim]
-        
+        memory_token = self.mem.read(Q)
+
         # Concatenate: persistent + memory + current segment
         tokens = torch.cat([
             self.P.repeat(B, 1, 1),      # persistent tokens
             memory_token,                 # memory token
             x                             # current segment
         ], dim=1)  # [B, n_persist + 1 + T, dim]
-        
+
         # Apply attention
         y = self.attn(tokens)
         y = self.ff(y)
-        
+
         # Return only the positions corresponding to the original segment
         out = y[:, self.n_persist + 1:, :]  # drop persistent + memory tokens
-        
+
         # Update memory
-        self.mem.update_window(K, V)
-        
+        new_qkv = self.to_qkv(y)
+        new_K, new_V, new_Q = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), new_qkv)
+        self.mem.update_step(new_K, new_V)
+
+        # memory gate
+        out = y * self.mem.read(new_Q)
+
         return out
 
 

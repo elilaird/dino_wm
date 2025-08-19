@@ -1,5 +1,6 @@
 defaults:
   - _self_
+  - planner: mpc_cem
   # - override hydra/launcher: submitit_slurm
 
 base_path: /projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/
