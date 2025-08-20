@@ -127,6 +127,70 @@ class TrajSlicerDataset(TrajDataset):
     #         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
 
+class TrajFullSequenceDataset(TrajDataset):
+    def __init__(
+        self,
+        dataset: TrajDataset,
+        frameskip: int = 1,
+        process_actions: str = "concat",
+        min_seq_length: int = 10,  # minimum sequence length to include
+    ):
+        self.dataset = dataset
+        self.frameskip = frameskip
+        self.min_seq_length = min_seq_length
+        
+        # Filter sequences that are long enough after frameskip
+        self.valid_indices = []
+        for i in range(len(self.dataset)):
+            T = self.dataset.get_seq_length(i)
+            # Calculate effective length after frameskip
+            effective_length = (T - 1) // frameskip + 1
+            if effective_length >= min_seq_length:
+                self.valid_indices.append(i)
+        
+        print(f"Using {len(self.valid_indices)} sequences out of {len(self.dataset)}")
+        print(f"Frameskip: {frameskip}, Min effective length: {min_seq_length}")
+        
+        # Copy attributes from original dataset
+        self.proprio_dim = self.dataset.proprio_dim
+        if process_actions == "concat":
+            self.action_dim = self.dataset.action_dim * self.frameskip
+        else:
+            self.action_dim = self.dataset.action_dim
+
+        self.state_dim = self.dataset.state_dim
+        self.action_mean = self.dataset.action_mean
+        self.action_std = self.dataset.action_std
+        self.proprio_mean = self.dataset.proprio_mean
+        self.proprio_std = self.dataset.proprio_std
+        self.state_mean = self.dataset.state_mean
+        self.state_std = self.dataset.state_std
+        self.transform = self.dataset.transform
+
+    def get_seq_length(self, idx: int) -> int:
+        """Returns the effective length after frameskip"""
+        original_idx = self.valid_indices[idx]
+        T = self.dataset.get_seq_length(original_idx)
+        return (T - 1) // self.frameskip + 1
+
+    def __len__(self):
+        return len(self.valid_indices)
+
+    def __getitem__(self, idx):
+        original_idx = self.valid_indices[idx]
+        obs, act, state, _ = self.dataset[original_idx]
+        
+        # Apply frameskip to observations and state
+        for k, v in obs.items():
+            obs[k] = v[::self.frameskip]  # Take every frameskip-th frame
+        state = state[::self.frameskip]
+        
+        # Handle actions - take frameskip consecutive actions and concatenate
+        act = act[::self.frameskip]  # Take every frameskip-th action
+        
+        return tuple([obs, act, state])
+
+
 def random_split_traj(
     dataset: TrajDataset,
     lengths: Sequence[int],
@@ -179,3 +243,22 @@ def get_train_val_sliced(
     val_slices = TrajSlicerDataset(val, num_frames, frameskip)
 
     return train, val, train_slices, val_slices
+
+
+def get_train_val_full_sequence(
+    traj_dataset: TrajDataset,
+    train_fraction: float = 0.8,
+    random_seed: int = 42,
+    frameskip: int = 1,
+    min_seq_length: int = 10,
+):
+    train, val = split_traj_datasets(
+        traj_dataset,
+        train_fraction=train_fraction,
+        random_seed=random_seed,
+    )
+
+    train_full = TrajFullSequenceDataset(train, frameskip, min_seq_length=min_seq_length)
+    val_full = TrajFullSequenceDataset(val, frameskip, min_seq_length=min_seq_length)
+
+    return train, val, train_full, val_full

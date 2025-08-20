@@ -1,7 +1,8 @@
 # adapted from https://github.com/lucidrains/vit-pytorch/blob/main/vit_pytorch/vit.py
 import torch
 from torch import nn
-from einops import rearrange, repeat
+from einops import rearrange
+from .memory import NeuralMemory
 
 # helpers
 NUM_FRAMES = 1
@@ -90,49 +91,6 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
-class SlidingWindowAttention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, window_size=8, dropout=0.):
-        super().__init__()
-        inner_dim = dim_head * heads
-        project_out = not (heads == 1 and dim_head == dim)
-
-        self.heads = heads
-        self.scale = dim_head ** -0.5
-        self.window_size = window_size
-
-        self.norm = nn.LayerNorm(dim)
-
-        self.attend = nn.Softmax(dim=-1)
-        self.dropout = nn.Dropout(dropout)
-
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
-
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, dim),
-            nn.Dropout(dropout)
-        ) if project_out else nn.Identity()
-
-    def forward(self, x):
-        B, T, C = x.size()
-
-        x = self.norm(x)
-
-        qkv = self.to_qkv(x).chunk(3, dim=-1)
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), qkv)
-
-        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-
-        # Apply sliding window mask
-        if T > self.window_size:
-            mask = generate_sliding_window_mask(T, self.window_size).to(x.device)
-            dots = dots.masked_fill(mask == 0, float("-inf"))
-
-        attn = self.attend(dots)
-        attn = self.dropout(attn)
-
-        out = torch.matmul(attn, v)
-        out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.to_out(out)
 
 class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
@@ -152,24 +110,6 @@ class Transformer(nn.Module):
 
         return self.norm(x)
 
-class SlidingWindowTransformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, window_size=8, dropout=0.):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                SlidingWindowAttention(dim, heads=heads, dim_head=dim_head, window_size=window_size, dropout=dropout),
-                FeedForward(dim, mlp_dim, dropout=dropout)
-            ]))
-
-    def forward(self, x):
-        for attn, ff in self.layers:
-            x = attn(x) + x
-            x = ff(x) + x
-
-        return self.norm(x)
-
 class ViTPredictor(nn.Module):
     def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
@@ -177,33 +117,20 @@ class ViTPredictor(nn.Module):
 
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
-        NUM_FRAMES = num_frames # + n_persist
+        NUM_FRAMES = num_frames
         NUM_PATCHES = num_patches
 
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * (num_patches), dim)) # dim for the pos encodings
         self.dropout = nn.Dropout(emb_dropout)
         self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
-        self.pool = pool
-        # self.n_persist = n_persist
-        # if n_persist > 0:
-        #     self.persistent_tokens = nn.Parameter(torch.randn(1, n_persist, dim))
-        # else:
-        #     self.persistent_tokens = None
+        self.pool = pool    
+
 
     def forward(self, x): # x: (b, window_size * H/patch_size * W/patch_size, 384)
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x) 
-
-        # # add persistent tokens
-        # if self.persistent_tokens is not None:
-        #     x = torch.cat([self.persistent_tokens.repeat(b, 1, 1), x], dim=1)
-
         x = self.transformer(x)  
-
-        # # drop persistent tokens
-        # if self.persistent_tokens is not None:
-        #     x = x[:, self.n_persist:, :]
         return x
 
 
@@ -268,42 +195,6 @@ class ViTPredictorWithPersistentTokens(nn.Module):
             x = x[:, self.n_persist :, :]
         return x
 
-
-class SlidingWindowViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0., n_persist=0, window_size=8):
-        super().__init__()
-        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
-        
-        # update params for adding causal attention masks
-        global NUM_FRAMES, NUM_PATCHES
-        NUM_FRAMES = num_frames + n_persist
-        NUM_PATCHES = num_patches
-
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * (num_patches), dim))
-        self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = SlidingWindowTransformer(dim, depth, heads, dim_head, mlp_dim, window_size, dropout)
-        self.pool = pool
-        self.n_persist = n_persist
-        if n_persist > 0:
-            self.persistent_tokens = nn.Parameter(torch.randn(1, n_persist, dim))
-        else:
-            self.persistent_tokens = None
-
-    def forward(self, x):
-        b, n, _ = x.shape
-        x = x + self.pos_embedding[:, :n]
-        x = self.dropout(x) 
-
-        # add persistent tokens
-        if self.persistent_tokens is not None:
-            x = torch.cat([self.persistent_tokens.repeat(b, 1, 1), x], dim=1)
-
-        x = self.transformer(x)  
-
-        # drop persistent tokens
-        if self.persistent_tokens is not None:
-            x = x[:, self.n_persist:, :]
-        return x
 
 
 class AdditiveControlTransformer(Transformer):
@@ -395,3 +286,135 @@ class AdditiveControlViTPredictor(nn.Module):
 
         x = self.transformer(x, action_emb)
         return x
+
+
+class MACTransformerBlock(nn.Module):
+    """
+    A standard Transformer block where the input *segment* is augmented with:
+      [ Persistent P | Retrieved long-term h_t | Segment tokens ]
+    and then passed through attention and FFN.
+    """
+
+    def __init__(
+        self,
+        mem: NeuralMemory,
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        n_persistent: int = 4,  # number of persistent tokens P
+        n_retrieved: int = 4,  # number of memory "slots" to prepend (learned projection of M*(Q))
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.mem = mem
+        self.n_persistent = n_persistent
+        self.n_retrieved = n_retrieved
+
+        # persistent tokens (task/meta-knowledge), learned params
+        self.P = nn.Parameter(
+            torch.randn(n_persistent, d_model) / d_model**0.5
+        )
+
+        # projections for K/V/Q for associative pairs and for queries-to-memory
+        self.W_K = nn.Linear(d_model, d_model)
+        self.W_V = nn.Linear(d_model, d_model)
+        self.W_Q = nn.Linear(d_model, d_model)
+
+        # project retrieved memory back into a small set of "context slots" (this could later be replaced by slot attention)
+        self.mem_slots = nn.Linear(d_model, n_retrieved * d_model)
+
+        # attention + ffn
+        self.attn = nn.MultiheadAttention(
+            d_model, n_heads, batch_first=True, dropout=dropout
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.SiLU(),
+            nn.Linear(d_ff, d_model),
+        )
+        self.norm2 = nn.LayerNorm(d_model)
+        self.drop = nn.Dropout(dropout)
+
+    def _causal_mask(self, L: int, device: torch.device):
+        # standard autoregressive mask (allow attending to <= current)
+        # shape [L, L], True = mask out
+        mask = torch.triu(
+            torch.ones(L, L, device=device, dtype=torch.bool), diagonal=1
+        )
+        return mask
+
+    def forward(
+        self,
+        x_seg: torch.Tensor,  # [B, T, d] current segment
+        update_memory: bool = True,
+    ) -> torch.Tensor:
+        B, T, D = x_seg.shape
+        device = x_seg.device
+
+        # build associative pairs for memory update (save for mayber updating before processing later)
+        k_t = self.W_K(x_seg)  # [B, T, d]
+        v_t = self.W_V(x_seg)  # [B, T, d]
+
+        # retrieve long-term memory for current segment
+        q_t = self.W_Q(x_seg)  # [B, T, d]
+        h = self.mem.retrieve(q_t)  # [B, T, d]
+
+        # compress retrieved “per-token” memory into a fixed number of slots
+        h_slots = self.mem_slots(h)  # [B, T, n_retrieved*d]
+        h_slots = h_slots.mean(  # TODO: try different pooling
+            dim=1
+        )  # [B, n_retrieved*d] (pool over time in segment)
+        h_slots = h_slots.view(B, self.n_retrieved, D)  # [B, n_retrieved, d]
+
+        # prepend persistent tokens and retrieved memory slots
+        P = self.P.unsqueeze(0).expand(B, -1, -1)  # [B, n_persistent, d]
+        x_aug = torch.cat(
+            [P, h_slots, x_seg], dim=1
+        )  # [B, n_persistent + n_retrieved + T, d]
+
+        # attention over augmented sequence (causal over the whole thing)
+        L = x_aug.size(1)
+        attn_mask = self._causal_mask(L, device=device)
+        # Pre-norm
+        y = self.norm1(x_aug)
+        y, _ = self.attn(y, y, y, attn_mask=attn_mask)
+        x_aug = x_aug + self.drop(y)
+
+        #  FFN
+        y2 = self.norm2(x_aug)
+        y2 = self.ff(y2)
+        x_aug = x_aug + self.drop(y2)
+
+        # strip off the prepended tokens; only return the positions corresponding to the segment
+        out = x_aug[:, self.n_persistent + self.n_retrieved :, :]  # [B, T, d]
+
+        #  update memory online using this segment (after attention)
+        if update_memory:
+            # optional: use attended features for richer K/V (can switch to x_seg if you want pure tokens)
+            k_upd = self.W_K(out).detach()
+            v_upd = self.W_V(out).detach()
+            self.mem.update_from_batch(k_upd, v_upd)
+
+        return out
+
+class MACViTPredictor(nn.Module):
+    def __init__(self, *, memory_module: NeuralMemory, num_patches, num_frames, dim, heads, mlp_dim, pool='cls', dropout=0., emb_dropout=0., n_persistent=4, n_retrieved=4):
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+        
+        super().__init__()
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.dim = dim
+        self.pool = pool
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = MACTransformerBlock(mem=memory_module, d_model=dim, n_heads=heads, d_ff=mlp_dim, n_persistent=n_persistent, n_retrieved=n_retrieved, dropout=dropout)
+
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
