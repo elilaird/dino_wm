@@ -354,19 +354,6 @@ class Trainer:
             self.encoder, self.predictor, self.decoder, self.proprio_encoder, self.action_encoder
         )
 
-        # # Add compilation for speed improvements
-        # if hasattr(torch, "compile"):
-        #     self.encoder = torch.compile(self.encoder, mode="reduce-overhead")
-        #     if self.predictor is not None:
-        #         self.predictor = torch.compile(
-        #             self.predictor, mode="reduce-overhead"
-        #         )
-        #     if self.decoder is not None:
-        #         self.decoder = torch.compile(
-        #             self.decoder, mode="reduce-overhead"
-        #         )
-        #     log.info("Compiled models for speed improvements")
-
         self.model = hydra.utils.instantiate(
             self.cfg.model,
             encoder=self.encoder,

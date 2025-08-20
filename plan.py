@@ -434,7 +434,7 @@ def planning_main(cfg_dict):
         wandb_run = wandb.init(
             project=f"plan_{cfg_dict['planner']['name']}", config=cfg_dict
         )
-        wandb.run.name = "{}".format(output_dir.split("plan_outputs/")[-1])
+        wandb.run.name = "{}".format(output_dir.split("plan_outputs/")[-1]) + f"_{os.environ['SLURM_JOB_ID']}"
     else:
         wandb_run = None
 

@@ -105,7 +105,7 @@ class CEMPlanner(BasePlanner):
                 )
                 action[0] = mu[traj]  # optional: make the first one mu itself
                 with torch.no_grad():
-                    i_z_obses, i_zs = self.wm.rollout(
+                    i_z_obses, _ = self.wm.rollout(
                         obs_0=cur_trans_obs_0,
                         act=action,
                     )
@@ -115,7 +115,12 @@ class CEMPlanner(BasePlanner):
                 topk_action = action[topk_idx]
                 losses.append(loss[topk_idx[0]].item())
                 mu[traj] = topk_action.mean(dim=0)
-                sigma[traj] = topk_action.std(dim=0)
+                sigma[traj] = topk_action.std(dim=0) 
+
+                # cleanup
+                del cur_trans_obs_0, cur_z_obs_g, action, i_z_obses
+                torch.cuda.empty_cache()  # Force CUDA memory cleanup
+
 
             self.wandb_run.log(
                 {f"{self.logging_prefix}/loss": np.mean(losses), "step": i + 1}
