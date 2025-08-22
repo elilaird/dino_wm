@@ -91,6 +91,7 @@ def estimate_batch_memory_str(obs, act=None, state=None):
 class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.window_size = self.cfg.num_hist + self.cfg.num_pred
         with open_dict(cfg):
             cfg["saved_folder"] = os.getcwd()
             log.info(f"Model saved dir: {cfg['saved_folder']}")
@@ -98,7 +99,8 @@ class Trainer:
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
-        self.accelerator = Accelerator(log_with="wandb", gradient_accumulation_steps=self.cfg.accumulation_steps)
+        # self.accelerator = Accelerator(log_with="wandb", gradient_accumulation_steps=self.cfg.accumulation_steps)
+        self.accelerator = Accelerator(log_with="wandb")
 
         log.info(
             f"rank: {self.accelerator.local_process_index}  model_name: {model_name}"
@@ -591,6 +593,13 @@ class Trainer:
 
     def train_step(self, obs, act):
         self.model.train()
+        self.encoder_optimizer.zero_grad()
+        if self.cfg.has_decoder:
+            self.decoder_optimizer.zero_grad()
+        if self.cfg.has_predictor:
+            self.predictor_optimizer.zero_grad()
+            self.action_encoder_optimizer.zero_grad()
+
         z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
             obs, act
         )
@@ -619,37 +628,35 @@ class Trainer:
 
         return loss_components, z_components
 
-
     def train(self):
 
-        window_size = self.cfg.num_hist + self.cfg.num_pred
         compute_start = torch.cuda.Event(enable_timing=True)
         compute_end = torch.cuda.Event(enable_timing=True)
         prev_time = time.perf_counter()
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
-            
+
             batch_loss_components = defaultdict(float)
 
             data_time = time.perf_counter() - prev_time
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
-            num_windows = N // window_size
+            num_windows = N // self.window_size
 
             plot = i == 0
             self.model.train()
             compute_start.record()
 
-            with self.accelerator.accumulate(self.model):
-                for window_idx in range(num_windows):
-                    start_idx = window_idx * window_size
-                    end_idx = start_idx + window_size
-                    obs_window = {k: v[:, start_idx:end_idx, ...] for k, v in obs.items()}
-                    act_window = act[:, start_idx:end_idx, ...]
-                    loss_components, z_components = self.train_step(obs_window, act_window)
-                    for k, v in loss_components.items():
-                        batch_loss_components[k] += (v / num_windows)
+            # with self.accelerator.accumulate(self.model):
+            for window_idx in range(num_windows):
+                start_idx = window_idx * self.window_size
+                end_idx = start_idx + self.window_size
+                obs_window = {k: v[:, start_idx:end_idx, ...] for k, v in obs.items()}
+                act_window = act[:, start_idx:end_idx, ...]
+                loss_components, z_components = self.train_step(obs_window, act_window)
+                for k, v in loss_components.items():
+                    batch_loss_components[k] += (v / num_windows)
 
             compute_end.record()
             torch.cuda.synchronize(self.accelerator.device)
@@ -662,7 +669,7 @@ class Trainer:
                     "train_compute_time_per_window": [compute_ms/1e3/num_windows],
                     "train_batch_size": [B],
                     "train_num_windows": [num_windows],
-                    "train_window_size": [window_size],
+                    "train_window_size": [self.window_size],
                     "train_num_frames": [N],
                 }
                 self.logs_update(time_logs)
@@ -699,34 +706,34 @@ class Trainer:
         for i, data in enumerate(
             tqdm(self.dataloaders["valid"], desc=f"Epoch {self.epoch} Valid")
         ):
-            obs, act, state = data
+            batch_loss_components = defaultdict(float)
+            obs, act, _ = data
+            B, N = obs["visual"].shape[:2]
+            num_windows = N // self.window_size
 
-            # # Update progress bar description with memory info
-            # if i == 0:  # Update memory info on first batch
-            #     gpu_mem = get_memory_str()
-            #     batch_mem = estimate_batch_memory_str(obs, act, state)
-            #     tqdm.write(f"Epoch {self.epoch} Valid - {gpu_mem} {batch_mem}")
-            plot = i == 0
-            self.model.eval()
-            z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
-                obs, act
-            )
+            for window_idx in range(num_windows):
+                start_idx = window_idx * self.window_size
+                end_idx = start_idx + self.window_size
+                obs_window = {k: v[:, start_idx:end_idx, ...] for k, v in obs.items()}
+                act_window = act[:, start_idx:end_idx, ...]
 
-            loss = self.accelerator.gather_for_metrics(loss).mean()
+                # val step
+                with torch.no_grad():
+                    z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
+                        obs_window, act_window
+                    )
+                    loss = self.accelerator.gather_for_metrics(loss).mean()
+                    loss_components = self.accelerator.gather_for_metrics(loss_components)
+                    for key, value in loss_components.items():
+                        batch_loss_components[key] += (value.mean().item() / num_windows)
 
-            loss_components = self.accelerator.gather_for_metrics(loss_components)
-            loss_components = {
-                key: value.mean().item() for key, value in loss_components.items()
-            }
-
-            if self.cfg.has_decoder and plot:
+            if self.cfg.has_decoder and i == 0:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
-                    z_obs_out, z_act_out = self.model.separate_emb(z_out)
-                    z_gt = self.model.encode_obs(obs)
+                    z_obs_out, _ = self.model.separate_emb(z_out)
+                    z_gt = self.model.encode_obs(obs_window)
                     z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.cfg.num_pred)
 
-                    # state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)
 
                     err_logs = self.accelerator.gather_for_metrics(err_logs)
@@ -742,7 +749,7 @@ class Trainer:
                         self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
                     ):
                         img_pred_scores = eval_images(
-                            visual_out[:, t - self.cfg.num_pred], obs["visual"][:, t]
+                            visual_out[:, t - self.cfg.num_pred], obs_window["visual"][:, t]
                         )
                         img_pred_scores = self.accelerator.gather_for_metrics(
                             img_pred_scores
@@ -754,9 +761,9 @@ class Trainer:
                         self.logs_update(img_pred_scores)
 
                 if visual_reconstructed is not None:
-                    for t in range(obs["visual"].shape[1]):
+                    for t in range(obs_window["visual"].shape[1]):
                         img_reconstruction_scores = eval_images(
-                            visual_reconstructed[:, t], obs["visual"][:, t]
+                            visual_reconstructed[:, t], obs_window["visual"][:, t]
                         )
                         img_reconstruction_scores = self.accelerator.gather_for_metrics(
                             img_reconstruction_scores
@@ -768,7 +775,7 @@ class Trainer:
                         self.logs_update(img_reconstruction_scores)
 
                 self.plot_samples(
-                    obs["visual"],
+                    obs_window["visual"],
                     visual_out,
                     visual_reconstructed,
                     self.epoch,
@@ -777,8 +784,7 @@ class Trainer:
                     phase="valid",
                 )
 
-            loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
-            self.logs_update(loss_components)
+            self.logs_update({f"val_{k}": [v] for k, v in batch_loss_components.items()})
 
             if self.cfg.predictor == "additive_control_vit" and self.cfg.has_predictor and i == 0:  # Log on first validation batch
                 alpha_logs = self.get_alpha_values()
