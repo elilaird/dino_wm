@@ -201,7 +201,7 @@ class PlanWorkspace:
         states = []
         actions = []
         observations = []
-        
+
         if self.goal_source == "random_state":
             # update env config from val trajs
             observations, states, actions, env_info = (
@@ -332,9 +332,15 @@ class PlanWorkspace:
             obs_g=self.obs_g,
             actions=actions_init,
         )
+        # clear gpu memory for wm
+        self.wm.zero_grad()
+
+        torch.cuda.empty_cache()
+
         logs, successes, _, _ = self.evaluator.eval_actions(
             actions.detach(), action_len, save_video=True, filename="output_final"
         )
+
         logs = {f"final_eval/{k}": v for k, v in logs.items()}
         self.wandb_run.log(logs)
         logs_entry = {
@@ -501,6 +507,7 @@ def main(cfg: OmegaConf):
         cfg["saved_folder"] = os.getcwd()
         log.info(f"Planning result saved dir: {cfg['saved_folder']}")
     cfg_dict = cfg_to_dict(cfg)
+    print(cfg_dict)
     cfg_dict["wandb_logging"] = True
     planning_main(cfg_dict)
 

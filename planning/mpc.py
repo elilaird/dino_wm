@@ -92,19 +92,22 @@ class MPCPlanner(BasePlanner):
             taken_actions = actions.detach()[:, : self.n_taken_actions]
             self._apply_success_mask(taken_actions)
             memo_actions = actions.detach()[:, self.n_taken_actions :]
-            self.planned_actions.append(taken_actions)
+            # Instead of storing all tensors, concatenate them immediately
+            if self.iter == 0:
+                self.planned_actions = taken_actions
+            else:
+                self.planned_actions = torch.cat([self.planned_actions, taken_actions], dim=1)
 
             print(f"MPC iter {self.iter} Eval ------- ")
-            action_so_far = torch.cat(self.planned_actions, dim=1)
             self.evaluator.assign_init_cond(
                 obs_0=init_obs_0,
                 state_0=init_state_0,
             )
             logs, successes, e_obses, e_states = self.evaluator.eval_actions(
-                action_so_far,
+                self.planned_actions,
                 self.action_len,
                 filename=f"plan{self.iter}",
-                save_video=True,
+                save_video=False,
             )
             new_successes = successes & ~self.is_success  # Identify new successes
             self.is_success = (
@@ -130,11 +133,13 @@ class MPCPlanner(BasePlanner):
             )
             self.iter += 1
             self.sub_planner.logging_prefix = f"plan_{self.iter}"
+            
+            torch.cuda.empty_cache()  # Force CUDA memory cleanup
 
-        planned_actions = torch.cat(self.planned_actions, dim=1)
+        # planned_actions = torch.cat(self.planned_actions, dim=1)
         self.evaluator.assign_init_cond(
             obs_0=init_obs_0,
             state_0=init_state_0,
         )
 
-        return planned_actions, self.action_len
+        return self.planned_actions, self.action_len

@@ -99,9 +99,9 @@ class PlanEvaluator:  # evaluator for planning
         trans_obs_0 = move_to_device(
             self.preprocessor.transform_obs(self.obs_0), self.device
         )
-        trans_obs_g = move_to_device(
-            self.preprocessor.transform_obs(self.obs_g), self.device
-        )
+        # trans_obs_g = move_to_device(
+        #     self.preprocessor.transform_obs(self.obs_g), self.device
+        # )
         with torch.no_grad():
             i_z_obses, _ = self.wm.rollout(
                 obs_0=trans_obs_0,
@@ -129,7 +129,7 @@ class PlanEvaluator:  # evaluator for planning
         )
 
         # plot trajs
-        if self.wm.decoder is not None:
+        if self.wm.decoder is not None and save_video:
             i_visuals = self.wm.decode_obs(i_z_obses)[0]["visual"]
             i_visuals = self._mask_traj(
                 i_visuals, action_len + 1
