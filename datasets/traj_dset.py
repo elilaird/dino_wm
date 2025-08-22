@@ -7,6 +7,7 @@ from torch.utils.data import Dataset, Subset
 from torch import default_generator, randperm
 from einops import rearrange
 
+
 # https://github.com/JaidedAI/EasyOCR/issues/1243
 def _accumulate(iterable, fn=lambda x, y: x + y):
     "Return running totals"
@@ -22,6 +23,7 @@ def _accumulate(iterable, fn=lambda x, y: x + y):
         total = fn(total, element)
         yield total
 
+
 class TrajDataset(Dataset, abc.ABC):
     @abc.abstractmethod
     def get_seq_length(self, idx):
@@ -29,6 +31,7 @@ class TrajDataset(Dataset, abc.ABC):
         Returns the length of the idx-th trajectory.
         """
         raise NotImplementedError
+
 
 class TrajSubset(TrajDataset, Subset):
     """
@@ -38,6 +41,7 @@ class TrajSubset(TrajDataset, Subset):
         dataset (TrajectoryDataset): The whole Dataset
         indices (sequence): Indices in the whole set selected for subset
     """
+
     def __init__(self, dataset: TrajDataset, indices: Sequence[int]):
         Subset.__init__(self, dataset, indices)
         self.dataset = dataset
@@ -75,10 +79,12 @@ class TrajSlicerDataset(TrajDataset):
         self.num_frames = num_frames
         self.frameskip = frameskip
         self.slices = []
-        for i in range(len(self.dataset)): 
+        for i in range(len(self.dataset)):
             T = self.dataset.get_seq_length(i)
             if T - num_frames < 0:
-                print(f"Ignored short sequence #{i}: len={T}, num_frames={num_frames}")
+                print(
+                    f"Ignored short sequence #{i}: len={T}, num_frames={num_frames}"
+                )
             else:
                 self.slices += [
                     (i, start, start + num_frames * self.frameskip)
@@ -86,7 +92,7 @@ class TrajSlicerDataset(TrajDataset):
                 ]  # slice indices follow convention [start, end)
         # randomly permute the slices
         self.slices = np.random.permutation(self.slices)
-        
+
         self.proprio_dim = self.dataset.proprio_dim
         if process_actions == "concat":
             self.action_dim = self.dataset.action_dim * self.frameskip
@@ -102,7 +108,6 @@ class TrajSlicerDataset(TrajDataset):
         self.state_std = self.dataset.state_std
         self.transform = self.dataset.transform
 
-
     def get_seq_length(self, idx: int) -> int:
         return self.num_frames
 
@@ -113,10 +118,12 @@ class TrajSlicerDataset(TrajDataset):
         i, start, end = self.slices[idx]
         obs, act, state, _ = self.dataset[i]
         for k, v in obs.items():
-            obs[k] = v[start:end:self.frameskip]
-        state = state[start:end:self.frameskip]
+            obs[k] = v[start : end : self.frameskip]
+        state = state[start : end : self.frameskip]
         act = act[start:end]
-        act = rearrange(act, "(n f) d -> n (f d)", n=self.num_frames)  # concat actions
+        act = rearrange(
+            act, "(n f) d -> n (f d)", n=self.num_frames
+        )  # concat actions
         return tuple([obs, act, state])
 
     # def __getattr__(self, name):
@@ -138,7 +145,7 @@ class TrajFullSequenceDataset(TrajDataset):
         self.dataset = dataset
         self.frameskip = frameskip
         self.min_seq_length = min_seq_length
-        
+
         # Filter sequences that are long enough after frameskip
         self.valid_indices = []
         for i in range(len(self.dataset)):
@@ -147,10 +154,18 @@ class TrajFullSequenceDataset(TrajDataset):
             effective_length = (T - 1) // frameskip + 1
             if effective_length >= min_seq_length:
                 self.valid_indices.append(i)
-        
-        print(f"Using {len(self.valid_indices)} sequences out of {len(self.dataset)}")
-        print(f"Frameskip: {frameskip}, Min effective length: {min_seq_length}")
-        
+
+        self.num_frames = (
+            self.dataset.get_seq_length(self.valid_indices[0]) - 1
+        ) // frameskip + 1
+
+        print(
+            f"Using {len(self.valid_indices)} sequences out of {len(self.dataset)}"
+        )
+        print(
+            f"Frameskip: {frameskip}, Min effective length: {min_seq_length}"
+        )
+
         # Copy attributes from original dataset
         self.proprio_dim = self.dataset.proprio_dim
         if process_actions == "concat":
@@ -179,15 +194,17 @@ class TrajFullSequenceDataset(TrajDataset):
     def __getitem__(self, idx):
         original_idx = self.valid_indices[idx]
         obs, act, state, _ = self.dataset[original_idx]
-        
+
         # Apply frameskip to observations and state
         for k, v in obs.items():
-            obs[k] = v[::self.frameskip]  # Take every frameskip-th frame
-        state = state[::self.frameskip]
-        
+            obs[k] = v[:: self.frameskip]  # Take every frameskip-th frame
+        state = state[:: self.frameskip]
+
         # Handle actions - take frameskip consecutive actions and concatenate
-        act = act[::self.frameskip]  # Take every frameskip-th action
-        
+        act = rearrange(
+            act, "(n f) d -> n (f d)", n=self.num_frames
+        )  # concat actions
+
         return tuple([obs, act, state])
 
 
@@ -258,7 +275,11 @@ def get_train_val_full_sequence(
         random_seed=random_seed,
     )
 
-    train_full = TrajFullSequenceDataset(train, frameskip, min_seq_length=min_seq_length)
-    val_full = TrajFullSequenceDataset(val, frameskip, min_seq_length=min_seq_length)
+    train_full = TrajFullSequenceDataset(
+        train, frameskip, min_seq_length=min_seq_length
+    )
+    val_full = TrajFullSequenceDataset(
+        val, frameskip, min_seq_length=min_seq_length
+    )
 
     return train, val, train_full, val_full

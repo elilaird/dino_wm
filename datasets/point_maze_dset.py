@@ -5,7 +5,7 @@ from pathlib import Path
 from einops import rearrange
 # from decord import VideoReader
 from typing import Callable, Optional
-from .traj_dset import TrajDataset, get_train_val_sliced
+from .traj_dset import TrajDataset, get_train_val_sliced, get_train_val_full_sequence
 from typing import Optional, Callable, Any
 # decord.bridge.set_bridge("torch")
 
@@ -118,6 +118,7 @@ def load_point_maze_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=0,
+    full_sequence=False,
 ):
     dset = PointMazeDataset(
         n_rollout=n_rollout,
@@ -125,7 +126,15 @@ def load_point_maze_slice_train_val(
         data_path=data_path,
         normalize_action=normalize_action,
     )
-    dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
+    if full_sequence:
+        dset_train, dset_val, train_slices, val_slices = get_train_val_full_sequence(
+            traj_dataset=dset, 
+            train_fraction=split_ratio, 
+            frameskip=frameskip,
+            min_seq_length=num_hist + num_pred,
+        )
+    else:
+        dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
         traj_dataset=dset, 
         train_fraction=split_ratio, 
         num_frames=num_hist + num_pred, 
