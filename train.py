@@ -241,7 +241,7 @@ class Trainer:
                     ckpt[k] = self.accelerator.unwrap_model(self.__dict__[k])
                 else:
                     ckpt[k] = self.__dict__[k]
-               
+
             torch.save(ckpt, "checkpoints/model_latest.pth")
             torch.save(ckpt, f"checkpoints/model_{self.epoch}.pth")
             log.info("Saved model to {}".format(os.getcwd()))
@@ -356,6 +356,9 @@ class Trainer:
 
         self.model = hydra.utils.instantiate(
             self.cfg.model,
+            image_size=self.cfg.img_size,
+            num_hist=self.cfg.num_hist,
+            num_pred=self.cfg.num_pred,
             encoder=self.encoder,
             proprio_encoder=self.proprio_encoder,
             action_encoder=self.action_encoder,
@@ -367,6 +370,10 @@ class Trainer:
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
         )
+
+        if self.accelerator.is_main_process:
+            print(f"Model type: {type(self.model)}")
+            print(self.model)
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
@@ -488,7 +495,6 @@ class Trainer:
                     with lock:
                         self.job_set.update(jobs)
 
-
     def err_eval_single(self, z_pred, z_tgt):
         logs = {}
         for k in z_pred.keys():
@@ -505,8 +511,8 @@ class Trainer:
         logs = {}
         slices = {
             "full": (None, None),
-            "pred": (-self.model.num_pred, None),
-            "next1": (-self.model.num_pred, -self.model.num_pred + 1),
+            "pred": (-self.cfg.num_pred, None),
+            "next1": (-self.cfg.num_pred, -self.cfg.num_pred + 1),
         }
         for name, (start_idx, end_idx) in slices.items():
             z_out_slice = slice_trajdict_with_t(
@@ -521,130 +527,143 @@ class Trainer:
 
         return logs
 
+    def train_step(self, obs, act):
+        self.model.train()
+        z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
+            obs, act
+        )
+        self.accelerator.backward(loss)
+
+        if self.model.train_encoder:
+            self.encoder_optimizer.step()
+        if self.cfg.has_decoder and self.model.train_decoder:
+            self.decoder_optimizer.step()
+        if self.cfg.has_predictor and self.model.train_predictor:
+            self.predictor_optimizer.step()
+            self.action_encoder_optimizer.step()
+
+        loss = self.accelerator.gather_for_metrics(loss).mean()
+
+        loss_components = self.accelerator.gather_for_metrics(loss_components)
+        loss_components = {
+            key: value.mean().item() for key, value in loss_components.items()
+        }
+
+        z_components = {
+            "z_out": z_out, 
+            "visual_out": visual_out,
+            "visual_reconstructed": visual_reconstructed,
+        }
+
+        return loss_components, z_components
+
+    def decoder_eval(self, batch_idx, obs, z_components):
+        # only eval images when plotting due to speed
+        if self.cfg.has_predictor:
+            z_obs_out, _ = self.model.separate_emb(z_components["z_out"])
+            z_gt = self.model.encode_obs(obs)
+            z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.cfg.num_pred)
+
+            # state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
+            err_logs = self.err_eval(z_obs_out, z_tgt)
+
+            err_logs = self.accelerator.gather_for_metrics(err_logs)
+            err_logs = {
+                key: value.mean().item() for key, value in err_logs.items()
+            }
+            err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
+
+            self.logs_update(err_logs)
+
+        if z_components["visual_out"] is not None:
+            for t in range(
+                self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
+            ):
+                img_pred_scores = eval_images(
+                    z_components["visual_out"][:, t - self.cfg.num_pred],
+                    obs["visual"][:, t],
+                )
+                img_pred_scores = self.accelerator.gather_for_metrics(
+                    img_pred_scores
+                )
+                img_pred_scores = {
+                    f"train_img_{k}_pred": [v.mean().item()]
+                    for k, v in img_pred_scores.items()
+                }
+                self.logs_update(img_pred_scores)
+
+        if z_components["visual_reconstructed"] is not None:
+            for t in range(obs["visual"].shape[1]):
+                img_reconstruction_scores = eval_images(
+                    z_components["visual_reconstructed"][:, t],
+                    obs["visual"][:, t],
+                )
+                img_reconstruction_scores = (
+                    self.accelerator.gather_for_metrics(
+                        img_reconstruction_scores
+                    )
+                )
+                img_reconstruction_scores = {
+                    f"train_img_{k}_reconstructed": [v.mean().item()]
+                    for k, v in img_reconstruction_scores.items()
+                }
+                self.logs_update(img_reconstruction_scores)
+
+        if self.accelerator.is_main_process:
+            self.plot_samples(
+                obs["visual"],
+                z_components["visual_out"],
+                z_components["visual_reconstructed"],
+                self.epoch,
+                batch=batch_idx,
+                num_samples=self.num_reconstruct_samples,
+                phase="train",
+            )
+
     def train(self):
 
-        # # estimate memory usage per batch
-        # torch.cuda.reset_peak_memory_stats()
-        # obs, act, state = next(iter(self.dataloaders["train"]))
-        # batch_mem = estimate_batch_memory_str(obs, act, state)
-        # tqdm.write(f"Batch memory: {batch_mem}")
-
-        steps = 0
+        window_size = self.cfg.num_hist + self.cfg.num_pred
+        compute_start = torch.cuda.Event(enable_timing=True)
+        compute_end = torch.cuda.Event(enable_timing=True)
         prev_time = time.perf_counter()
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
-            # A) Input staging time (loader + Accelerate's device placement)
-            t0 = time.perf_counter()
-            data_time = t0 - prev_time
+            # Input staging time (loader + Accelerate's device placement)
+            data_time = time.perf_counter() - prev_time
+            obs, act, _ = data
+            B, N = obs["visual"].shape[:2]
+            num_windows = N // window_size
 
-            obs, act, state = data
-            steps += 1
-            local_bs = obs['visual'].shape[0]
-
-            # B) Compute timing with CUDA events (precise)
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            torch.cuda.synchronize(self.accelerator.device)
-            start.record()
-
-            plot = i == 0  # only plot from the first batch
+            plot = i == 0
             self.model.train()
-            z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
-                obs, act
-            )
+            compute_start.record()
 
-            self.encoder_optimizer.zero_grad()
-            if self.cfg.has_decoder:
-                self.decoder_optimizer.zero_grad()
-            if self.cfg.has_predictor:
-                self.predictor_optimizer.zero_grad()
-                self.action_encoder_optimizer.zero_grad()
+            for window_idx in range(num_windows):
+                start_idx = window_idx * window_size
+                end_idx = start_idx + window_size
+                obs_window = {k: v[:, start_idx:end_idx, ...] for k, v in obs.items()}
+                act_window = act[:, start_idx:end_idx, ...]
+                loss_components, z_components = self.train_step(obs_window, act_window)
 
-            self.accelerator.backward(loss)
-
-            if self.model.train_encoder:
-                self.encoder_optimizer.step()
-            if self.cfg.has_decoder and self.model.train_decoder:
-                self.decoder_optimizer.step()
-            if self.cfg.has_predictor and self.model.train_predictor:
-                self.predictor_optimizer.step()
-                self.action_encoder_optimizer.step()
-
-            loss = self.accelerator.gather_for_metrics(loss).mean()
-
-            loss_components = self.accelerator.gather_for_metrics(loss_components)
-            loss_components = {
-                key: value.mean().item() for key, value in loss_components.items()
-            }
-
-            end.record()
+            compute_end.record()
             torch.cuda.synchronize(self.accelerator.device)
-            compute_ms = start.elapsed_time(end)
+            compute_ms = compute_start.elapsed_time(compute_end)
 
-            if i < 30 or i % 100 == 0:
-                tqdm.write(f"[rank {self.accelerator.process_index}] i={i} bs={local_bs} "
-                        f"data={data_time:.3f}s compute={compute_ms/1e3:.3f}s")
+            if i < 5 or i % 100 == 0:
+                time_logs ={
+                    "train_data_time": [data_time],
+                    "train_compute_time": [compute_ms/1e3],
+                    "train_compute_time_per_window": [compute_ms/1e3/num_windows],
+                    "train_batch_size": [B],
+                    "train_num_windows": [num_windows],
+                    "train_window_size": [window_size],
+                    "train_num_frames": [N],
+                }
+                self.logs_update(time_logs)
 
             if self.cfg.has_decoder and plot:
-                # only eval images when plotting due to speed
-                if self.cfg.has_predictor:
-                    z_obs_out, z_act_out = self.model.separate_emb(z_out)
-                    z_gt = self.model.encode_obs(obs)
-                    z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
-
-                    state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
-                    err_logs = self.err_eval(z_obs_out, z_tgt)
-
-                    err_logs = self.accelerator.gather_for_metrics(err_logs)
-                    err_logs = {
-                        key: value.mean().item() for key, value in err_logs.items()
-                    }
-                    err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
-
-                    self.logs_update(err_logs)
-
-                if visual_out is not None:
-                    for t in range(
-                        self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
-                    ):
-                        img_pred_scores = eval_images(
-                            visual_out[:, t - self.cfg.num_pred], obs["visual"][:, t]
-                        )
-                        img_pred_scores = self.accelerator.gather_for_metrics(
-                            img_pred_scores
-                        )
-                        img_pred_scores = {
-                            f"train_img_{k}_pred": [v.mean().item()]
-                            for k, v in img_pred_scores.items()
-                        }
-                        self.logs_update(img_pred_scores)
-
-                if visual_reconstructed is not None:
-                    for t in range(obs["visual"].shape[1]):
-                        img_reconstruction_scores = eval_images(
-                            visual_reconstructed[:, t], obs["visual"][:, t]
-                        )
-                        img_reconstruction_scores = self.accelerator.gather_for_metrics(
-                            img_reconstruction_scores
-                        )
-                        img_reconstruction_scores = {
-                            f"train_img_{k}_reconstructed": [v.mean().item()]
-                            for k, v in img_reconstruction_scores.items()
-                        }
-                        self.logs_update(img_reconstruction_scores)
-
-                if self.accelerator.is_main_process:
-                    self.plot_samples(
-                        obs["visual"],
-                        visual_out,
-                        visual_reconstructed,
-                        self.epoch,
-                        batch=i,
-                        num_samples=self.num_reconstruct_samples,
-                        phase="train",
-                    )
-                # self.accelerator.wait_for_everyone()
+                self.decoder_eval(i, obs_window, z_components)
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
@@ -701,9 +720,9 @@ class Trainer:
                 if self.cfg.has_predictor:
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs)
-                    z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
+                    z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.cfg.num_pred)
 
-                    state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
+                    # state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)
 
                     err_logs = self.accelerator.gather_for_metrics(err_logs)
@@ -914,7 +933,7 @@ class Trainer:
             pred_imgs = torch.cat(
                 (
                     torch.full(
-                        (num_samples, self.model.num_pred, *pred_imgs.shape[2:]),
+                        (num_samples, self.cfg.num_pred, *pred_imgs.shape[2:]),
                         -1,
                         device=self.device,
                     ),
