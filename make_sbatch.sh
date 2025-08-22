@@ -26,8 +26,8 @@ PROJECT_DIR=${PROJECT_DIR:-"${HOME}/Projects/dino_wm"}
 DATA_DIR=${DATA_DIR:-"/lustre/smuexa01/client/users/ejlaird/dino_wm_data"}
 MUJOCO_DIR=/users/ejlaird/.mujoco/mujoco210/bin
 
-if [ "${TYPE}" = "eval" ]; then
-    PY_FILE="habitat_experiments/eval.py"
+if [ "${TYPE}" = "data" ]; then
+    PY_FILE="generate_point_maze_data.py"
 elif [ "${TYPE}" = "plan" ]; then
     PY_FILE="plan.py"
 elif [ "${TYPE}" = "train" ]; then
