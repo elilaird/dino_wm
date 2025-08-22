@@ -1,0 +1,7 @@
+_target_: models.visual_world_model.VWorldModel
+image_size: ${img_size}
+num_hist: ${num_hist}
+num_pred: ${num_pred}
+train_encoder: False
+train_predictor: True
+train_decoder: True

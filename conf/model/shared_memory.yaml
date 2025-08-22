@@ -1,0 +1,7 @@
+_target_: models.visual_world_model.VWorldModelWithMemory
+memory_variant: mac_shared
+window_size: 3
+prediction_offset: 1
+train_encoder: False
+train_predictor: True
+train_decoder: True
