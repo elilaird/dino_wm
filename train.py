@@ -98,7 +98,7 @@ class Trainer:
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
-        self.accelerator = Accelerator(log_with="wandb")
+        self.accelerator = Accelerator(log_with="wandb", gradient_accumulation_steps=self.cfg.accumulation_steps)
 
         log.info(
             f"rank: {self.accelerator.local_process_index}  model_name: {model_name}"
@@ -181,7 +181,6 @@ class Trainer:
                 num_workers=nw if x == "train" else 1,
                 collate_fn=None,
                 pin_memory=True,
-                # persistent_workers=True,
                 multiprocessing_context=CTX,
                 drop_last=True if x == "train" else False,
                 prefetch_factor=2,
@@ -639,12 +638,13 @@ class Trainer:
             self.model.train()
             compute_start.record()
 
-            for window_idx in range(num_windows):
-                start_idx = window_idx * window_size
-                end_idx = start_idx + window_size
-                obs_window = {k: v[:, start_idx:end_idx, ...] for k, v in obs.items()}
-                act_window = act[:, start_idx:end_idx, ...]
-                loss_components, z_components = self.train_step(obs_window, act_window)
+            with self.accelerator.accumulate(self.model):
+                for window_idx in range(num_windows):
+                    start_idx = window_idx * window_size
+                    end_idx = start_idx + window_size
+                    obs_window = {k: v[:, start_idx:end_idx, ...] for k, v in obs.items()}
+                    act_window = act[:, start_idx:end_idx, ...]
+                    loss_components, z_components = self.train_step(obs_window, act_window)
 
             compute_end.record()
             torch.cuda.synchronize(self.accelerator.device)
