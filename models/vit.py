@@ -196,7 +196,6 @@ class ViTPredictorWithPersistentTokens(nn.Module):
         return x
 
 
-
 class AdditiveControlTransformer(Transformer):
 
     def __init__(
@@ -227,7 +226,8 @@ class AdditiveControlTransformer(Transformer):
             if i < len(self.injection_layers):
                 # apply injection to visual patches only
                 injection = self.injection_layers[i](actions) * self.alphas[i]
-                x = x + torch.cat([injection, torch.zeros_like(x[:, :2])], dim=1)
+                injection = torch.cat([injection.repeat(1, x.shape[1]-1, 1), torch.zeros_like(x[:, :1])], dim=1)
+                x = x + injection
         return self.norm(x)
 
 
@@ -279,12 +279,9 @@ class AdditiveControlViTPredictor(nn.Module):
         x = self.dropout(x)
 
         action_emb = x[:, -1:, :].clone()  # (b, 1, dim)
-        num_visual_tokens = n - 2
-        action_emb = action_emb.repeat(
-            1, num_visual_tokens, 1
-        )  # (b, num_visual_tokens, dim)
-
+        x = x[:, :-1, :] # remove the action token
         x = self.transformer(x, action_emb)
+        x = torch.cat([x, action_emb], dim=1)
         return x
 
 
@@ -399,11 +396,27 @@ class MACTransformerBlock(nn.Module):
 
         return out
 
+class MACTransformer(nn.Module):
+    def __init__(self, memory_module: NeuralMemory, dim, depth, heads, mlp_dim, dropout=0.0, n_persistent=4, n_retrieved=4):
+        super().__init__()
+        self.mem = memory_module
+        self.norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(MACTransformerBlock(mem=memory_module, d_model=dim, n_heads=heads, d_ff=mlp_dim, n_persistent=n_persistent, n_retrieved=n_retrieved, dropout=dropout))
+    
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return self.norm(x)
+
+
 class MACViTPredictor(nn.Module):
-    def __init__(self, *, memory_module: NeuralMemory, num_patches, num_frames, dim, heads, mlp_dim, pool='cls', dropout=0., emb_dropout=0., n_persistent=4, n_retrieved=4):
+    def __init__(self, *, memory_module: NeuralMemory, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dropout=0., emb_dropout=0., n_persistent=4, n_retrieved=4):
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
         
         super().__init__()
+        self.mem = memory_module
         self.num_patches = num_patches
         self.num_frames = num_frames
         self.dim = dim
@@ -411,7 +424,7 @@ class MACViTPredictor(nn.Module):
 
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = MACTransformerBlock(mem=memory_module, d_model=dim, n_heads=heads, d_ff=mlp_dim, n_persistent=n_persistent, n_retrieved=n_retrieved, dropout=dropout)
+        self.transformer = MACTransformer(memory_module, dim, depth, heads, mlp_dim, dropout, n_persistent, n_retrieved)
 
     def forward(self, x):
         b, n, _ = x.shape
