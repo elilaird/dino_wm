@@ -99,7 +99,6 @@ class Trainer:
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
-        # self.accelerator = Accelerator(log_with="wandb", gradient_accumulation_steps=self.cfg.accumulation_steps)
         self.accelerator = Accelerator(log_with="wandb")
 
         log.info(
@@ -165,6 +164,7 @@ class Trainer:
             num_hist=self.cfg.num_hist,
             num_pred=self.cfg.num_pred,
             frameskip=self.cfg.frameskip,
+            num_frames=self.cfg.num_frames,
         )
 
         if self.accelerator.is_main_process:

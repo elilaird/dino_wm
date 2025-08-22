@@ -140,7 +140,7 @@ class TrajFullSequenceDataset(TrajDataset):
         dataset: TrajDataset,
         frameskip: int = 1,
         process_actions: str = "concat",
-        min_seq_length: int = 10,  # minimum sequence length to include
+        min_seq_length: int = 4,  # minimum sequence length to include
     ):
         self.dataset = dataset
         self.frameskip = frameskip
