@@ -21,7 +21,7 @@ from einops import rearrange
 from accelerate import Accelerator
 from torchvision import utils
 from pathlib import Path
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 
@@ -526,36 +526,6 @@ class Trainer:
 
         return logs
 
-    def train_step(self, obs, act):
-        self.model.train()
-        z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
-            obs, act
-        )
-        self.accelerator.backward(loss)
-
-        if self.model.train_encoder:
-            self.encoder_optimizer.step()
-        if self.cfg.has_decoder and self.model.train_decoder:
-            self.decoder_optimizer.step()
-        if self.cfg.has_predictor and self.model.train_predictor:
-            self.predictor_optimizer.step()
-            self.action_encoder_optimizer.step()
-
-        loss = self.accelerator.gather_for_metrics(loss).mean()
-
-        loss_components = self.accelerator.gather_for_metrics(loss_components)
-        loss_components = {
-            key: value.mean().item() for key, value in loss_components.items()
-        }
-
-        z_components = {
-            "z_out": z_out, 
-            "visual_out": visual_out,
-            "visual_reconstructed": visual_reconstructed,
-        }
-
-        return loss_components, z_components
-
     def decoder_eval(self, batch_idx, obs, z_components):
         # only eval images when plotting due to speed
         if self.cfg.has_predictor:
@@ -619,6 +589,37 @@ class Trainer:
                 phase="train",
             )
 
+    def train_step(self, obs, act):
+        self.model.train()
+        z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
+            obs, act
+        )
+        self.accelerator.backward(loss)
+
+        if self.model.train_encoder:
+            self.encoder_optimizer.step()
+        if self.cfg.has_decoder and self.model.train_decoder:
+            self.decoder_optimizer.step()
+        if self.cfg.has_predictor and self.model.train_predictor:
+            self.predictor_optimizer.step()
+            self.action_encoder_optimizer.step()
+
+        loss = self.accelerator.gather_for_metrics(loss).mean()
+
+        loss_components = self.accelerator.gather_for_metrics(loss_components)
+        loss_components = {
+            key: value.mean().item() for key, value in loss_components.items()
+        }
+
+        z_components = {
+            "z_out": z_out, 
+            "visual_out": visual_out,
+            "visual_reconstructed": visual_reconstructed,
+        }
+
+        return loss_components, z_components
+
+
     def train(self):
 
         window_size = self.cfg.num_hist + self.cfg.num_pred
@@ -628,7 +629,9 @@ class Trainer:
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
-            # Input staging time (loader + Accelerate's device placement)
+            
+            batch_loss_components = defaultdict(float)
+
             data_time = time.perf_counter() - prev_time
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
@@ -645,6 +648,8 @@ class Trainer:
                     obs_window = {k: v[:, start_idx:end_idx, ...] for k, v in obs.items()}
                     act_window = act[:, start_idx:end_idx, ...]
                     loss_components, z_components = self.train_step(obs_window, act_window)
+                    for k, v in loss_components.items():
+                        batch_loss_components[k] += (v / num_windows)
 
             compute_end.record()
             torch.cuda.synchronize(self.accelerator.device)
@@ -665,8 +670,7 @@ class Trainer:
             if self.cfg.has_decoder and plot:
                 self.decoder_eval(i, obs_window, z_components)
 
-            loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
-            self.logs_update(loss_components)
+            self.logs_update({f"train_{k}": [v] for k, v in batch_loss_components.items()})
 
             if self.cfg.has_predictor and i % 100 == 0:  # Log every 100 batches
                 alpha_logs = self.get_alpha_values()
