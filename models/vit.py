@@ -29,6 +29,48 @@ def generate_sliding_window_mask(seq_len, window_size):
         mask[i, start:i+1] = 1
     return mask.unsqueeze(0).unsqueeze(0)
 
+
+def generate_mac_mask_matrix(npatch, nwindow, n_persistent, n_retrieved):
+    """
+    Generate frame-level mask for MAC transformer using the same pattern as generate_mask_matrix
+    but accounting for persistent tokens and memory frames.
+    """
+    total_frames = n_persistent + n_retrieved + nwindow
+    
+    # Create blocks for each frame type
+    zeros = torch.zeros(npatch, npatch)
+    ones = torch.ones(npatch, npatch)
+    
+    rows = []
+    
+    # Persistent token rows (can attend to everything)
+    for i in range(n_persistent):
+        row = torch.cat([ones] * total_frames, dim=1)
+        rows.append(row)
+    
+    # Memory frame rows (can attend to everything)
+    for i in range(n_retrieved):
+        row = torch.cat([ones] * total_frames, dim=1)
+        rows.append(row)
+    
+    # Main sequence rows (frame-level causality + access to persistent/memory)
+    for i in range(nwindow):
+        # Allow attention to persistent tokens (all frames can attend to persistent tokens)
+        persistent_blocks = [ones] * n_persistent
+        
+        # Allow attention to memory frames (all frames can attend to memory frames)
+        memory_blocks = [ones] * n_retrieved
+        
+        # Allow attention to current and previous frames in main sequence (frame-level causality)
+        main_blocks = [ones] * (i + 1) + [zeros] * (nwindow - i - 1)
+        
+        row = torch.cat(persistent_blocks + memory_blocks + main_blocks, dim=1)
+        rows.append(row)
+    
+    mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
+    return mask
+
+
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout = 0.):
         super().__init__()
@@ -295,18 +337,24 @@ class MACTransformerBlock(nn.Module):
     def __init__(
         self,
         mem: NeuralMemory,
+        num_patches: int,  # number of patches per frame
+        num_frames: int,     # number of frames in segment
         d_model: int,
         n_heads: int,
         d_ff: int,
         n_persistent: int = 4,  # number of persistent tokens P
         n_retrieved: int = 4,  # number of memory "slots" to prepend (learned projection of M*(Q))
         dropout: float = 0.0,
+        dim_head: int = 64,
+        
     ):
         super().__init__()
         self.d_model = d_model
         self.mem = mem
         self.n_persistent = n_persistent
         self.n_retrieved = n_retrieved
+        self.num_patches = num_patches
+        self.num_frames = num_frames
 
         # persistent tokens (task/meta-knowledge), learned params
         self.P = nn.Parameter(
@@ -314,33 +362,28 @@ class MACTransformerBlock(nn.Module):
         )
 
         # projections for K/V/Q for associative pairs and for queries-to-memory
-        self.W_K = nn.Linear(d_model, d_model)
-        self.W_V = nn.Linear(d_model, d_model)
-        self.W_Q = nn.Linear(d_model, d_model)
+        # self.mem_W_K = nn.Linear(d_model, d_model)
+        # self.mem_W_V = nn.Linear(d_model, d_model)
+        self.mem_W_Q = nn.Linear(d_model, d_model)
 
         # project retrieved memory back into a small set of "context slots" (this could later be replaced by slot attention)
         self.mem_slots = nn.Linear(d_model, n_retrieved * d_model)
 
-        # attention + ffn
-        self.attn = nn.MultiheadAttention(
-            d_model, n_heads, batch_first=True, dropout=dropout
-        )
+        bias = generate_mac_mask_matrix(num_patches, num_frames, n_persistent, n_retrieved)
+        self.attention = Attention(d_model, n_heads, dim_head, dropout)
+        self.attention.register_buffer("bias", bias)
+
         self.norm1 = nn.LayerNorm(d_model)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_ff),
             nn.SiLU(),
             nn.Linear(d_ff, d_model),
+            nn.Dropout(dropout)
         )
         self.norm2 = nn.LayerNorm(d_model)
-        self.drop = nn.Dropout(dropout)
 
-    def _causal_mask(self, L: int, device: torch.device):
-        # standard autoregressive mask (allow attending to <= current)
-        # shape [L, L], True = mask out
-        mask = torch.triu(
-            torch.ones(L, L, device=device, dtype=torch.bool), diagonal=1
-        )
-        return mask
+    def reset_memory(self):
+        self.mem.reset_weights()
 
     def forward(
         self,
@@ -350,39 +393,30 @@ class MACTransformerBlock(nn.Module):
         B, T, D = x_seg.shape
         device = x_seg.device
 
-        # build associative pairs for memory update (save for mayber updating before processing later)
-        k_t = self.W_K(x_seg)  # [B, T, d]
-        v_t = self.W_V(x_seg)  # [B, T, d]
-
         # retrieve long-term memory for current segment
-        q_t = self.W_Q(x_seg)  # [B, T, d]
-        h = self.mem.retrieve(q_t)  # [B, T, d]
+        q_t = self.mem_W_Q(x_seg)  # [B, T, d_model]
+        h = self.mem.retrieve(q_t)  # [B, T, d_model]
 
-        # compress retrieved “per-token” memory into a fixed number of slots
-        h_slots = self.mem_slots(h)  # [B, T, n_retrieved*d]
+        # compress retrieved "per-token" memory into a fixed number of slots
+        h_slots = self.mem_slots(h)  # [B, T, n_retrieved*d_model]
         h_slots = h_slots.mean(  # TODO: try different pooling
             dim=1
-        )  # [B, n_retrieved*d] (pool over time in segment)
-        h_slots = h_slots.view(B, self.n_retrieved, D)  # [B, n_retrieved, d]
+        )  # [B, n_retrieved*d_model] (pool over time in segment)
+        h_slots = h_slots.view(B, self.n_retrieved, self.d_model)  # [B, n_retrieved, d_model]
 
         # prepend persistent tokens and retrieved memory slots
-        P = self.P.unsqueeze(0).expand(B, -1, -1)  # [B, n_persistent, d]
+        P = self.P.unsqueeze(0).expand(B, -1, -1)  # [B, n_persistent, d_model]
         x_aug = torch.cat(
             [P, h_slots, x_seg], dim=1
-        )  # [B, n_persistent + n_retrieved + T, d]
+        )  # [B, n_persistent + n_retrieved + T, d_model]
 
-        # attention over augmented sequence (causal over the whole thing)
-        L = x_aug.size(1)
-        attn_mask = self._causal_mask(L, device=device)
-        # Pre-norm
-        y = self.norm1(x_aug)
-        y, _ = self.attn(y, y, y, attn_mask=attn_mask)
-        x_aug = x_aug + self.drop(y)
+        # Use the existing Attention class
+        x_aug = self.norm1(x_aug)
+        x_aug = x_aug + self.attention(x_aug)
 
         #  FFN
         y2 = self.norm2(x_aug)
-        y2 = self.ff(y2)
-        x_aug = x_aug + self.drop(y2)
+        x_aug = x_aug + self.ff(y2)
 
         # strip off the prepended tokens; only return the positions corresponding to the segment
         out = x_aug[:, self.n_persistent + self.n_retrieved :, :]  # [B, T, d]
@@ -390,20 +424,20 @@ class MACTransformerBlock(nn.Module):
         #  update memory online using this segment (after attention)
         if update_memory:
             # optional: use attended features for richer K/V (can switch to x_seg if you want pure tokens)
-            k_upd = self.W_K(out).detach()
-            v_upd = self.W_V(out).detach()
-            self.mem.update_from_batch(k_upd, v_upd)
+            # k_upd = self.mem_W_K(out).detach()
+            # v_upd = self.mem_W_V(out).detach()
+            self.mem.update_from_batch(out.detach(), out.detach())
 
         return out
 
 class MACTransformer(nn.Module):
-    def __init__(self, memory_module: NeuralMemory, dim, depth, heads, mlp_dim, dropout=0.0, n_persistent=4, n_retrieved=4):
+    def __init__(self, memory_module: NeuralMemory, num_patches, num_frames, dim, depth, heads, mlp_dim, dropout=0.0, n_persistent=4, n_retrieved=4, dim_head=64):
         super().__init__()
         self.mem = memory_module
         self.norm = nn.LayerNorm(dim)
         self.layers = nn.ModuleList([])
         for _ in range(depth):
-            self.layers.append(MACTransformerBlock(mem=memory_module, d_model=dim, n_heads=heads, d_ff=mlp_dim, n_persistent=n_persistent, n_retrieved=n_retrieved, dropout=dropout))
+            self.layers.append(MACTransformerBlock(mem=memory_module, num_patches=num_patches, num_frames=num_frames, d_model=dim, n_heads=heads, d_ff=mlp_dim, n_persistent=n_persistent, n_retrieved=n_retrieved, dropout=dropout, dim_head=dim_head))
     
     def forward(self, x):
         for layer in self.layers:
@@ -412,19 +446,20 @@ class MACTransformer(nn.Module):
 
 
 class MACViTPredictor(nn.Module):
-    def __init__(self, *, memory_module: NeuralMemory, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dropout=0., emb_dropout=0., n_persistent=4, n_retrieved=4):
+    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dropout=0., emb_dropout=0., n_persistent=4, n_retrieved=4, dim_head=64, hidden_scale=2, mem_depth=2, mem_eta=0.9, mem_theta=1e-3, mem_alpha=1e-5):
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
         
         super().__init__()
-        self.mem = memory_module
         self.num_patches = num_patches
         self.num_frames = num_frames
         self.dim = dim
         self.pool = pool
 
+        self.mem = NeuralMemory(d_model=dim, hidden_scale=hidden_scale, depth=mem_depth, eta=mem_eta, theta=mem_theta, alpha=mem_alpha)
+
         self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = MACTransformer(memory_module, dim, depth, heads, mlp_dim, dropout, n_persistent, n_retrieved)
+        self.transformer = MACTransformer(self.mem, num_patches, num_frames, dim, depth, heads, mlp_dim, dropout, n_persistent, n_retrieved, dim_head)
 
     def forward(self, x):
         b, n, _ = x.shape

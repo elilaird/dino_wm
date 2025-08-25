@@ -605,6 +605,17 @@ class Trainer:
         )
         self.accelerator.backward(loss)
 
+        if torch.isnan(loss):
+            print(f"[Rank {self.accelerator.process_index}] Loss is NaN at epoch {self.epoch}")
+            for name, param in self.model.named_parameters():
+                if param.grad is not None and torch.isnan(param.grad).any():
+                    print(f"NaN detected in gradients of {name}")
+            raise RuntimeError("NaN loss detected during training.")
+        for name, param in self.model.named_parameters():
+            if param.grad is not None and torch.isnan(param.grad).any():
+                print(f"[Rank {self.accelerator.process_index}] NaN detected in gradients of {name} at epoch {self.epoch}")
+                raise RuntimeError(f"NaN gradient detected in {name} during training.")
+
         if self.model.train_encoder:
             self.encoder_optimizer.step()
         if self.cfg.has_decoder and self.model.train_decoder:
@@ -636,6 +647,9 @@ class Trainer:
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
+            
+            if hasattr(self.model.predictor, "reset_memory"):
+                self.model.predictor.reset_memory()
 
             batch_loss_components = defaultdict(float)
 
@@ -648,7 +662,6 @@ class Trainer:
             self.model.train()
             compute_start.record()
 
-            # with self.accelerator.accumulate(self.model):
             for window_idx in range(num_windows):
                 start_idx = window_idx * self.window_size
                 end_idx = start_idx + self.window_size
@@ -803,6 +816,9 @@ class Trainer:
 
         # rollout with both num_hist and 1 frame as context
         num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
+
+        if hasattr(self.model.predictor, "reset_memory"):
+            self.model.predictor.reset_memory()
 
         # sample traj
         for idx in range(num_rollout):

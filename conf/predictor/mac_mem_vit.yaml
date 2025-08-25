@@ -7,10 +7,8 @@ emb_dropout: 0
 pool: 'mean'
 n_persistent: 4
 n_retrieved: 4
-memory_module:
-  _target_: models.memory.NeuralMemory
-  hidden_scale: 2
-  depth: 3
-  eta: 0.9
-  theta: 0.9
-  alpha: 0.01
+hidden_scale: 2
+mem_depth: 3
+mem_eta: 0.9
+mem_theta: 0.1
+mem_alpha: 0.01
