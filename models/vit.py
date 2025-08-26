@@ -2,31 +2,34 @@
 import torch
 from torch import nn
 from einops import rearrange
-from .memory import NeuralMemory
+from .memory import NeuralMemory, LookupMemory
 
 # helpers
 NUM_FRAMES = 1
 NUM_PATCHES = 1
 
+
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
+
 
 def generate_mask_matrix(npatch, nwindow):
     zeros = torch.zeros(npatch, npatch)
     ones = torch.ones(npatch, npatch)
     rows = []
     for i in range(nwindow):
-        row = torch.cat([ones] * (i+1) + [zeros] * (nwindow - i-1), dim=1)
+        row = torch.cat([ones] * (i + 1) + [zeros] * (nwindow - i - 1), dim=1)
         rows.append(row)
     mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
     return mask
+
 
 def generate_sliding_window_mask(seq_len, window_size):
     """Generate mask for sliding window attention"""
     mask = torch.zeros(seq_len, seq_len)
     for i in range(seq_len):
         start = max(0, i - window_size + 1)
-        mask[i, start:i+1] = 1
+        mask[i, start : i + 1] = 1
     return mask.unsqueeze(0).unsqueeze(0)
 
 
@@ -36,43 +39,43 @@ def generate_mac_mask_matrix(npatch, nwindow, n_persistent, n_retrieved):
     but accounting for persistent tokens and memory frames.
     """
     total_frames = n_persistent + n_retrieved + nwindow
-    
+
     # Create blocks for each frame type
     zeros = torch.zeros(npatch, npatch)
     ones = torch.ones(npatch, npatch)
-    
+
     rows = []
-    
+
     # Persistent token rows (can attend to everything)
     for i in range(n_persistent):
         row = torch.cat([ones] * total_frames, dim=1)
         rows.append(row)
-    
+
     # Memory frame rows (can attend to everything)
     for i in range(n_retrieved):
         row = torch.cat([ones] * total_frames, dim=1)
         rows.append(row)
-    
+
     # Main sequence rows (frame-level causality + access to persistent/memory)
     for i in range(nwindow):
         # Allow attention to persistent tokens (all frames can attend to persistent tokens)
         persistent_blocks = [ones] * n_persistent
-        
+
         # Allow attention to memory frames (all frames can attend to memory frames)
         memory_blocks = [ones] * n_retrieved
-        
+
         # Allow attention to current and previous frames in main sequence (frame-level causality)
         main_blocks = [ones] * (i + 1) + [zeros] * (nwindow - i - 1)
-        
+
         row = torch.cat(persistent_blocks + memory_blocks + main_blocks, dim=1)
         rows.append(row)
-    
+
     mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
     return mask
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout = 0.):
+    def __init__(self, dim, hidden_dim, dropout=0.0):
         super().__init__()
         self.net = nn.Sequential(
             nn.LayerNorm(dim),
@@ -80,32 +83,34 @@ class FeedForward(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, dim),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
         return self.net(x)
 
+
 class Attention(nn.Module):
-    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
         super().__init__()
-        inner_dim = dim_head *  heads
+        inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
 
         self.heads = heads
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head**-0.5
 
         self.norm = nn.LayerNorm(dim)
 
-        self.attend = nn.Softmax(dim = -1)
+        self.attend = nn.Softmax(dim=-1)
         self.dropout = nn.Dropout(dropout)
 
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
 
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, dim),
-            nn.Dropout(dropout)
-        ) if project_out else nn.Identity()
+        self.to_out = (
+            nn.Sequential(nn.Linear(inner_dim, dim), nn.Dropout(dropout))
+            if project_out
+            else nn.Identity()
+        )
 
         bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
         self.register_buffer("bias", bias)
@@ -119,8 +124,10 @@ class Attention(nn.Module):
 
         x = self.norm(x)
 
-        qkv = self.to_qkv(x).chunk(3, dim = -1)
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv)
+        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = map(
+            lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), qkv
+        )
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         # apply causal mask
@@ -130,20 +137,29 @@ class Attention(nn.Module):
         attn = self.dropout(attn)
 
         out = torch.matmul(attn, v)
-        out = rearrange(out, 'b h n d -> b n (h d)')
+        out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
 
 
 class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
         self.layers = nn.ModuleList([])
         for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout),
-                FeedForward(dim, mlp_dim, dropout = dropout)
-            ]))
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim,
+                            heads=heads,
+                            dim_head=dim_head,
+                            dropout=dropout,
+                        ),
+                        FeedForward(dim, mlp_dim, dropout=dropout),
+                    ]
+                )
+            )
 
     def forward(self, x):
         for attn, ff in self.layers:
@@ -152,27 +168,49 @@ class Transformer(nn.Module):
 
         return self.norm(x)
 
+
 class ViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        pool="cls",
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0
+    ):
         super().__init__()
-        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+        assert pool in {
+            "cls",
+            "mean",
+        }, "pool type must be either cls (cls token) or mean (mean pooling)"
 
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
         NUM_FRAMES = num_frames
         NUM_PATCHES = num_patches
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * (num_patches), dim)) # dim for the pos encodings
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * (num_patches), dim)
+        )  # dim for the pos encodings
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
-        self.pool = pool    
+        self.transformer = Transformer(
+            dim, depth, heads, dim_head, mlp_dim, dropout
+        )
+        self.pool = pool
 
-
-    def forward(self, x): # x: (b, window_size * H/patch_size * W/patch_size, 384)
+    def forward(
+        self, x
+    ):  
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
-        x = self.dropout(x) 
-        x = self.transformer(x)  
+        x = self.dropout(x)
+        x = self.transformer(x)
         return x
 
 
@@ -257,9 +295,9 @@ class AdditiveControlTransformer(Transformer):
             [nn.Linear(action_emb_dim, dim) for _ in range(depth)]
         )
         # Per-layer alpha parameters
-        self.alphas = nn.ParameterList([
-            nn.Parameter(torch.tensor(alpha_init)) for _ in range(depth)
-        ])
+        self.alphas = nn.ParameterList(
+            [nn.Parameter(torch.tensor(alpha_init)) for _ in range(depth)]
+        )
 
     def forward(self, x, actions):
         for i, (attn, ff) in enumerate(self.layers):
@@ -268,7 +306,13 @@ class AdditiveControlTransformer(Transformer):
             if i < len(self.injection_layers):
                 # apply injection to visual patches only
                 injection = self.injection_layers[i](actions) * self.alphas[i]
-                injection = torch.cat([injection.repeat(1, x.shape[1]-1, 1), torch.zeros_like(x[:, :1])], dim=1)
+                injection = torch.cat(
+                    [
+                        injection.repeat(1, x.shape[1] - 1, 1),
+                        torch.zeros_like(x[:, :1]),
+                    ],
+                    dim=1,
+                )
                 x = x + injection
         return self.norm(x)
 
@@ -278,6 +322,7 @@ class AdditiveControlViTPredictor(nn.Module):
     ViT predictor with additive control injection for actions.
     Separates action processing from visual/proprio processing to avoid gradient entanglement.
     """
+
     def __init__(
         self,
         *,
@@ -294,7 +339,10 @@ class AdditiveControlViTPredictor(nn.Module):
         alpha_init=0.1
     ):
         super().__init__()
-        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+        assert pool in {
+            "cls",
+            "mean",
+        }, "pool type must be either cls (cls token) or mean (mean pooling)"
 
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
@@ -306,9 +354,13 @@ class AdditiveControlViTPredictor(nn.Module):
         self.dim = dim
         self.pool = pool
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = AdditiveControlTransformer(dim, depth, heads, dim_head, mlp_dim, dim, alpha_init, dropout)
+        self.transformer = AdditiveControlTransformer(
+            dim, depth, heads, dim_head, mlp_dim, dim, alpha_init, dropout
+        )
 
     def forward(self, x):
         """
@@ -321,7 +373,7 @@ class AdditiveControlViTPredictor(nn.Module):
         x = self.dropout(x)
 
         action_emb = x[:, -1:, :].clone()  # (b, 1, dim)
-        x = x[:, :-1, :] # remove the action token
+        x = x[:, :-1, :]  # remove the action token
         x = self.transformer(x, action_emb)
         x = torch.cat([x, action_emb], dim=1)
         return x
@@ -338,7 +390,7 @@ class MACTransformerBlock(nn.Module):
         self,
         mem: NeuralMemory,
         num_patches: int,  # number of patches per frame
-        num_frames: int,     # number of frames in segment
+        num_frames: int,  # number of frames in segment
         d_model: int,
         n_heads: int,
         d_ff: int,
@@ -346,7 +398,6 @@ class MACTransformerBlock(nn.Module):
         n_retrieved: int = 4,  # number of memory "slots" to prepend (learned projection of M*(Q))
         dropout: float = 0.0,
         dim_head: int = 64,
-        
     ):
         super().__init__()
         self.d_model = d_model
@@ -356,20 +407,31 @@ class MACTransformerBlock(nn.Module):
         self.num_patches = num_patches
         self.num_frames = num_frames
 
+        self.h_norm = nn.LayerNorm(
+            d_model, eps=1e-5
+        )  # for retrieved slots h_slots
+        self.q_norm = nn.LayerNorm(
+            d_model, eps=1e-5
+        )  # optional: normalize queries before memory)
+
         # persistent tokens (task/meta-knowledge), learned params
-        self.P = nn.Parameter(
-            torch.randn(n_persistent, d_model) / d_model**0.5
-        )
+        if self.n_persistent > 0:
+            self.P = nn.Parameter(
+                torch.randn(n_persistent, d_model)
+            )
+            self.p_norm = nn.LayerNorm(
+                d_model, eps=1e-5
+            )  # for persistent tokens P
 
         # projections for K/V/Q for associative pairs and for queries-to-memory
-        # self.mem_W_K = nn.Linear(d_model, d_model)
-        # self.mem_W_V = nn.Linear(d_model, d_model)
         self.mem_W_Q = nn.Linear(d_model, d_model)
 
         # project retrieved memory back into a small set of "context slots" (this could later be replaced by slot attention)
         self.mem_slots = nn.Linear(d_model, n_retrieved * d_model)
 
-        bias = generate_mac_mask_matrix(num_patches, num_frames, n_persistent, n_retrieved)
+        bias = generate_mac_mask_matrix(
+            num_patches, num_frames, n_persistent, n_retrieved
+        )
         self.attention = Attention(d_model, n_heads, dim_head, dropout)
         self.attention.register_buffer("bias", bias)
 
@@ -378,7 +440,7 @@ class MACTransformerBlock(nn.Module):
             nn.Linear(d_model, d_ff),
             nn.SiLU(),
             nn.Linear(d_ff, d_model),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
         self.norm2 = nn.LayerNorm(d_model)
 
@@ -394,7 +456,7 @@ class MACTransformerBlock(nn.Module):
         device = x_seg.device
 
         # retrieve long-term memory for current segment
-        q_t = self.mem_W_Q(x_seg)  # [B, T, d_model]
+        q_t = self.mem_W_Q(self.q_norm(x_seg))  # [B, T, d_model]
         h = self.mem.retrieve(q_t)  # [B, T, d_model]
 
         # compress retrieved "per-token" memory into a fixed number of slots
@@ -402,13 +464,21 @@ class MACTransformerBlock(nn.Module):
         h_slots = h_slots.mean(  # TODO: try different pooling
             dim=1
         )  # [B, n_retrieved*d_model] (pool over time in segment)
-        h_slots = h_slots.view(B, self.n_retrieved, self.d_model)  # [B, n_retrieved, d_model]
+        h_slots = h_slots.view(
+            B, self.n_retrieved, self.d_model
+        )  # [B, n_retrieved, d_model]
+        h_slots = self.h_norm(h_slots)
 
         # prepend persistent tokens and retrieved memory slots
-        P = self.P.unsqueeze(0).expand(B, -1, -1)  # [B, n_persistent, d_model]
-        x_aug = torch.cat(
-            [P, h_slots, x_seg], dim=1
-        )  # [B, n_persistent + n_retrieved + T, d_model]
+        if self.n_persistent > 0:
+            P = self.p_norm(self.P).unsqueeze(0).expand(B, -1, -1)  # [B, n_persistent, d_model]
+            x_aug = torch.cat(
+                [P, h_slots, x_seg], dim=1
+            )  # [B, n_persistent + n_retrieved + T, d_model]
+        else:
+            x_aug = torch.cat(
+                [h_slots, x_seg], dim=1
+            )  # [B, n_retrieved + T, d_model]
 
         # Use the existing Attention class
         x_aug = self.norm1(x_aug)
@@ -430,15 +500,42 @@ class MACTransformerBlock(nn.Module):
 
         return out
 
+
 class MACTransformer(nn.Module):
-    def __init__(self, memory_module: NeuralMemory, num_patches, num_frames, dim, depth, heads, mlp_dim, dropout=0.0, n_persistent=4, n_retrieved=4, dim_head=64):
+    def __init__(
+        self,
+        memory_module: NeuralMemory,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        dropout=0.0,
+        n_persistent=4,
+        n_retrieved=4,
+        dim_head=64,
+    ):
         super().__init__()
         self.mem = memory_module
         self.norm = nn.LayerNorm(dim)
         self.layers = nn.ModuleList([])
         for _ in range(depth):
-            self.layers.append(MACTransformerBlock(mem=memory_module, num_patches=num_patches, num_frames=num_frames, d_model=dim, n_heads=heads, d_ff=mlp_dim, n_persistent=n_persistent, n_retrieved=n_retrieved, dropout=dropout, dim_head=dim_head))
-    
+            self.layers.append(
+                MACTransformerBlock(
+                    mem=memory_module,
+                    num_patches=num_patches,
+                    num_frames=num_frames,
+                    d_model=dim,
+                    n_heads=heads,
+                    d_ff=mlp_dim,
+                    n_persistent=n_persistent,
+                    n_retrieved=n_retrieved,
+                    dropout=dropout,
+                    dim_head=dim_head,
+                )
+            )
+
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
@@ -446,23 +543,217 @@ class MACTransformer(nn.Module):
 
 
 class MACViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, depth, heads, mlp_dim, pool='cls', dropout=0., emb_dropout=0., n_persistent=4, n_retrieved=4, dim_head=64, hidden_scale=2, mem_depth=2, mem_eta=0.9, mem_theta=1e-3, mem_alpha=1e-5):
-        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
-        
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        pool="cls",
+        dropout=0.0,
+        emb_dropout=0.0,
+        n_persistent=4,
+        n_retrieved=4,
+        dim_head=64,
+        hidden_scale=2,
+        mem_depth=2,
+        mem_eta=0.9,
+        mem_theta=1e-3,
+        mem_alpha=1e-5,
+        max_grad_norm=1.0,
+        momentum_clip=1.0,
+        weight_clip=5.0,
+    ):
+        assert pool in {
+            "cls",
+            "mean",
+        }, "pool type must be either cls (cls token) or mean (mean pooling)"
+
         super().__init__()
         self.num_patches = num_patches
         self.num_frames = num_frames
         self.dim = dim
         self.pool = pool
 
-        self.mem = NeuralMemory(d_model=dim, hidden_scale=hidden_scale, depth=mem_depth, eta=mem_eta, theta=mem_theta, alpha=mem_alpha)
+        self.mem = NeuralMemory(
+            d_model=dim,
+            hidden_scale=hidden_scale,
+            depth=mem_depth,
+            eta=mem_eta,
+            theta=mem_theta,
+            alpha=mem_alpha,
+            max_grad_norm=max_grad_norm,
+            momentum_clip=momentum_clip,
+            weight_clip=weight_clip,
+        )
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = MACTransformer(self.mem, num_patches, num_frames, dim, depth, heads, mlp_dim, dropout, n_persistent, n_retrieved, dim_head)
+        self.transformer = MACTransformer(
+            self.mem,
+            num_patches,
+            num_frames,
+            dim,
+            depth,
+            heads,
+            mlp_dim,
+            dropout,
+            n_persistent,
+            n_retrieved,
+            dim_head,
+        )
 
     def forward(self, x):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
         return self.transformer(x)
+    
+    def reset_memory(self):
+        self.mem.reset_weights()
+
+
+class LookupTransformerBlock(nn.Module):
+    def __init__(
+        self,
+        mem: LookupMemory,
+        num_patches: int,
+        num_frames: int,
+        d_model: int, 
+        n_heads: int, 
+        d_ff: int,
+        dropout: float = 0.0,
+        dim_head: int = 64,
+    ):
+        super().__init__()
+        self.mem = mem
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_ff = d_ff
+        self.dropout = dropout
+        self.dim_head = dim_head
+
+        self.attention = Attention(d_model, n_heads, dim_head, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.SiLU(),
+            nn.Linear(d_ff, d_model),
+            nn.Dropout(dropout),
+        )
+        self.norm2 = nn.LayerNorm(d_model)
+        
+    def forward(self, x):
+        B, T, D = x.shape
+
+        # lookup memory
+        memory = self.mem.retrieve()
+        memory = memory[:B, :T, :]
+        x_aug = torch.cat([memory, x], dim=1)
+
+        x_aug = self.norm1(x_aug)
+        x_aug = x_aug + self.attention(x_aug)
+
+        # FFN
+        y2 = self.norm2(x_aug)
+        x_aug = x_aug + self.ff(y2)
+
+        # strip off the prepended tokens; only return the positions corresponding to the segment
+        out = x_aug[:, T: :, :]  # [B, T, d]
+        
+        # update memory online using this segment (after attention)
+        self.mem.update(x)
+        
+        return out
+    
+class LookupTransformer(nn.Module):
+    def __init__(
+        self,
+        mem: LookupMemory,
+        num_patches: int,
+        num_frames: int,
+        dim: int,
+        depth: int,
+        heads: int,
+        mlp_dim: int,
+        dropout: float = 0.0,
+        dim_head: int = 64,
+    ):
+        super().__init__()
+        self.mem = mem
+        self.norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                LookupTransformerBlock(
+                    mem=mem,
+                    num_patches=num_patches,
+                    num_frames=num_frames,
+                    d_model=dim,
+                    n_heads=heads,
+                    d_ff=mlp_dim,
+                    dropout=dropout,
+                    dim_head=dim_head,
+                )
+            )
+            
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return self.norm(x)
+
+class LookupViTPredictor(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        batch_size,
+        pool="cls",
+        dropout=0.0,
+        emb_dropout=0.0,
+        dim_head=64,
+    ):
+        super().__init__()
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.dim = dim
+        self.pool = pool
+
+        self.mem = LookupMemory(dim, batch_size,  num_frames * num_patches)
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = LookupTransformer(
+            self.mem,
+            num_patches,
+            num_frames,
+            dim,
+            depth,
+            heads,
+            mlp_dim,
+            dropout,
+            dim_head,
+        )
+    
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
+
+    def reset_memory(self):
+        self.mem.reset_weights()

@@ -297,10 +297,6 @@ class Trainer:
 
         # self.action_encoder = self.accelerator.prepare(self.action_encoder)
 
-        if self.accelerator.is_main_process:
-            self.wandb_run.watch(self.action_encoder)
-            self.wandb_run.watch(self.proprio_encoder)
-
         # initialize predictor
         if self.encoder.latent_ndim == 1:  # if feature is 1D
             num_patches = 1
@@ -328,6 +324,8 @@ class Trainer:
             if not self.train_predictor:
                 for param in self.predictor.parameters():
                     param.requires_grad = False
+            if self.accelerator.is_main_process:
+                self.wandb_run.watch(self.predictor)
 
         # initialize decoder
         if self.cfg.has_decoder:
@@ -611,10 +609,14 @@ class Trainer:
                 if param.grad is not None and torch.isnan(param.grad).any():
                     print(f"NaN detected in gradients of {name}")
             raise RuntimeError("NaN loss detected during training.")
-        for name, param in self.model.named_parameters():
-            if param.grad is not None and torch.isnan(param.grad).any():
-                print(f"[Rank {self.accelerator.process_index}] NaN detected in gradients of {name} at epoch {self.epoch}")
-                raise RuntimeError(f"NaN gradient detected in {name} during training.")
+        
+
+        grad_norm = 0.0
+        for p in self.model.predictor.parameters():
+            if p.grad is not None:
+                grad_norm += p.grad.norm().item() ** 2
+        grad_norm = grad_norm ** 0.5
+        self.logs_update({"train_predictor_grad_norm": [grad_norm]})
 
         if self.model.train_encoder:
             self.encoder_optimizer.step()
@@ -723,6 +725,9 @@ class Trainer:
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
             num_windows = N // self.window_size
+
+            if hasattr(self.model.predictor, "reset_memory"):
+                self.model.predictor.reset_memory()
 
             for window_idx in range(num_windows):
                 start_idx = window_idx * self.window_size

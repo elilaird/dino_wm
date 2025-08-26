@@ -10,13 +10,31 @@ class NeuralMemory(nn.Module):
       update:   M <- M - step * grad(||M(k)-v||^2), with momentum & decay
     """
 
-    def __init__(self, d_model: int, hidden_scale: int = 2, depth: int = 2, 
-                 eta: float = 0.9, theta: float = 1e-3, alpha: float = 1e-5, max_grad_norm: float = 1):
+    def __init__(
+        self,
+        d_model: int,
+        hidden_scale: int = 2,
+        depth: int = 2,
+        eta: float = 0.9,
+        theta: float = 1e-3,
+        alpha: float = 1e-5,
+        max_grad_norm: float = 1,
+        momentum_clip: float = 1.0,
+        weight_clip: float = 5.0,
+    ):
         super().__init__()
-        self.register_buffer('eta', torch.tensor(eta))  # surprise momentum decay (η_t)
-        self.register_buffer('theta', torch.tensor(theta))  # learning rate (θ_t)
-        self.register_buffer('alpha', torch.tensor(alpha))  # weight decay (α_t) ~ forgetting
+        self.register_buffer(
+            "eta", torch.tensor(eta)
+        )  # surprise momentum decay (η_t)
+        self.register_buffer(
+            "theta", torch.tensor(theta)
+        )  # learning rate (θ_t)
+        self.register_buffer(
+            "alpha", torch.tensor(alpha)
+        )  # weight decay (α_t) ~ forgetting
         self.max_grad_norm = max_grad_norm
+        self.momentum_clip = momentum_clip
+        self.weight_clip = weight_clip
         d_hidden = d_model * hidden_scale
 
         layers = []
@@ -84,18 +102,19 @@ class NeuralMemory(nn.Module):
 
         # manual momentum + decay update
         with torch.no_grad():
-            for p, g, m in zip(self.net.parameters(), grads, self.momentum_buffers):
-                # Use g directly since it's already norm-clipped
+            for p, g, m in zip(
+                self.net.parameters(), grads, self.momentum_buffers
+            ):
                 m.mul_(self.eta).add_(g, alpha=-self.theta)
 
                 # Clip momentum to prevent explosion
-                m.clamp_(-1.0, 1.0)
+                m.clamp_(-self.momentum_clip, self.momentum_clip)
 
                 # forgetting (weight decay) and step:
                 p.mul_(1.0 - self.alpha).add_(m)  # W = (1-alpha)W + m
 
                 # Clip weights to prevent explosion
-                p.clamp_(-5.0, 5.0)
+                p.clamp_(-self.weight_clip, self.weight_clip)
 
         # clear grads to keep graph light
         for p in self.net.parameters():
@@ -121,3 +140,25 @@ class NeuralMemory(nn.Module):
         self.net.reset_parameters()
         self.S_buf.zero_()
         self.momentum_buffers = []  # Reset momentum buffers
+
+
+class LookupMemory(nn.Module):
+    def __init__(self, d_model: int, batch_size: int, n_retrieved: int):
+        super().__init__()
+        self.d_model = d_model
+        self.n_retrieved = n_retrieved
+        self.register_buffer(
+            "memory_bank", torch.zeros((batch_size, n_retrieved, d_model))
+        )
+
+    def retrieve(self):
+        return self.memory_bank.clone()
+    
+    def update(self, batch):
+        self.memory_bank = batch.detach().clone()
+
+    def forward(self):
+        return self.retrieve()
+
+    def reset_weights(self):
+        self.memory_bank.zero_()
