@@ -21,6 +21,7 @@ class NeuralMemory(nn.Module):
         max_grad_norm: float = 1,
         momentum_clip: float = 1.0,
         weight_clip: float = 5.0,
+        update_steps: int = 1,
     ):
         super().__init__()
         self.register_buffer(
@@ -35,6 +36,7 @@ class NeuralMemory(nn.Module):
         self.max_grad_norm = max_grad_norm
         self.momentum_clip = momentum_clip
         self.weight_clip = weight_clip
+        self.update_steps = update_steps
         d_hidden = d_model * hidden_scale
 
         layers = []
@@ -86,39 +88,43 @@ class NeuralMemory(nn.Module):
         for p in self.net.parameters():
             p.requires_grad_(True)
 
-        loss = assoc_loss()
-        grads = torch.autograd.grad(
-            loss,
-            list(self.net.parameters()),
-            create_graph=False,
-            retain_graph=False,
-        )
+        
+        for step in range(self.update_steps):
 
-        # Apply norm clipping to the grads list
-        total_norm = torch.norm(torch.stack([torch.norm(g) for g in grads]))
-        if total_norm > self.max_grad_norm:
-            clip_coef = self.max_grad_norm / total_norm
-            grads = [g * clip_coef for g in grads]
+            loss = assoc_loss()
+            grads = torch.autograd.grad(
+                loss,
+                list(self.net.parameters()),
+                create_graph=False,
+                retain_graph=False,
+            )
 
-        # manual momentum + decay update
-        with torch.no_grad():
-            for p, g, m in zip(
-                self.net.parameters(), grads, self.momentum_buffers
-            ):
-                m.mul_(self.eta).add_(g, alpha=-self.theta)
+            # Apply norm clipping to the grads list
+            total_norm = torch.norm(torch.stack([torch.norm(g) for g in grads]))
+            if total_norm > self.max_grad_norm:
+                clip_coef = self.max_grad_norm / total_norm
+                grads = [g * clip_coef for g in grads]
 
-                # Clip momentum to prevent explosion
-                m.clamp_(-self.momentum_clip, self.momentum_clip)
+            # manual momentum + decay update
+            with torch.no_grad():
+                for p, g, m in zip(
+                    self.net.parameters(), grads, self.momentum_buffers
+                ):
+                    m.mul_(self.eta).add_(g, alpha=-self.theta)
 
-                # forgetting (weight decay) and step:
-                p.mul_(1.0 - self.alpha).add_(m)  # W = (1-alpha)W + m
+                    # Clip momentum to prevent explosion
+                    m.clamp_(-self.momentum_clip, self.momentum_clip)
 
-                # Clip weights to prevent explosion
-                p.clamp_(-self.weight_clip, self.weight_clip)
+                    # forgetting (weight decay) and step:
+                    p.mul_(1.0 - self.alpha).add_(m)  # W = (1-alpha)W + m
 
-        # clear grads to keep graph light
+                    # Clip weights to prevent explosion
+                    p.clamp_(-self.weight_clip, self.weight_clip)
+
+            for p in self.net.parameters():
+                p.grad = None
+        
         for p in self.net.parameters():
-            p.grad = None
             p.requires_grad_(False)
 
     def retrieve(self, q: torch.Tensor) -> torch.Tensor:
@@ -143,22 +149,26 @@ class NeuralMemory(nn.Module):
 
 
 class LookupMemory(nn.Module):
-    def __init__(self, d_model: int, batch_size: int, n_retrieved: int):
+    def __init__(self, d_model: int, bank_size: int):
         super().__init__()
         self.d_model = d_model
-        self.n_retrieved = n_retrieved
+        self.bank_size = bank_size
         self.register_buffer(
-            "memory_bank", torch.zeros((batch_size, n_retrieved, d_model))
+            "memory_bank", torch.empty(bank_size, 0, d_model)
         )
 
     def retrieve(self):
         return self.memory_bank.clone()
     
     def update(self, batch):
-        self.memory_bank = batch.detach().clone()
+        self.memory_bank = torch.cat([
+            self.memory_bank,
+            batch.detach().clone()
+        ], dim=1)
 
     def forward(self):
         return self.retrieve()
 
     def reset_weights(self):
-        self.memory_bank.zero_()
+        self.memory_bank = torch.empty(self.bank_size, 0, self.d_model)
+

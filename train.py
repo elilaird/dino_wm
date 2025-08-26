@@ -154,6 +154,8 @@ class Trainer:
             cfg.wandb_run_id = self.wandb_run.id
             OmegaConf.set_struct(cfg, True)
             wandb.run.name = "{}".format(model_name) + f"_{slurm_job_id}"
+            if self.cfg.dry_run:
+                wandb.run.name += "_dry_run"
             with open(os.path.join(os.getcwd(), "hydra.yaml"), "w") as f:
                 f.write(OmegaConf.to_yaml(cfg, resolve=True))
 
@@ -438,6 +440,8 @@ class Trainer:
             self.monitor_thread.start()
 
         init_epoch = self.epoch + 1  # epoch starts from 1
+        if self.cfg.dry_run:
+            self.total_epochs = 1
         for epoch in range(init_epoch, init_epoch + self.total_epochs):
             self.epoch = epoch
             self.accelerator.wait_for_everyone()
@@ -449,6 +453,9 @@ class Trainer:
             self.accelerator.wait_for_everyone()
             self.val()
             self.accelerator.wait_for_everyone()
+
+            if self.cfg.dry_run:
+                return
 
             # Calculate epoch execution time
             epoch_time = time.time() - epoch_start_time
@@ -700,6 +707,9 @@ class Trainer:
 
             prev_time = time.perf_counter()
 
+            if self.cfg.dry_run:
+                break
+
     def val(self):
         self.model.eval()
         if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
@@ -807,6 +817,9 @@ class Trainer:
             if self.cfg.predictor == "additive_control_vit" and self.cfg.has_predictor and i == 0:  # Log on first validation batch
                 alpha_logs = self.get_alpha_values()
                 self.logs_update({f"val_{k}": [v] for k, v in alpha_logs.items()})
+
+            if self.cfg.dry_run:
+                break
 
     def openloop_rollout(
         self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
@@ -1017,6 +1030,9 @@ class Trainer:
 def main(cfg: OmegaConf):
     trainer = Trainer(cfg)
     trainer.run()
+    trainer.accelerator.end_training()
+    if trainer.accelerator.is_main_process and hasattr(trainer, 'wandb_run'):
+        trainer.wandb_run.finish()
 
 
 if __name__ == "__main__":

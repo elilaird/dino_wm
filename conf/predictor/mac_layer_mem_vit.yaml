@@ -1,10 +1,9 @@
-_target_: models.vit.MACViTPredictor
+_target_: models.vit.LayerMACViTPredictor
 depth: 6
 heads: 16
 mlp_dim: 2048
 dropout: 0.1
 emb_dropout: 0
-pool: 'mean'
 n_persistent: 4
 n_retrieved: 4
 hidden_scale: 2
@@ -13,7 +12,7 @@ mem_eta: 0.9 # prev surprise decay
 mem_theta: 0.1 # memory update rate
 mem_alpha: 0.01 # prev memory forget rate
 max_grad_norm: 1.0 
-momentum_clip: 1.0
+momentum_clip: 1.0     
 weight_clip: 5.0
 update_steps: 1
 use_slots: True

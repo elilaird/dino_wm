@@ -2,6 +2,7 @@
 import torch
 from torch import nn
 from einops import rearrange
+
 from .memory import NeuralMemory, LookupMemory
 
 # helpers
@@ -398,36 +399,43 @@ class MACTransformerBlock(nn.Module):
         n_retrieved: int = 4,  # number of memory "slots" to prepend (learned projection of M*(Q))
         dropout: float = 0.0,
         dim_head: int = 64,
+        use_slots: bool = True,
+        update_type: str = "selfattention", # "selfattention" or "crossattention"
+        proj_k_eq_q: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
         self.mem = mem
+        self.use_slots = use_slots
         self.n_persistent = n_persistent
-        self.n_retrieved = n_retrieved
+        self.n_retrieved = n_retrieved if self.use_slots else num_frames * num_patches
         self.num_patches = num_patches
         self.num_frames = num_frames
+        self.update_type = update_type
+        self.proj_k_eq_q = proj_k_eq_q
+
+        if self.update_type == "crossattention":
+            assert not self.use_slots, "use_slots must be False for crossattention"
 
         self.h_norm = nn.LayerNorm(
             d_model, eps=1e-5
-        )  # for retrieved slots h_slots
+        )  
         self.q_norm = nn.LayerNorm(
             d_model, eps=1e-5
-        )  # optional: normalize queries before memory)
+        )  
 
-        # persistent tokens (task/meta-knowledge), learned params
         if self.n_persistent > 0:
             self.P = nn.Parameter(
                 torch.randn(n_persistent, d_model)
             )
             self.p_norm = nn.LayerNorm(
                 d_model, eps=1e-5
-            )  # for persistent tokens P
+            ) 
 
-        # projections for K/V/Q for associative pairs and for queries-to-memory
         self.mem_W_Q = nn.Linear(d_model, d_model)
 
-        # project retrieved memory back into a small set of "context slots" (this could later be replaced by slot attention)
-        self.mem_slots = nn.Linear(d_model, n_retrieved * d_model)
+        if self.use_slots:
+            self.mem_slots = nn.Linear(d_model, n_retrieved * d_model)
 
         bias = generate_mac_mask_matrix(
             num_patches, num_frames, n_persistent, n_retrieved
@@ -459,25 +467,28 @@ class MACTransformerBlock(nn.Module):
         q_t = self.mem_W_Q(self.q_norm(x_seg))  # [B, T, d_model]
         h = self.mem.retrieve(q_t)  # [B, T, d_model]
 
-        # compress retrieved "per-token" memory into a fixed number of slots
-        h_slots = self.mem_slots(h)  # [B, T, n_retrieved*d_model]
-        h_slots = h_slots.mean(  # TODO: try different pooling
-            dim=1
-        )  # [B, n_retrieved*d_model] (pool over time in segment)
-        h_slots = h_slots.view(
-            B, self.n_retrieved, self.d_model
-        )  # [B, n_retrieved, d_model]
-        h_slots = self.h_norm(h_slots)
+        if self.use_slots:
+            # compress retrieved "per-token" memory into a fixed number of slots
+            h = self.mem_slots(h)  # [B, T, n_retrieved*d_model]
+            h = h.mean(  # TODO: try different pooling
+                dim=1
+            ).view(
+                B, self.n_retrieved, self.d_model
+            )  # [B, n_retrieved, d_model] (pool over time in segment)
+        else:
+            self.n_retrieved = T
+
+        h = self.h_norm(h)
 
         # prepend persistent tokens and retrieved memory slots
         if self.n_persistent > 0:
             P = self.p_norm(self.P).unsqueeze(0).expand(B, -1, -1)  # [B, n_persistent, d_model]
             x_aug = torch.cat(
-                [P, h_slots, x_seg], dim=1
+                [P, h, x_seg], dim=1
             )  # [B, n_persistent + n_retrieved + T, d_model]
         else:
             x_aug = torch.cat(
-                [h_slots, x_seg], dim=1
+                [h, x_seg], dim=1
             )  # [B, n_retrieved + T, d_model]
 
         # Use the existing Attention class
@@ -491,12 +502,22 @@ class MACTransformerBlock(nn.Module):
         # strip off the prepended tokens; only return the positions corresponding to the segment
         out = x_aug[:, self.n_persistent + self.n_retrieved :, :]  # [B, T, d]
 
-        #  update memory online using this segment (after attention)
+        #  update memory online
         if update_memory:
-            # optional: use attended features for richer K/V (can switch to x_seg if you want pure tokens)
-            # k_upd = self.mem_W_K(out).detach()
-            # v_upd = self.mem_W_V(out).detach()
-            self.mem.update_from_batch(out.detach(), out.detach())
+            memory_tokens = x_aug[
+                :, self.n_persistent : self.n_persistent + self.n_retrieved, :
+            ]
+            if self.update_type == "selfattention":
+                k = self.mem_W_Q(self.q_norm(memory_tokens)) if self.proj_k_eq_q else memory_tokens
+                self.mem.update_from_batch(k.detach(), memory_tokens.detach())
+            elif self.update_type == "crossattention":
+                assert out.shape[1] == memory_tokens.shape[1], f"out.shape[1] ({out.shape[1]}) != memory_tokens.shape[1] ({memory_tokens.shape[1]})"
+                k = self.mem_W_Q(self.q_norm(out)) if self.proj_k_eq_q else out
+                self.mem.update_from_batch(
+                    k.detach(), memory_tokens.detach()
+                )
+            else:
+                raise ValueError(f"Invalid update_type: {self.update_type}")
 
         return out
 
@@ -515,6 +536,9 @@ class MACTransformer(nn.Module):
         n_persistent=4,
         n_retrieved=4,
         dim_head=64,
+        use_slots=True,
+        update_type="selfattention",
+        proj_k_eq_q=False,
     ):
         super().__init__()
         self.mem = memory_module
@@ -533,6 +557,9 @@ class MACTransformer(nn.Module):
                     n_retrieved=n_retrieved,
                     dropout=dropout,
                     dim_head=dim_head,
+                    use_slots=use_slots,
+                    update_type=update_type,
+                    proj_k_eq_q=proj_k_eq_q,
                 )
             )
 
@@ -566,6 +593,10 @@ class MACViTPredictor(nn.Module):
         max_grad_norm=1.0,
         momentum_clip=1.0,
         weight_clip=5.0,
+        update_steps=1,
+        use_slots=True,
+        update_type="selfattention",
+        proj_k_eq_q=False,
     ):
         assert pool in {
             "cls",
@@ -588,6 +619,7 @@ class MACViTPredictor(nn.Module):
             max_grad_norm=max_grad_norm,
             momentum_clip=momentum_clip,
             weight_clip=weight_clip,
+            update_steps=update_steps,
         )
 
         self.pos_embedding = nn.Parameter(
@@ -606,6 +638,151 @@ class MACViTPredictor(nn.Module):
             n_persistent,
             n_retrieved,
             dim_head,
+            use_slots,
+            update_type,
+            proj_k_eq_q,
+        )
+
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
+
+    def reset_memory(self):
+        self.mem.reset_weights()
+
+
+class LayerMACTransformer(nn.Module):
+    def __init__(
+        self,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        hidden_scale,
+        mem_depth,
+        mem_eta,
+        mem_theta,
+        mem_alpha,
+        max_grad_norm,
+        momentum_clip,
+        weight_clip,
+        update_steps,
+        dropout=0.0,
+        n_persistent=4,
+        n_retrieved=4,
+        dim_head=64,
+        use_slots=True,
+        update_type="selfattention",
+        proj_k_eq_q=False,
+    ):
+        super().__init__()
+
+        self.norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                MACTransformerBlock(
+                    mem=NeuralMemory(
+                        d_model=dim,
+                        hidden_scale=hidden_scale,
+                        depth=mem_depth,
+                        eta=mem_eta,
+                        theta=mem_theta,
+                        alpha=mem_alpha,
+                        max_grad_norm=max_grad_norm,
+                        momentum_clip=momentum_clip,
+                        weight_clip=weight_clip,
+                        update_steps=update_steps,
+                    ),
+                    num_patches=num_patches,
+                    num_frames=num_frames,
+                    d_model=dim,
+                    n_heads=heads,
+                    d_ff=mlp_dim,
+                    n_persistent=n_persistent,
+                    n_retrieved=n_retrieved,
+                    dropout=dropout,
+                    dim_head=dim_head,
+                    use_slots=use_slots,
+                    update_type=update_type,
+                    proj_k_eq_q=proj_k_eq_q,
+                )
+            )
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return self.norm(x)
+
+    def reset_memory(self):
+        for layer in self.layers:
+            layer.reset_memory()
+
+
+class LayerMACViTPredictor(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        dropout=0.0,
+        emb_dropout=0.0,
+        hidden_scale=2,
+        mem_depth=2,
+        mem_eta=0.9,
+        mem_theta=1e-3,
+        mem_alpha=1e-5,
+        max_grad_norm=1.0,
+        momentum_clip=1.0,
+        weight_clip=5.0,
+        update_steps=1,
+        n_persistent=4,
+        n_retrieved=4,
+        dim_head=64,
+        use_slots=True,
+        update_type="selfattention",
+        proj_k_eq_q=False,
+    ):
+        super().__init__()
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.dim = dim
+        
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = LayerMACTransformer(
+            num_patches,
+            num_frames,
+            dim,
+            depth,
+            heads,
+            mlp_dim,
+            hidden_scale,
+            mem_depth,
+            mem_eta,
+            mem_theta,
+            mem_alpha,
+            max_grad_norm,
+            momentum_clip,
+            weight_clip,
+            update_steps,
+            dropout,
+            n_persistent,
+            n_retrieved,
+            dim_head,
+            use_slots,
+            update_type,
+            proj_k_eq_q,
         )
 
     def forward(self, x):
@@ -615,7 +792,7 @@ class MACViTPredictor(nn.Module):
         return self.transformer(x)
     
     def reset_memory(self):
-        self.mem.reset_weights()
+        self.transformer.reset_memory()
 
 
 class LookupTransformerBlock(nn.Module):
@@ -641,6 +818,8 @@ class LookupTransformerBlock(nn.Module):
         self.dim_head = dim_head
 
         self.attention = Attention(d_model, n_heads, dim_head, dropout)
+        bias = generate_mac_mask_matrix(num_patches, num_frames, 0, num_frames)
+        self.attention.register_buffer("bias", bias)
         self.norm1 = nn.LayerNorm(d_model)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_ff),
@@ -655,24 +834,29 @@ class LookupTransformerBlock(nn.Module):
 
         # lookup memory
         memory = self.mem.retrieve()
-        memory = memory[:B, :T, :]
-        x_aug = torch.cat([memory, x], dim=1)
+        if memory.size(1) > T:
+            memory = memory[:, :T, :]
 
-        x_aug = self.norm1(x_aug)
-        x_aug = x_aug + self.attention(x_aug)
+            x_aug = torch.cat([memory, x], dim=1)
 
-        # FFN
-        y2 = self.norm2(x_aug)
-        x_aug = x_aug + self.ff(y2)
+            x_aug = self.norm1(x_aug)
+            x_aug = x_aug + self.attention(x_aug);
 
-        # strip off the prepended tokens; only return the positions corresponding to the segment
-        out = x_aug[:, T: :, :]  # [B, T, d]
-        
-        # update memory online using this segment (after attention)
-        self.mem.update(x)
-        
+            # FFN
+            y2 = self.norm2(x_aug)
+            x_aug = x_aug + self.ff(y2)
+
+            # strip off the prepended tokens; only return the positions corresponding to the segment
+            out = x_aug[:, memory.size(1):, :]  # [B, T, d]
+        else:
+            x = self.norm1(x)
+            x = x + self.attention(x)
+            y2 = self.norm2(x)
+            x = x + self.ff(y2)
+            out = x
+            
         return out
-    
+
 class LookupTransformer(nn.Module):
     def __init__(
         self,
@@ -731,7 +915,7 @@ class LookupViTPredictor(nn.Module):
         self.dim = dim
         self.pool = pool
 
-        self.mem = LookupMemory(dim, batch_size,  num_frames * num_patches)
+        self.mem = LookupMemory(dim, batch_size)
 
         self.pos_embedding = nn.Parameter(
             torch.randn(1, num_frames * num_patches, dim)
