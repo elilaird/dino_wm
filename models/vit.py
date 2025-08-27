@@ -404,11 +404,11 @@ class MAGTransformerBlock(nn.Module):
     def forward(self, x):
         x_in = x
         x = x + self.attention(x)
-        x = torch.sigmoid(self.W_y(x)) * self.W_m(self.mem.retrieve(self.W_Q(x)))
+        x = x + torch.sigmoid(self.W_y(x)) * self.W_m(self.mem.retrieve(self.W_Q(x))) # gated memory injection
         x = x + self.ff(x)
 
         # update memory
-        self.mem.update_from_batch(F.normalize(x_in, p=2, dim=-1).detach(), F.normalize(x, p=2, dim=-1).detach())
+        self.mem.update_from_batch(F.normalize(x_in, p=2, dim=-1).detach(), F.normalize(x_in, p=2, dim=-1).detach())
 
         return self.norm(x)
     
@@ -1087,3 +1087,88 @@ class LookupViTPredictor(nn.Module):
 
     def reset_memory(self):
         self.mem.reset_weights()
+
+
+class SSMCell(nn.Module):
+    def __init__(self, d_model: int, n_state: int):
+        super().__init__()
+        self.U = nn.Linear(d_model, n_state, bias=False)   # write encoder
+        self.C = nn.Linear(n_state, d_model, bias=False)   # read head
+        self.log_tau = nn.Parameter(torch.zeros(n_state))  # time constants
+
+    def discretize(self, dt: float = 1.0):
+        tau = F.softplus(self.log_tau) + 1e-4
+        Abar = torch.exp(-dt / tau)          # [S]
+        Bbar = 1.0 - Abar                    # [S]
+        return Abar, Bbar
+
+    @torch.no_grad()
+    def init_state(self, B: int, P: int, n_state: int, device=None):
+        return torch.zeros(B, P, n_state, device=device)
+
+    def forward(self, X_t, H_t, dt: float = 1.0):
+        """
+        X_t: [B, P, D], H_t: [B, P, S]
+        returns: H_{t+1}, M_{t+1}=[B,P,D]
+        """
+        Abar, Bbar = self.discretize(dt)     # [S]
+        Abar = Abar.view(1, 1, -1)           # [1,1,S]
+        Bbar = Bbar.view(1, 1, -1)
+        Ux   = self.U(X_t)                   # [B,P,S]
+        H_tp1 = Abar * H_t + Bbar * Ux
+        M_tp1 = self.C(H_tp1)                # [B,P,D]
+        return H_tp1, M_tp1
+
+class StateSpaceTransformer(nn.Module):
+    def __init__(self, dim, state_size, depth, heads, mlp_dim, dropout=0.0, dim_head=64, use_gate: bool = False):
+        super().__init__()
+        self.dim = dim
+        self.depth = depth
+        self.heads = heads
+        self.mlp_dim = mlp_dim
+        self.dropout = dropout
+        self.dim_head = dim_head
+        self.state_size = state_size
+        self.use_gate = use_gate
+        if use_gate:
+            self.gate = nn.Linear(dim, dim)
+        else:
+            self.gate = None
+
+        self.ssm_cell = SSMCell(dim, state_size)
+        self.ln_in = nn.LayerNorm(dim)
+        self.ln_fuse = nn.LayerNorm(dim)
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList([
+                    Attention(dim, heads, dim_head, dropout),
+                    FeedForward(dim, mlp_dim, dropout),
+                ])
+            )
+
+        bias = generate_ssm_mask_matrix(num_patches)
+
+    @torch.no_grad()
+    def init_state(self, B: int, P: int, device=None):
+        return self.ssm_cell.init_state(B, P, self.state_size, device=device)
+
+    def forward(self, x, h, dt: float = 1.0):
+        x = self.ln_in(x)
+        h_new, M_new = self.ssm_cell(x, h, dt)
+
+        if self.use_gate:
+            G = torch.sigmoid(self.gate(x))
+            ctx = self.ln_fuse(
+                x + G * M_new
+            )  # inject ctx with memory (post-write)
+        else:
+            ctx = self.ln_fuse(
+                torch.cat([M_new, x], dim=1)
+            )  # B, P * 2, D
+
+        for attn, ff in self.layers:
+            ctx = ctx + attn(x)
+            ctx = ctx + ff(ctx)
+        return ctx, h_new
