@@ -183,7 +183,7 @@ class ViTPredictor(nn.Module):
         pool="cls",
         dim_head=64,
         dropout=0.0,
-        emb_dropout=0.0
+        emb_dropout=0.0,
     ):
         super().__init__()
         assert pool in {
@@ -205,9 +205,7 @@ class ViTPredictor(nn.Module):
         )
         self.pool = pool
 
-    def forward(
-        self, x
-    ):  
+    def forward(self, x):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
@@ -229,7 +227,7 @@ class ViTPredictorWithPersistentTokens(nn.Module):
         dim_head=64,
         dropout=0.0,
         emb_dropout=0.0,
-        n_persist=0
+        n_persist=0,
     ):
         super().__init__()
         assert pool in {
@@ -337,7 +335,7 @@ class AdditiveControlViTPredictor(nn.Module):
         dim_head=64,
         dropout=0.0,
         emb_dropout=0.0,
-        alpha_init=0.1
+        alpha_init=0.1,
     ):
         super().__init__()
         assert pool in {
@@ -380,6 +378,155 @@ class AdditiveControlViTPredictor(nn.Module):
         return x
 
 
+class MAGTransformerBlock(nn.Module):
+    def __init__(
+        self,
+        mem: NeuralMemory,
+        dim,
+        heads,
+        dim_head,
+        mlp_dim,
+        dropout=0.0,
+        gate_type: str = "sigmoid",
+    ):
+        super().__init__()
+        self.mem = mem
+        self.gate_type = gate_type
+        self.norm = nn.LayerNorm(dim)
+        self.attention = Attention(dim, heads, dim_head, dropout)
+        self.ff = FeedForward(dim, mlp_dim, dropout)
+        self.W_y = nn.Linear(dim, dim)
+        self.W_m = nn.Linear(dim, dim)
+        self.W_Q = nn.Linear(dim, dim)
+
+        def gate(y, m):
+            return torch.sigmoid(self.W_y(y) * self.W_m(m))
+
+        self.gate = gate
+
+    def forward(self, x):
+        x_in = x
+        x = x + self.attention(x)
+        x = self.gate(x, self.mem.retrieve(self.W_Q(x)))
+        x = x + self.ff(x)
+
+        # update memory
+        self.mem.update_from_batch(x_in.detach(), x_in.detach())
+
+        return self.norm(x)
+    
+    def reset_memory(self):
+        self.mem.reset_weights()
+
+
+class MAGTransformer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        depth,
+        heads,
+        dim_head,
+        mlp_dim,
+        dropout=0.0,
+        gate_type: str = "sigmoid",
+        hidden_scale: float = 1.0,
+        eta: float = 0.9,
+        theta: float = 1e-3,
+        alpha: float = 1e-5,
+        mem_depth: int = 1,
+    ):
+        super().__init__()
+        self.gate_type = gate_type
+        self.norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                MAGTransformerBlock(
+                    mem=NeuralMemory(
+                        d_model=dim,
+                        hidden_scale=hidden_scale,
+                        depth=mem_depth,
+                        eta=eta,
+                        theta=theta,
+                        alpha=alpha,
+                    ),
+                    dim=dim,
+                    heads=heads,
+                    dim_head=dim_head,
+                    mlp_dim=mlp_dim,
+                    dropout=dropout,
+                    gate_type=gate_type,
+                )
+            )
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return self.norm(x)
+
+    def reset_memory(self):
+        for layer in self.layers:
+            layer.reset_memory()
+
+
+class MAGViTPredictor(nn.Module):
+    def __init__(
+        self,
+        num_patches: int,
+        num_frames: int,
+        dim: int,
+        depth: int,
+        heads: int,
+        mlp_dim: int,
+        dropout: float = 0.0,
+        emb_dropout=0.0,
+        hidden_scale: float = 1.0,
+        mem_eta: float = 0.9,
+        mem_theta: float = 1e-3,
+        mem_alpha: float = 1e-5,
+        mem_depth: int = 1,
+        dim_head: int = 64,
+        gate_type: str = "sigmoid",
+        pool: str = "mean",
+    ):
+        super().__init__()
+
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = MAGTransformer(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            dim_head=dim_head,
+            mlp_dim=mlp_dim,
+            dropout=dropout,
+            gate_type=gate_type,
+            hidden_scale=hidden_scale,
+            eta=mem_eta,
+            theta=mem_theta,
+            alpha=mem_alpha,
+            mem_depth=mem_depth,
+        )
+
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
+
+    def reset_memory(self):
+        self.transformer.reset_memory()
+
+
 class MACTransformerBlock(nn.Module):
     """
     A standard Transformer block where the input *segment* is augmented with:
@@ -400,7 +547,7 @@ class MACTransformerBlock(nn.Module):
         dropout: float = 0.0,
         dim_head: int = 64,
         use_slots: bool = True,
-        update_type: str = "selfattention", # "selfattention" or "crossattention"
+        update_type: str = "selfattention",  # "selfattention" or "crossattention"
         proj_k_eq_q: bool = False,
     ):
         super().__init__()
@@ -408,29 +555,25 @@ class MACTransformerBlock(nn.Module):
         self.mem = mem
         self.use_slots = use_slots
         self.n_persistent = n_persistent
-        self.n_retrieved = n_retrieved if self.use_slots else num_frames * num_patches
+        self.n_retrieved = (
+            n_retrieved if self.use_slots else num_frames * num_patches
+        )
         self.num_patches = num_patches
         self.num_frames = num_frames
         self.update_type = update_type
         self.proj_k_eq_q = proj_k_eq_q
 
         if self.update_type == "crossattention":
-            assert not self.use_slots, "use_slots must be False for crossattention"
+            assert (
+                not self.use_slots
+            ), "use_slots must be False for crossattention"
 
-        self.h_norm = nn.LayerNorm(
-            d_model, eps=1e-5
-        )  
-        self.q_norm = nn.LayerNorm(
-            d_model, eps=1e-5
-        )  
+        self.h_norm = nn.LayerNorm(d_model, eps=1e-5)
+        self.q_norm = nn.LayerNorm(d_model, eps=1e-5)
 
         if self.n_persistent > 0:
-            self.P = nn.Parameter(
-                torch.randn(n_persistent, d_model)
-            )
-            self.p_norm = nn.LayerNorm(
-                d_model, eps=1e-5
-            ) 
+            self.P = nn.Parameter(torch.randn(n_persistent, d_model))
+            self.p_norm = nn.LayerNorm(d_model, eps=1e-5)
 
         self.mem_W_Q = nn.Linear(d_model, d_model)
 
@@ -470,9 +613,7 @@ class MACTransformerBlock(nn.Module):
         if self.use_slots:
             # compress retrieved "per-token" memory into a fixed number of slots
             h = self.mem_slots(h)  # [B, T, n_retrieved*d_model]
-            h = h.mean(  # TODO: try different pooling
-                dim=1
-            ).view(
+            h = h.mean(dim=1).view(  # TODO: try different pooling
                 B, self.n_retrieved, self.d_model
             )  # [B, n_retrieved, d_model] (pool over time in segment)
         else:
@@ -482,7 +623,9 @@ class MACTransformerBlock(nn.Module):
 
         # prepend persistent tokens and retrieved memory slots
         if self.n_persistent > 0:
-            P = self.p_norm(self.P).unsqueeze(0).expand(B, -1, -1)  # [B, n_persistent, d_model]
+            P = (
+                self.p_norm(self.P).unsqueeze(0).expand(B, -1, -1)
+            )  # [B, n_persistent, d_model]
             x_aug = torch.cat(
                 [P, h, x_seg], dim=1
             )  # [B, n_persistent + n_retrieved + T, d_model]
@@ -491,15 +634,12 @@ class MACTransformerBlock(nn.Module):
                 [h, x_seg], dim=1
             )  # [B, n_retrieved + T, d_model]
 
-        # Use the existing Attention class
         x_aug = self.norm1(x_aug)
         x_aug = x_aug + self.attention(x_aug)
 
-        #  FFN
         y2 = self.norm2(x_aug)
         x_aug = x_aug + self.ff(y2)
 
-        # strip off the prepended tokens; only return the positions corresponding to the segment
         out = x_aug[:, self.n_persistent + self.n_retrieved :, :]  # [B, T, d]
 
         #  update memory online
@@ -508,14 +648,18 @@ class MACTransformerBlock(nn.Module):
                 :, self.n_persistent : self.n_persistent + self.n_retrieved, :
             ]
             if self.update_type == "selfattention":
-                k = self.mem_W_Q(self.q_norm(memory_tokens)) if self.proj_k_eq_q else memory_tokens
+                k = (
+                    self.mem_W_Q(self.q_norm(memory_tokens))
+                    if self.proj_k_eq_q
+                    else memory_tokens
+                )
                 self.mem.update_from_batch(k.detach(), memory_tokens.detach())
             elif self.update_type == "crossattention":
-                assert out.shape[1] == memory_tokens.shape[1], f"out.shape[1] ({out.shape[1]}) != memory_tokens.shape[1] ({memory_tokens.shape[1]})"
+                assert (
+                    out.shape[1] == memory_tokens.shape[1]
+                ), f"out.shape[1] ({out.shape[1]}) != memory_tokens.shape[1] ({memory_tokens.shape[1]})"
                 k = self.mem_W_Q(self.q_norm(out)) if self.proj_k_eq_q else out
-                self.mem.update_from_batch(
-                    k.detach(), memory_tokens.detach()
-                )
+                self.mem.update_from_batch(k.detach(), memory_tokens.detach())
             else:
                 raise ValueError(f"Invalid update_type: {self.update_type}")
 
@@ -755,7 +899,7 @@ class LayerMACViTPredictor(nn.Module):
         self.num_patches = num_patches
         self.num_frames = num_frames
         self.dim = dim
-        
+
         self.pos_embedding = nn.Parameter(
             torch.randn(1, num_frames * num_patches, dim)
         )
@@ -790,7 +934,7 @@ class LayerMACViTPredictor(nn.Module):
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
         return self.transformer(x)
-    
+
     def reset_memory(self):
         self.transformer.reset_memory()
 
@@ -801,8 +945,8 @@ class LookupTransformerBlock(nn.Module):
         mem: LookupMemory,
         num_patches: int,
         num_frames: int,
-        d_model: int, 
-        n_heads: int, 
+        d_model: int,
+        n_heads: int,
         d_ff: int,
         dropout: float = 0.0,
         dim_head: int = 64,
@@ -828,7 +972,7 @@ class LookupTransformerBlock(nn.Module):
             nn.Dropout(dropout),
         )
         self.norm2 = nn.LayerNorm(d_model)
-        
+
     def forward(self, x):
         B, T, D = x.shape
 
@@ -840,22 +984,23 @@ class LookupTransformerBlock(nn.Module):
             x_aug = torch.cat([memory, x], dim=1)
 
             x_aug = self.norm1(x_aug)
-            x_aug = x_aug + self.attention(x_aug);
+            x_aug = x_aug + self.attention(x_aug)
 
             # FFN
             y2 = self.norm2(x_aug)
             x_aug = x_aug + self.ff(y2)
 
             # strip off the prepended tokens; only return the positions corresponding to the segment
-            out = x_aug[:, memory.size(1):, :]  # [B, T, d]
+            out = x_aug[:, memory.size(1) :, :]  # [B, T, d]
         else:
             x = self.norm1(x)
             x = x + self.attention(x)
             y2 = self.norm2(x)
             x = x + self.ff(y2)
             out = x
-            
+
         return out
+
 
 class LookupTransformer(nn.Module):
     def __init__(
@@ -887,11 +1032,12 @@ class LookupTransformer(nn.Module):
                     dim_head=dim_head,
                 )
             )
-            
+
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
         return self.norm(x)
+
 
 class LookupViTPredictor(nn.Module):
     def __init__(
@@ -932,7 +1078,7 @@ class LookupViTPredictor(nn.Module):
             dropout,
             dim_head,
         )
-    
+
     def forward(self, x):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
