@@ -2,6 +2,7 @@
 import torch
 from torch import nn
 from einops import rearrange
+from torch.nn import functional as F
 
 from .memory import NeuralMemory, LookupMemory
 
@@ -398,20 +399,16 @@ class MAGTransformerBlock(nn.Module):
         self.W_y = nn.Linear(dim, dim)
         self.W_m = nn.Linear(dim, dim)
         self.W_Q = nn.Linear(dim, dim)
-
-        def gate(y, m):
-            return torch.sigmoid(self.W_y(y) * self.W_m(m))
-
-        self.gate = gate
+        
 
     def forward(self, x):
         x_in = x
         x = x + self.attention(x)
-        x = self.gate(x, self.mem.retrieve(self.W_Q(x)))
+        x = torch.sigmoid(x) * self.W_m(self.mem.retrieve(self.W_Q(x)))
         x = x + self.ff(x)
 
         # update memory
-        self.mem.update_from_batch(x_in.detach(), x_in.detach())
+        self.mem.update_from_batch(F.normalize(x_in, p=2, dim=-1).detach(), F.normalize(x, p=2, dim=-1).detach())
 
         return self.norm(x)
     
@@ -568,12 +565,15 @@ class MACTransformerBlock(nn.Module):
                 not self.use_slots
             ), "use_slots must be False for crossattention"
 
-        self.h_norm = nn.LayerNorm(d_model, eps=1e-5)
-        self.q_norm = nn.LayerNorm(d_model, eps=1e-5)
+        # self.h_norm = nn.LayerNorm(d_model, eps=1e-5)
+        self.h_norm = lambda x: torch.nn.functional.normalize(x, p=2, dim=-1)
+        # self.q_norm = nn.LayerNorm(d_model, eps=1e-5)
+        self.q_norm = lambda x: torch.nn.functional.normalize(x, p=2, dim=-1)
 
         if self.n_persistent > 0:
             self.P = nn.Parameter(torch.randn(n_persistent, d_model))
-            self.p_norm = nn.LayerNorm(d_model, eps=1e-5)
+            # self.p_norm = nn.LayerNorm(d_model, eps=1e-5)
+            self.p_norm = lambda x: torch.nn.functional.normalize(x, p=2, dim=-1)
 
         self.mem_W_Q = nn.Linear(d_model, d_model)
 
@@ -651,15 +651,15 @@ class MACTransformerBlock(nn.Module):
                 k = (
                     self.mem_W_Q(self.q_norm(memory_tokens))
                     if self.proj_k_eq_q
-                    else memory_tokens
+                    else self.q_norm(memory_tokens)
                 )
-                self.mem.update_from_batch(k.detach(), memory_tokens.detach())
+                self.mem.update_from_batch(k.detach(), self.q_norm(memory_tokens).detach())
             elif self.update_type == "crossattention":
                 assert (
                     out.shape[1] == memory_tokens.shape[1]
                 ), f"out.shape[1] ({out.shape[1]}) != memory_tokens.shape[1] ({memory_tokens.shape[1]})"
-                k = self.mem_W_Q(self.q_norm(out)) if self.proj_k_eq_q else out
-                self.mem.update_from_batch(k.detach(), memory_tokens.detach())
+                k = self.mem_W_Q(self.q_norm(out)) if self.proj_k_eq_q else self.q_norm(out)
+                self.mem.update_from_batch(k.detach(), self.q_norm(memory_tokens).detach())
             else:
                 raise ValueError(f"Invalid update_type: {self.update_type}")
 

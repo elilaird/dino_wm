@@ -70,25 +70,26 @@ class NeuralMemory(nn.Module):
         Here we maintain per-parameter momentum buffers.
         """
 
-        k = k.detach()
-        v = v.detach()
+        k = k.detach().to(torch.float32)
+        v = v.detach().to(torch.float32)
 
         # Initialize momentum buffers on the correct device if not already done
         if len(self.momentum_buffers) == 0:
             self.momentum_buffers = [
-                torch.zeros_like(p) for p in self.net.parameters()
+                torch.zeros_like(p, dtype=torch.float32, device=p.device) for p in self.net.parameters()
             ]
+
+        # compute grads & ensure float 32
+        for p in self.net.parameters():
+            if p.dtype != torch.float32:
+                p = p.to(torch.float32)
+            p.requires_grad_(True)
 
         # compute associative loss over the batch
         def assoc_loss():
             y = self.net(k)  # predict v
             return F.mse_loss(y, v)
 
-        # compute grads
-        for p in self.net.parameters():
-            p.requires_grad_(True)
-
-        
         for step in range(self.update_steps):
 
             loss = assoc_loss()
@@ -99,31 +100,41 @@ class NeuralMemory(nn.Module):
                 retain_graph=False,
             )
 
-            # Apply norm clipping to the grads list
-            total_norm = torch.norm(torch.stack([torch.norm(g) for g in grads]))
-            if total_norm > self.max_grad_norm:
-                clip_coef = self.max_grad_norm / total_norm
-                grads = [g * clip_coef for g in grads]
+            # finite check + cast to fp32
+            safe_grads = []
+            for g in grads:
+                g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0).float()
+                safe_grads.append(g)
 
-            # manual momentum + decay update
+            # global L2 norm (fp32)
+            gnorm = torch.sqrt(sum((g.norm(p=2) ** 2 for g in safe_grads)))
+            if not torch.isfinite(gnorm):
+                # skip this step entirely
+                continue
+
+            clip_coef = min(1.0, self.max_grad_norm / (gnorm + 1e-12))
             with torch.no_grad():
                 for p, g, m in zip(
-                    self.net.parameters(), grads, self.momentum_buffers
+                    self.net.parameters(), safe_grads, self.momentum_buffers
                 ):
-                    m.mul_(self.eta).add_(g, alpha=-self.theta)
+                    g = g * clip_coef
 
-                    # Clip momentum to prevent explosion
+                    # momentum update: m = eta*m - theta*g
+                    m.mul_(float(self.eta)).add_(g, alpha=-float(self.theta))
+
+                    # clamp momentum and apply decoupled weight decay + momentum
                     m.clamp_(-self.momentum_clip, self.momentum_clip)
+                    p.mul_(1.0 - float(self.alpha)).add_(m)
 
-                    # forgetting (weight decay) and step:
-                    p.mul_(1.0 - self.alpha).add_(m)  # W = (1-alpha)W + m
-
-                    # Clip weights to prevent explosion
-                    p.clamp_(-self.weight_clip, self.weight_clip)
+                # optional: clip **by tensor norm** instead of elementwise
+                for p in self.net.parameters():
+                    pn = p.norm()
+                    if pn > self.weight_clip:
+                        p.mul_(self.weight_clip / (pn + 1e-12))
 
             for p in self.net.parameters():
                 p.grad = None
-        
+
         for p in self.net.parameters():
             p.requires_grad_(False)
 
@@ -171,4 +182,3 @@ class LookupMemory(nn.Module):
 
     def reset_weights(self):
         self.memory_bank = torch.empty(self.bank_size, 0, self.d_model)
-
