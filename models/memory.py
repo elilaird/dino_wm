@@ -7,7 +7,7 @@ class NeuralMemory(nn.Module):
     """
     Simple deep memory MLP:
       retrieve: y = M*(q)   (forward without update)
-      update:   M <- M - step * grad(||M(k)-v||^2), with momentum & decay
+      update:   M <- M - theta * grad(||M(k)-v||^2), with momentum & decay
     """
 
     def __init__(
@@ -76,7 +76,7 @@ class NeuralMemory(nn.Module):
         # Initialize momentum buffers on the correct device if not already done
         if len(self.momentum_buffers) == 0:
             self.momentum_buffers = [
-                torch.zeros_like(p, dtype=torch.float32, device=p.device) for p in self.net.parameters()
+                torch.zeros_like(p, dtype=torch.float32, device=p.device, requires_grad=False) for p in self.net.parameters()
             ]
 
         # compute grads & ensure float 32
@@ -109,7 +109,6 @@ class NeuralMemory(nn.Module):
             # global L2 norm (fp32)
             gnorm = torch.sqrt(sum((g.norm(p=2) ** 2 for g in safe_grads)))
             if not torch.isfinite(gnorm):
-                # skip this step entirely
                 continue
 
             clip_coef = min(1.0, self.max_grad_norm / (gnorm + 1e-12))
@@ -120,23 +119,17 @@ class NeuralMemory(nn.Module):
                     g = g * clip_coef
 
                     # momentum update: m = eta*m - theta*g
-                    m.mul_(float(self.eta)).add_(g, alpha=-float(self.theta))
+                    m = m * float(self.eta) - g * float(self.theta)
+                    m = torch.clamp(m, -self.momentum_clip, self.momentum_clip)
+                    p = p * (1.0 - float(self.alpha)) + m
 
-                    # clamp momentum and apply decoupled weight decay + momentum
-                    m.clamp_(-self.momentum_clip, self.momentum_clip)
-                    p.mul_(1.0 - float(self.alpha)).add_(m)
-
-                # optional: clip **by tensor norm** instead of elementwise
-                for p in self.net.parameters():
                     pn = p.norm()
                     if pn > self.weight_clip:
-                        p.mul_(self.weight_clip / (pn + 1e-12))
+                        p.copy_(p * (self.weight_clip / (pn + 1e-12)))
 
-            for p in self.net.parameters():
-                p.grad = None
-
-        for p in self.net.parameters():
+        for p, m in zip(self.net.parameters(), self.momentum_buffers):
             p.requires_grad_(False)
+            m.requires_grad_(False)
 
     def retrieve(self, q: torch.Tensor) -> torch.Tensor:
         """M*(q): forward pass without weight update."""
@@ -154,7 +147,12 @@ class NeuralMemory(nn.Module):
         return self.retrieve(q)
 
     def reset_weights(self):
-        self.net.reset_parameters()
+        for module in self.net:
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
         self.S_buf.zero_()
         self.momentum_buffers = []  # Reset momentum buffers
 
