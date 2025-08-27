@@ -404,7 +404,7 @@ class MAGTransformerBlock(nn.Module):
     def forward(self, x):
         x_in = x
         x = x + self.attention(x)
-        x = torch.sigmoid(x) * self.W_m(self.mem.retrieve(self.W_Q(x)))
+        x = torch.sigmoid(self.W_y(x)) * self.W_m(self.mem.retrieve(self.W_Q(x)))
         x = x + self.ff(x)
 
         # update memory
