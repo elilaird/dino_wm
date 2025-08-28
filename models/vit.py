@@ -1187,6 +1187,7 @@ class StateSpaceTransformer(nn.Module):
         self,
         dim,
         state_size,
+        num_patches,
         depth,
         heads,
         mlp_dim,
@@ -1205,6 +1206,7 @@ class StateSpaceTransformer(nn.Module):
         self.state_size = state_size
         self.use_gate = use_gate
         self.dt = dt
+        self.num_patches = num_patches
         if use_gate:
             self.gate = nn.Linear(dim, dim)
         else:
@@ -1236,17 +1238,27 @@ class StateSpaceTransformer(nn.Module):
             )
 
     @torch.no_grad()
-    def init_state(self, B: int, P: int, device=None):
-        return self.ssm_cell.init_state(B, P, self.state_size, device=device)
+    def init_state(self, B: int, device=None):
+        return self.ssm_cell.init_state(B, self.num_patches, self.state_size, device=device)
 
     def forward(self, x):
         B, T, D = x.shape
+        n_frames = T // self.num_patches
+
         x = self.ln_in(x)
 
         if self.H_buffer is None:
-            self.H_buffer = self.init_state(x.size(0), x.size(1), x.device)
+            self.H_buffer = self.init_state(B, x.device)
 
-        h_new, M_new = self.ssm_cell(x, self.H_buffer, self.dt)
+        # iterate through frames to aggregate memory
+        M_new = []
+        h_new = self.H_buffer
+        for i in range(n_frames):
+            x_i = x[:, i * self.num_patches : (i + 1) * self.num_patches, :]
+            h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)
+            M_new.append(m_i)
+
+        M_new = torch.cat(M_new, dim=1)
         self.H_buffer = h_new.detach()
 
         if self.use_gate:
@@ -1255,15 +1267,16 @@ class StateSpaceTransformer(nn.Module):
                 x + G * M_new
             )  # inject ctx with memory (post-write)
         else:
-            ctx = self.ln_fuse(torch.cat([M_new, x], dim=1))  # B, P * 2, D
+            ctx = self.ln_fuse(torch.cat([M_new, x], dim=1))  # B, T * 2, D
 
         for attn, ff in self.layers:
             ctx = ctx + attn(ctx)
             ctx = ctx + ff(ctx)
 
-        # remove the prepended tokens
-        ctx = ctx[:, T:, :]
-        
+        if not self.use_gate:
+            # remove the prepended tokens
+            ctx = ctx[:, T:, :]
+
         return ctx
 
     def reset_memory(self):
@@ -1280,6 +1293,8 @@ class StateSpaceViTPredictor(nn.Module):
         self.dropout = dropout
         self.dim_head = dim_head
         self.use_gate = use_gate
+        self.num_patches = num_patches
+        self.num_frames = num_frames
 
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
@@ -1291,7 +1306,7 @@ class StateSpaceViTPredictor(nn.Module):
         )
         self.dropout = nn.Dropout(emb_dropout)
         self.transformer = StateSpaceTransformer(
-            dim, state_size, depth, heads, mlp_dim, dropout, dim_head, use_gate, dt
+            dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, use_gate, dt
         )
 
     def forward(self, x):
