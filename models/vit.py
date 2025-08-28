@@ -26,6 +26,23 @@ def generate_mask_matrix(npatch, nwindow):
     return mask
 
 
+def generate_mask_with_memory(npatch, nwindow):
+    """
+    M_i attends to all M_j and X_j for j < i
+    X_i attends to all M_j and X_j for j < i
+    """
+    zeros = torch.zeros(npatch, npatch)
+    ones = torch.ones(npatch, npatch)
+    rows = []
+    for i in range(nwindow):
+        row = torch.cat([ones] * (i + 1) + [zeros] * (nwindow - i - 1), dim=1)
+        row = torch.cat([row, row], dim=1)
+        rows.append(row)
+    rows += rows
+    mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
+    return mask
+
+
 def generate_sliding_window_mask(seq_len, window_size):
     """Generate mask for sliding window attention"""
     mask = torch.zeros(seq_len, seq_len)
@@ -93,7 +110,7 @@ class FeedForward(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, bias=None):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
@@ -114,7 +131,8 @@ class Attention(nn.Module):
             else nn.Identity()
         )
 
-        bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
+        if bias is None:
+            bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
         self.register_buffer("bias", bias)
 
     def forward(self, x):
@@ -399,19 +417,23 @@ class MAGTransformerBlock(nn.Module):
         self.W_y = nn.Linear(dim, dim)
         self.W_m = nn.Linear(dim, dim)
         self.W_Q = nn.Linear(dim, dim)
-        
 
     def forward(self, x):
         x_in = x
         x = x + self.attention(x)
-        x = x + torch.sigmoid(self.W_y(x)) * self.W_m(self.mem.retrieve(self.W_Q(x))) # gated memory injection
+        x = x + torch.sigmoid(self.W_y(x)) * self.W_m(
+            self.mem.retrieve(self.W_Q(x))
+        )  # gated memory injection
         x = x + self.ff(x)
 
         # update memory
-        self.mem.update_from_batch(F.normalize(x_in, p=2, dim=-1).detach(), F.normalize(x_in, p=2, dim=-1).detach())
+        self.mem.update_from_batch(
+            F.normalize(x_in, p=2, dim=-1).detach(),
+            F.normalize(x_in, p=2, dim=-1).detach(),
+        )
 
         return self.norm(x)
-    
+
     def reset_memory(self):
         self.mem.reset_weights()
 
@@ -653,13 +675,23 @@ class MACTransformerBlock(nn.Module):
                     if self.proj_k_eq_q
                     else F.normalize(memory_tokens, p=2, dim=-1)
                 )
-                self.mem.update_from_batch(k.detach(), F.normalize(memory_tokens, p=2, dim=-1).detach())
+                self.mem.update_from_batch(
+                    k.detach(),
+                    F.normalize(memory_tokens, p=2, dim=-1).detach(),
+                )
             elif self.update_type == "crossattention":
                 assert (
                     out.shape[1] == memory_tokens.shape[1]
                 ), f"out.shape[1] ({out.shape[1]}) != memory_tokens.shape[1] ({memory_tokens.shape[1]})"
-                k = self.mem_W_Q(F.normalize(out, p=2, dim=-1)) if self.proj_k_eq_q else F.normalize(out, p=2, dim=-1)
-                self.mem.update_from_batch(k.detach(), F.normalize(memory_tokens, p=2, dim=-1).detach())
+                k = (
+                    self.mem_W_Q(F.normalize(out, p=2, dim=-1))
+                    if self.proj_k_eq_q
+                    else F.normalize(out, p=2, dim=-1)
+                )
+                self.mem.update_from_batch(
+                    k.detach(),
+                    F.normalize(memory_tokens, p=2, dim=-1).detach(),
+                )
             else:
                 raise ValueError(f"Invalid update_type: {self.update_type}")
 
@@ -1092,14 +1124,14 @@ class LookupViTPredictor(nn.Module):
 class SSMCell(nn.Module):
     def __init__(self, d_model: int, n_state: int):
         super().__init__()
-        self.U = nn.Linear(d_model, n_state, bias=False)   # write encoder
-        self.C = nn.Linear(n_state, d_model, bias=False)   # read head
+        self.U = nn.Linear(d_model, n_state, bias=False)  # write encoder
+        self.C = nn.Linear(n_state, d_model, bias=False)  # read head
         self.log_tau = nn.Parameter(torch.zeros(n_state))  # time constants
 
     def discretize(self, dt: float = 1.0):
         tau = F.softplus(self.log_tau) + 1e-4
-        Abar = torch.exp(-dt / tau)          # [S]
-        Bbar = 1.0 - Abar                    # [S]
+        Abar = torch.exp(-dt / tau)  # [S]
+        Bbar = 1.0 - Abar  # [S]
         return Abar, Bbar
 
     @torch.no_grad()
@@ -1111,16 +1143,27 @@ class SSMCell(nn.Module):
         X_t: [B, P, D], H_t: [B, P, S]
         returns: H_{t+1}, M_{t+1}=[B,P,D]
         """
-        Abar, Bbar = self.discretize(dt)     # [S]
-        Abar = Abar.view(1, 1, -1)           # [1,1,S]
+        Abar, Bbar = self.discretize(dt)  # [S]
+        Abar = Abar.view(1, 1, -1)  # [1,1,S]
         Bbar = Bbar.view(1, 1, -1)
-        Ux   = self.U(X_t)                   # [B,P,S]
+        Ux = self.U(X_t)  # [B,P,S]
         H_tp1 = Abar * H_t + Bbar * Ux
-        M_tp1 = self.C(H_tp1)                # [B,P,D]
+        M_tp1 = self.C(H_tp1)  # [B,P,D]
         return H_tp1, M_tp1
 
+
 class StateSpaceTransformer(nn.Module):
-    def __init__(self, dim, state_size, depth, heads, mlp_dim, dropout=0.0, dim_head=64, use_gate: bool = False):
+    def __init__(
+        self,
+        dim,
+        state_size,
+        depth,
+        heads,
+        mlp_dim,
+        dropout=0.0,
+        dim_head=64,
+        use_gate: bool = False,
+    ):
         super().__init__()
         self.dim = dim
         self.depth = depth
@@ -1142,13 +1185,23 @@ class StateSpaceTransformer(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(
-                nn.ModuleList([
-                    Attention(dim, heads, dim_head, dropout),
-                    FeedForward(dim, mlp_dim, dropout),
-                ])
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim,
+                            heads,
+                            dim_head,
+                            dropout,
+                            bias=generate_mask_with_memory(
+                                NUM_PATCHES, NUM_FRAMES
+                            ),
+                        ),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
             )
 
-        bias = generate_ssm_mask_matrix(num_patches)
+        # bias = generate_ssm_mask_matrix(num_patches)
 
     @torch.no_grad()
     def init_state(self, B: int, P: int, device=None):
@@ -1164,11 +1217,40 @@ class StateSpaceTransformer(nn.Module):
                 x + G * M_new
             )  # inject ctx with memory (post-write)
         else:
-            ctx = self.ln_fuse(
-                torch.cat([M_new, x], dim=1)
-            )  # B, P * 2, D
+            ctx = self.ln_fuse(torch.cat([M_new, x], dim=1))  # B, P * 2, D
 
         for attn, ff in self.layers:
             ctx = ctx + attn(x)
             ctx = ctx + ff(ctx)
         return ctx, h_new
+
+class StateSpaceViTPredictor(nn.Module):
+    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False):
+        super().__init__()
+        self.dim = dim
+        self.state_size = state_size
+        self.depth = depth
+        self.heads = heads
+        self.mlp_dim = mlp_dim
+        self.dropout = dropout
+        self.dim_head = dim_head
+        self.use_gate = use_gate
+
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = StateSpaceTransformer(
+            dim, state_size, depth, heads, mlp_dim, dropout, dim_head, use_gate
+        )
+
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
