@@ -11,3 +11,4 @@ mem_theta: 0.01
 mem_alpha: 0.01
 pool: "mean"
 gate_type: "sigmoid"
+use_residual: True

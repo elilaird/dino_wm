@@ -321,6 +321,10 @@ class VWorldModel(nn.Module):
                 visuals: (b, t+n+1, 3, img_size, img_size)
                 z: (b, t+n+1, num_patches, emb_dim)
         """
+
+        if hasattr(self.predictor, "reset_memory"):
+            self.predictor.reset_memory()
+
         num_obs_init = obs_0['visual'].shape[1]
         act_0 = act[:, :num_obs_init]
         action = act[:, num_obs_init:] 

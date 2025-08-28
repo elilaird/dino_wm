@@ -11,9 +11,9 @@ TYPE=${TYPE:-train} # jupyter, eval, test
 
 
 
-GPU=${GPU:-1}
+GPU=${GPU:-8}
 CPUS=${CPUS:-128}
-MEM=${MEM:-96G}
+MEM=${MEM:-512G}
 PY_ARGS="${@}"
 
 if [ "${PARTITION}" = "short" ]; then

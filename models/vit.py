@@ -407,8 +407,10 @@ class MAGTransformerBlock(nn.Module):
         mlp_dim,
         dropout=0.0,
         gate_type: str = "sigmoid",
+        use_residual: bool = False,
     ):
         super().__init__()
+        assert gate_type in {"sigmoid", "sigmoid_convex"}, "Invalid gate type"
         self.mem = mem
         self.gate_type = gate_type
         self.norm = nn.LayerNorm(dim)
@@ -417,19 +419,43 @@ class MAGTransformerBlock(nn.Module):
         self.W_y = nn.Linear(dim, dim)
         self.W_m = nn.Linear(dim, dim)
         self.W_Q = nn.Linear(dim, dim)
+        self.use_residual = use_residual
+        self.pre_norm = nn.LayerNorm(dim)
+
+        if self.gate_type == "sigmoid_convex":
+            self.V_y = nn.Linear(dim, dim)
 
     def forward(self, x):
+        x = self.pre_norm(x)
         x_in = x
         x = x + self.attention(x)
-        x = x + torch.sigmoid(self.W_y(x)) * self.W_m(
-            self.mem.retrieve(self.W_Q(x))
-        )  # gated memory injection
         x = x + self.ff(x)
 
+        if self.gate_type == "sigmoid":
+            gate = torch.sigmoid(self.W_y(x)) * self.W_m(
+                self.mem.retrieve(self.W_Q(x))
+            ) 
+        elif self.gate_type == "sigmoid_convex":
+            g = torch.sigmoid(self.W_y(x))
+            y = self.V_y(x)
+            m = self.W_m(self.mem.retrieve(self.W_Q(x)))
+            gate = (1.0 - g) * y + g * m
+        else:
+            raise ValueError(f"Invalid gate type: {self.gate_type}")
+
+        if self.use_residual:
+            x = x + gate
+        else:
+            x = gate
+
         # update memory
+        # self.mem.update_from_batch(
+        #     F.normalize(x_in, p=2, dim=-1).detach(),
+        #     F.normalize(x_in, p=2, dim=-1).detach(),
+        # )
         self.mem.update_from_batch(
-            F.normalize(x_in, p=2, dim=-1).detach(),
-            F.normalize(x_in, p=2, dim=-1).detach(),
+            x_in.detach(),
+            x_in.detach(),
         )
 
         return self.norm(x)
@@ -453,6 +479,7 @@ class MAGTransformer(nn.Module):
         theta: float = 1e-3,
         alpha: float = 1e-5,
         mem_depth: int = 1,
+        use_residual: bool = False,
     ):
         super().__init__()
         self.gate_type = gate_type
@@ -475,6 +502,7 @@ class MAGTransformer(nn.Module):
                     mlp_dim=mlp_dim,
                     dropout=dropout,
                     gate_type=gate_type,
+                    use_residual=use_residual,
                 )
             )
 
@@ -507,6 +535,7 @@ class MAGViTPredictor(nn.Module):
         dim_head: int = 64,
         gate_type: str = "sigmoid",
         pool: str = "mean",
+        use_residual: bool = False,
     ):
         super().__init__()
 
@@ -534,6 +563,7 @@ class MAGViTPredictor(nn.Module):
             theta=mem_theta,
             alpha=mem_alpha,
             mem_depth=mem_depth,
+            use_residual=use_residual,
         )
 
     def forward(self, x):
@@ -1163,6 +1193,7 @@ class StateSpaceTransformer(nn.Module):
         dropout=0.0,
         dim_head=64,
         use_gate: bool = False,
+        dt: float = 1.0, # could change to frameskip
     ):
         super().__init__()
         self.dim = dim
@@ -1173,6 +1204,7 @@ class StateSpaceTransformer(nn.Module):
         self.dim_head = dim_head
         self.state_size = state_size
         self.use_gate = use_gate
+        self.dt = dt
         if use_gate:
             self.gate = nn.Linear(dim, dim)
         else:
@@ -1181,6 +1213,8 @@ class StateSpaceTransformer(nn.Module):
         self.ssm_cell = SSMCell(dim, state_size)
         self.ln_in = nn.LayerNorm(dim)
         self.ln_fuse = nn.LayerNorm(dim)
+
+        self.H_buffer = None # keep track of hidden memory state w/o passing around
 
         self.layers = nn.ModuleList([])
         for _ in range(depth):
@@ -1194,22 +1228,26 @@ class StateSpaceTransformer(nn.Module):
                             dropout,
                             bias=generate_mask_with_memory(
                                 NUM_PATCHES, NUM_FRAMES
-                            ),
+                            ) if not use_gate else None,
                         ),
                         FeedForward(dim, mlp_dim, dropout),
                     ]
                 )
             )
 
-        # bias = generate_ssm_mask_matrix(num_patches)
-
     @torch.no_grad()
     def init_state(self, B: int, P: int, device=None):
         return self.ssm_cell.init_state(B, P, self.state_size, device=device)
 
-    def forward(self, x, h, dt: float = 1.0):
+    def forward(self, x):
+        B, T, D = x.shape
         x = self.ln_in(x)
-        h_new, M_new = self.ssm_cell(x, h, dt)
+
+        if self.H_buffer is None:
+            self.H_buffer = self.init_state(x.size(0), x.size(1), x.device)
+
+        h_new, M_new = self.ssm_cell(x, self.H_buffer, self.dt)
+        self.H_buffer = h_new.detach()
 
         if self.use_gate:
             G = torch.sigmoid(self.gate(x))
@@ -1220,12 +1258,19 @@ class StateSpaceTransformer(nn.Module):
             ctx = self.ln_fuse(torch.cat([M_new, x], dim=1))  # B, P * 2, D
 
         for attn, ff in self.layers:
-            ctx = ctx + attn(x)
+            ctx = ctx + attn(ctx)
             ctx = ctx + ff(ctx)
-        return ctx, h_new
+
+        # remove the prepended tokens
+        ctx = ctx[:, T:, :]
+        
+        return ctx
+
+    def reset_memory(self):
+        self.H_buffer = None
 
 class StateSpaceViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False):
+    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0):
         super().__init__()
         self.dim = dim
         self.state_size = state_size
@@ -1246,7 +1291,7 @@ class StateSpaceViTPredictor(nn.Module):
         )
         self.dropout = nn.Dropout(emb_dropout)
         self.transformer = StateSpaceTransformer(
-            dim, state_size, depth, heads, mlp_dim, dropout, dim_head, use_gate
+            dim, state_size, depth, heads, mlp_dim, dropout, dim_head, use_gate, dt
         )
 
     def forward(self, x):
@@ -1254,3 +1299,6 @@ class StateSpaceViTPredictor(nn.Module):
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
         return self.transformer(x)
+
+    def reset_memory(self):
+        self.transformer.reset_memory()
