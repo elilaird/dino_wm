@@ -12,6 +12,7 @@ import numpy as np
 from tqdm import tqdm
 
 import multiprocessing as mp
+
 if mp.get_start_method(allow_none=True) != "spawn":
     mp.set_start_method("spawn", force=True)
 
@@ -30,19 +31,23 @@ CTX = mp.get_context("spawn")
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+
 def get_all_process_memory_mb():
     """Return dict with current process memory and total across all children (in MB)."""
     proc = psutil.Process(os.getpid())
     mems = {}
-    
+
     # Main process
-    mems['main_process_gb'] = proc.memory_info().rss / 1024**3
-    
+    mems["main_process_gb"] = proc.memory_info().rss / 1024**3
+
     # Child processes (e.g., dataloader workers, torchrun processes)
-    child_memories = [p.memory_info().rss for p in proc.children(recursive=True)]
-    mems['child_processes_gb'] = sum(child_memories) / 1024**3
-    mems['total_gb'] = mems['main_process_gb'] + mems['child_processes_gb']
+    child_memories = [
+        p.memory_info().rss for p in proc.children(recursive=True)
+    ]
+    mems["child_processes_gb"] = sum(child_memories) / 1024**3
+    mems["total_gb"] = mems["main_process_gb"] + mems["child_processes_gb"]
     return mems
+
 
 def get_memory_str():
     """Get current GPU memory usage (PyTorch view) as a string"""
@@ -50,9 +55,12 @@ def get_memory_str():
         allocated = torch.cuda.memory_allocated() / 1024**3
         reserved = torch.cuda.memory_reserved() / 1024**3
         max_allocated = torch.cuda.max_memory_allocated() / 1024**3
-        return (f"GPU: {allocated:.2f} GB alloc "
-                f"(reserved: {reserved:.2f} GB, max: {max_allocated:.2f} GB)")
+        return (
+            f"GPU: {allocated:.2f} GB alloc "
+            f"(reserved: {reserved:.2f} GB, max: {max_allocated:.2f} GB)"
+        )
     return "GPU: NA"
+
 
 def _tensor_nbytes(x):
     # Works for torch.Tensor or numpy.ndarray
@@ -65,15 +73,21 @@ def _tensor_nbytes(x):
     if isinstance(x, np.ndarray):
         return x.nbytes
     # Fallback: try to infer from shape & dtype
-    if hasattr(x, "shape") and hasattr(x, "dtype") and hasattr(x.dtype, "itemsize"):
+    if (
+        hasattr(x, "shape")
+        and hasattr(x, "dtype")
+        and hasattr(x.dtype, "itemsize")
+    ):
         import numpy as np
+
         return int(np.prod(x.shape)) * int(x.dtype.itemsize)
     return 0
+
 
 def estimate_batch_memory_str(obs, act=None, state=None):
     """Estimate total bytes of the provided batch tensors (inputs only)."""
     total_bytes = 0
-    
+
     # obs can be a tensor, array, or a dict of them
     if obs is not None:
         if isinstance(obs, dict):
@@ -81,12 +95,13 @@ def estimate_batch_memory_str(obs, act=None, state=None):
                 total_bytes += _tensor_nbytes(v)
         else:
             total_bytes += _tensor_nbytes(obs)
-    
+
     total_bytes += _tensor_nbytes(act) if act is not None else 0
     total_bytes += _tensor_nbytes(state) if state is not None else 0
-    
-    gb = total_bytes / (1024 ** 3)
+
+    gb = total_bytes / (1024**3)
     return f"Batch: {gb:.2f} GB"
+
 
 class Trainer:
     def __init__(self, cfg):
@@ -109,7 +124,9 @@ class Trainer:
 
         self.base_path = os.path.dirname(os.path.abspath(__file__))
 
-        self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
+        self.num_reconstruct_samples = (
+            self.cfg.training.num_reconstruct_samples
+        )
         self.total_epochs = self.cfg.training.epochs
         self.epoch = 0
 
@@ -120,7 +137,9 @@ class Trainer:
 
         OmegaConf.set_struct(cfg, False)
         cfg.effective_batch_size = cfg.training.batch_size
-        cfg.gpu_batch_size = cfg.training.batch_size // self.accelerator.num_processes
+        cfg.gpu_batch_size = (
+            cfg.training.batch_size // self.accelerator.num_processes
+        )
         OmegaConf.set_struct(cfg, True)
 
         self.accelerator.wait_for_everyone()
@@ -181,7 +200,7 @@ class Trainer:
             x: torch.utils.data.DataLoader(
                 self.datasets[x],
                 batch_size=self.cfg.gpu_batch_size,
-                shuffle=False, 
+                shuffle=False,
                 num_workers=nw if x == "train" else 1,
                 collate_fn=None,
                 pin_memory=True,
@@ -195,8 +214,10 @@ class Trainer:
         if self.accelerator.is_main_process:
             log.info(f"dataloader batch size: {self.cfg.gpu_batch_size}")
 
-        self.dataloaders["train"], self.dataloaders["valid"] = self.accelerator.prepare(
-            self.dataloaders["train"], self.dataloaders["valid"]
+        self.dataloaders["train"], self.dataloaders["valid"] = (
+            self.accelerator.prepare(
+                self.dataloaders["train"], self.dataloaders["valid"]
+            )
         )
 
         self.encoder = None
@@ -207,10 +228,12 @@ class Trainer:
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
-        log.info(f"Train encoder, predictor, decoder:\
+        log.info(
+            f"Train encoder, predictor, decoder:\
             {self.cfg.model.train_encoder}\
             {self.cfg.model.train_predictor}\
-            {self.cfg.model.train_decoder}")
+            {self.cfg.model.train_decoder}"
+        )
 
         self._keys_to_save = [
             "epoch",
@@ -248,7 +271,9 @@ class Trainer:
             torch.save(ckpt, "checkpoints/model_latest.pth")
             torch.save(ckpt, f"checkpoints/model_{self.epoch}.pth")
             log.info("Saved model to {}".format(os.getcwd()))
-            ckpt_path = os.path.join(os.getcwd(), f"checkpoints/model_{self.epoch}.pth")
+            ckpt_path = os.path.join(
+                os.getcwd(), f"checkpoints/model_{self.epoch}.pth"
+            )
         else:
             ckpt_path = None
         model_name = self.cfg["saved_folder"].split("outputs/")[-1]
@@ -351,8 +376,18 @@ class Trainer:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
 
-        self.encoder, self.predictor, self.decoder, self.proprio_encoder, self.action_encoder = self.accelerator.prepare(
-            self.encoder, self.predictor, self.decoder, self.proprio_encoder, self.action_encoder
+        (
+            self.encoder,
+            self.predictor,
+            self.decoder,
+            self.proprio_encoder,
+            self.action_encoder,
+        ) = self.accelerator.prepare(
+            self.encoder,
+            self.predictor,
+            self.decoder,
+            self.proprio_encoder,
+            self.action_encoder,
         )
 
         self.model = hydra.utils.instantiate(
@@ -381,7 +416,9 @@ class Trainer:
             self.encoder.parameters(),
             lr=self.cfg.training.encoder_lr,
         )
-        self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
+        self.encoder_optimizer = self.accelerator.prepare(
+            self.encoder_optimizer
+        )
         if self.cfg.has_predictor:
             self.predictor_optimizer = torch.optim.AdamW(
                 self.predictor.parameters(),
@@ -393,7 +430,8 @@ class Trainer:
 
             self.action_encoder_optimizer = torch.optim.AdamW(
                 itertools.chain(
-                    self.action_encoder.parameters(), self.proprio_encoder.parameters()
+                    self.action_encoder.parameters(),
+                    self.proprio_encoder.parameters(),
                 ),
                 lr=self.cfg.training.action_encoder_lr,
             )
@@ -405,7 +443,9 @@ class Trainer:
             self.decoder_optimizer = torch.optim.Adam(
                 self.decoder.parameters(), lr=self.cfg.training.decoder_lr
             )
-            self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
+            self.decoder_optimizer = self.accelerator.prepare(
+                self.decoder_optimizer
+            )
 
     def monitor_jobs(self, lock):
         """
@@ -414,13 +454,18 @@ class Trainer:
         while True:
             with lock:
                 finished_jobs = [
-                    job_tuple for job_tuple in self.job_set if job_tuple[2].done()
+                    job_tuple
+                    for job_tuple in self.job_set
+                    if job_tuple[2].done()
                 ]
                 for epoch, job_name, job in finished_jobs:
                     result = job.result()
-                    print(f"Logging result for {job_name} at epoch {epoch}: {result}")
+                    print(
+                        f"Logging result for {job_name} at epoch {epoch}: {result}"
+                    )
                     log_data = {
-                        f"{job_name}/{key}": value for key, value in result.items()
+                        f"{job_name}/{key}": value
+                        for key, value in result.items()
                     }
                     log_data["epoch"] = epoch
                     self.wandb_run.log(log_data)
@@ -429,7 +474,10 @@ class Trainer:
 
     def run(self):
 
-        if self.cfg.plan_settings.plan_cfg_path is not None and self.accelerator.is_main_process:
+        if (
+            self.cfg.plan_settings.plan_cfg_path is not None
+            and self.accelerator.is_main_process
+        ):
             # executor = ThreadPoolExecutor(max_workers=4)
             self.job_set = set()
             lock = threading.Lock()
@@ -481,7 +529,8 @@ class Trainer:
 
                     cfg_dicts = build_plan_cfg_dicts(
                         plan_cfg_path=os.path.join(
-                            self.base_path, self.cfg.plan_settings.plan_cfg_path
+                            self.base_path,
+                            self.cfg.plan_settings.plan_cfg_path,
                         ),
                         ckpt_base_path=self.cfg.ckpt_base_path,
                         model_name=model_name,
@@ -495,7 +544,9 @@ class Trainer:
                         epoch=self.epoch,
                         cfg_dicts=cfg_dicts,
                         plan_output_dir=os.path.join(
-                            os.getcwd(), "submitit-evals", f"epoch_{self.epoch}"
+                            os.getcwd(),
+                            "submitit-evals",
+                            f"epoch_{self.epoch}",
                         ),
                     )
                     with lock:
@@ -605,24 +656,25 @@ class Trainer:
             self.predictor_optimizer.zero_grad()
             self.action_encoder_optimizer.zero_grad()
 
-        z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
-            obs, act
+        z_out, visual_out, visual_reconstructed, loss, loss_components = (
+            self.model(obs, act)
         )
         self.accelerator.backward(loss)
 
         if torch.isnan(loss):
-            print(f"[Rank {self.accelerator.process_index}] Loss is NaN at epoch {self.epoch}")
+            print(
+                f"[Rank {self.accelerator.process_index}] Loss is NaN at epoch {self.epoch}"
+            )
             for name, param in self.model.named_parameters():
                 if param.grad is not None and torch.isnan(param.grad).any():
                     print(f"NaN detected in gradients of {name}")
             raise RuntimeError("NaN loss detected during training.")
-        
 
         grad_norm = 0.0
         for p in self.model.predictor.parameters():
             if p.grad is not None:
                 grad_norm += p.grad.norm().item() ** 2
-        grad_norm = grad_norm ** 0.5
+        grad_norm = grad_norm**0.5
         self.logs_update({"train_predictor_grad_norm": [grad_norm]})
 
         if self.model.train_encoder:
@@ -641,7 +693,7 @@ class Trainer:
         }
 
         z_components = {
-            "z_out": z_out, 
+            "z_out": z_out,
             "visual_out": visual_out,
             "visual_reconstructed": visual_reconstructed,
         }
@@ -656,9 +708,11 @@ class Trainer:
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
-            
+
             if hasattr(self.model.predictor, "reset_memory"):
                 self.model.predictor.reset_memory()
+            else:
+                self.model.predictor.module.reset_memory()
 
             batch_loss_components = defaultdict(float)
 
@@ -674,21 +728,27 @@ class Trainer:
             for window_idx in range(num_windows):
                 start_idx = window_idx * self.window_size
                 end_idx = start_idx + self.window_size
-                obs_window = {k: v[:, start_idx:end_idx, ...] for k, v in obs.items()}
+                obs_window = {
+                    k: v[:, start_idx:end_idx, ...] for k, v in obs.items()
+                }
                 act_window = act[:, start_idx:end_idx, ...]
-                loss_components, z_components = self.train_step(obs_window, act_window)
+                loss_components, z_components = self.train_step(
+                    obs_window, act_window
+                )
                 for k, v in loss_components.items():
-                    batch_loss_components[k] += (v / num_windows)
+                    batch_loss_components[k] += v / num_windows
 
             compute_end.record()
             torch.cuda.synchronize(self.accelerator.device)
             compute_ms = compute_start.elapsed_time(compute_end)
 
             if i < 5 or i % 100 == 0:
-                time_logs ={
+                time_logs = {
                     "train_data_time": [data_time],
-                    "train_compute_time": [compute_ms/1e3],
-                    "train_compute_time_per_window": [compute_ms/1e3/num_windows],
+                    "train_compute_time": [compute_ms / 1e3],
+                    "train_compute_time_per_window": [
+                        compute_ms / 1e3 / num_windows
+                    ],
                     "train_batch_size": [B],
                     "train_num_windows": [num_windows],
                     "train_window_size": [self.window_size],
@@ -699,11 +759,17 @@ class Trainer:
             if self.cfg.has_decoder and plot:
                 self.decoder_eval(i, obs_window, z_components)
 
-            self.logs_update({f"train_{k}": [v] for k, v in batch_loss_components.items()})
+            self.logs_update(
+                {f"train_{k}": [v] for k, v in batch_loss_components.items()}
+            )
 
-            if self.cfg.has_predictor and i % 100 == 0:  # Log every 100 batches
+            if (
+                self.cfg.has_predictor and i % 100 == 0
+            ):  # Log every 100 batches
                 alpha_logs = self.get_alpha_values()
-                self.logs_update({f"train_{k}": [v] for k, v in alpha_logs.items()})
+                self.logs_update(
+                    {f"train_{k}": [v] for k, v in alpha_logs.items()}
+                )
 
             prev_time = time.perf_counter()
 
@@ -721,7 +787,9 @@ class Trainer:
                     f"train_{k}": [v] for k, v in train_rollout_logs.items()
                 }
                 self.logs_update(train_rollout_logs)
-                val_rollout_logs = self.openloop_rollout(self.val_traj_dset, mode="val")
+                val_rollout_logs = self.openloop_rollout(
+                    self.val_traj_dset, mode="val"
+                )
                 val_rollout_logs = {
                     f"val_{k}": [v] for k, v in val_rollout_logs.items()
                 }
@@ -738,35 +806,50 @@ class Trainer:
 
             if hasattr(self.model.predictor, "reset_memory"):
                 self.model.predictor.reset_memory()
+            else:
+                self.model.predictor.module.reset_memory()
 
             for window_idx in range(num_windows):
                 start_idx = window_idx * self.window_size
                 end_idx = start_idx + self.window_size
-                obs_window = {k: v[:, start_idx:end_idx, ...] for k, v in obs.items()}
+                obs_window = {
+                    k: v[:, start_idx:end_idx, ...] for k, v in obs.items()
+                }
                 act_window = act[:, start_idx:end_idx, ...]
 
                 # val step
                 with torch.no_grad():
-                    z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
-                        obs_window, act_window
-                    )
+                    (
+                        z_out,
+                        visual_out,
+                        visual_reconstructed,
+                        loss,
+                        loss_components,
+                    ) = self.model(obs_window, act_window)
                     loss = self.accelerator.gather_for_metrics(loss).mean()
-                    loss_components = self.accelerator.gather_for_metrics(loss_components)
+                    loss_components = self.accelerator.gather_for_metrics(
+                        loss_components
+                    )
                     for key, value in loss_components.items():
-                        batch_loss_components[key] += (value.mean().item() / num_windows)
+                        batch_loss_components[key] += (
+                            value.mean().item() / num_windows
+                        )
 
             if self.cfg.has_decoder and i == 0:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     z_obs_out, _ = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs_window)
-                    z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.cfg.num_pred)
+                    z_tgt = slice_trajdict_with_t(
+                        z_gt, start_idx=self.cfg.num_pred
+                    )
 
                     err_logs = self.err_eval(z_obs_out, z_tgt)
 
                     err_logs = self.accelerator.gather_for_metrics(err_logs)
                     err_logs = {
-                        key: value.mean().item() for key, value in err_logs.items()
+                        key: value.mean().item()
+                        for key, value in err_logs.items()
                     }
                     err_logs = {f"val_{k}": [v] for k, v in err_logs.items()}
 
@@ -774,10 +857,12 @@ class Trainer:
 
                 if visual_out is not None:
                     for t in range(
-                        self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
+                        self.cfg.num_hist,
+                        self.cfg.num_hist + self.cfg.num_pred,
                     ):
                         img_pred_scores = eval_images(
-                            visual_out[:, t - self.cfg.num_pred], obs_window["visual"][:, t]
+                            visual_out[:, t - self.cfg.num_pred],
+                            obs_window["visual"][:, t],
                         )
                         img_pred_scores = self.accelerator.gather_for_metrics(
                             img_pred_scores
@@ -791,10 +876,13 @@ class Trainer:
                 if visual_reconstructed is not None:
                     for t in range(obs_window["visual"].shape[1]):
                         img_reconstruction_scores = eval_images(
-                            visual_reconstructed[:, t], obs_window["visual"][:, t]
+                            visual_reconstructed[:, t],
+                            obs_window["visual"][:, t],
                         )
-                        img_reconstruction_scores = self.accelerator.gather_for_metrics(
-                            img_reconstruction_scores
+                        img_reconstruction_scores = (
+                            self.accelerator.gather_for_metrics(
+                                img_reconstruction_scores
+                            )
                         )
                         img_reconstruction_scores = {
                             f"val_img_{k}_reconstructed": [v.mean().item()]
@@ -812,17 +900,30 @@ class Trainer:
                     phase="valid",
                 )
 
-            self.logs_update({f"val_{k}": [v] for k, v in batch_loss_components.items()})
+            self.logs_update(
+                {f"val_{k}": [v] for k, v in batch_loss_components.items()}
+            )
 
-            if self.cfg.predictor == "additive_control_vit" and self.cfg.has_predictor and i == 0:  # Log on first validation batch
+            if (
+                self.cfg.predictor == "additive_control_vit"
+                and self.cfg.has_predictor
+                and i == 0
+            ):  # Log on first validation batch
                 alpha_logs = self.get_alpha_values()
-                self.logs_update({f"val_{k}": [v] for k, v in alpha_logs.items()})
+                self.logs_update(
+                    {f"val_{k}": [v] for k, v in alpha_logs.items()}
+                )
 
             if self.cfg.dry_run:
                 break
 
     def openloop_rollout(
-        self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
+        self,
+        dset,
+        num_rollout=10,
+        rand_start_end=True,
+        min_horizon=2,
+        mode="train",
     ):
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.num_hist
@@ -837,6 +938,8 @@ class Trainer:
 
         if hasattr(self.model.predictor, "reset_memory"):
             self.model.predictor.reset_memory()
+        else:
+            self.model.predictor.module.reset_memory()
 
         # sample traj
         for idx in range(num_rollout):
@@ -846,27 +949,38 @@ class Trainer:
                 obs, act, state, _ = dset[traj_idx]
                 act = act.to(self.device)
                 if rand_start_end:
-                    if obs["visual"].shape[0] > min_horizon * self.cfg.frameskip + 1:
+                    if (
+                        obs["visual"].shape[0]
+                        > min_horizon * self.cfg.frameskip + 1
+                    ):
                         start = np.random.randint(
                             0,
-                            obs["visual"].shape[0] - min_horizon * self.cfg.frameskip - 1,
+                            obs["visual"].shape[0]
+                            - min_horizon * self.cfg.frameskip
+                            - 1,
                         )
                     else:
                         start = 0
-                    max_horizon = (obs["visual"].shape[0] - start - 1) // self.cfg.frameskip
+                    max_horizon = (
+                        obs["visual"].shape[0] - start - 1
+                    ) // self.cfg.frameskip
                     if max_horizon > min_horizon:
                         valid_traj = True
-                        horizon = np.random.randint(min_horizon, max_horizon + 1)
+                        horizon = np.random.randint(
+                            min_horizon, max_horizon + 1
+                        )
                 else:
                     valid_traj = True
                     start = 0
-                    horizon = (obs["visual"].shape[0] - 1) // self.cfg.frameskip
+                    horizon = (
+                        obs["visual"].shape[0] - 1
+                    ) // self.cfg.frameskip
 
             for k in obs.keys():
                 obs[k] = obs[k][
-                    start : 
-                    start + horizon * self.cfg.frameskip + 1 : 
-                    self.cfg.frameskip
+                    start : start
+                    + horizon * self.cfg.frameskip
+                    + 1 : self.cfg.frameskip
                 ]
             act = act[start : start + horizon * self.cfg.frameskip]
             act = rearrange(act, "(h f) d -> h (f d)", f=self.cfg.frameskip)
@@ -885,21 +999,18 @@ class Trainer:
                     obs_0[k] = (
                         obs[k][:n_past].unsqueeze(0).to(self.device)
                     )  # unsqueeze for batch, (b, t, c, h, w)
-
                 z_obses, z = self.model.rollout(obs_0, actions)
-                z_obs_last = slice_trajdict_with_t(z_obses, start_idx=-1, end_idx=None)
+                z_obs_last = slice_trajdict_with_t(
+                    z_obses, start_idx=-1, end_idx=None
+                )
                 div_loss = self.err_eval_single(z_obs_last, z_g)
 
                 for k in div_loss.keys():
                     log_key = f"z_{k}_err_rollout{postfix}"
                     if log_key in logs:
-                        logs[f"z_{k}_err_rollout{postfix}"].append(
-                            div_loss[k]
-                        )
+                        logs[f"z_{k}_err_rollout{postfix}"].append(div_loss[k])
                     else:
-                        logs[f"z_{k}_err_rollout{postfix}"] = [
-                            div_loss[k]
-                        ]
+                        logs[f"z_{k}_err_rollout{postfix}"] = [div_loss[k]]
 
                 if self.cfg.has_decoder:
                     visuals = self.model.decode_obs(z_obses)[0]["visual"]
@@ -912,7 +1023,9 @@ class Trainer:
                         )
                     # self.accelerator.wait_for_everyone()
         logs = {
-            key: sum(values) / len(values) for key, values in logs.items() if values
+            key: sum(values) / len(values)
+            for key, values in logs.items()
+            if values
         }
         return logs
 
@@ -940,8 +1053,10 @@ class Trainer:
         if "epoch_time" in epoch_log:
             epoch_time_msg = f"  Epoch time: {epoch_log['epoch_time']:.2f}s"
 
-        log.info(f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
-                Validation loss: {epoch_log['val_loss']:.4f}{epoch_time_msg}")
+        log.info(
+            f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
+                Validation loss: {epoch_log['val_loss']:.4f}{epoch_time_msg}"
+        )
 
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
@@ -1014,12 +1129,19 @@ class Trainer:
 
     def get_alpha_values(self):
         """Get current alpha values from the additive control transformer"""
-        if hasattr(self.predictor, 'transformer') and hasattr(self.predictor.transformer, 'alphas'):
+        if (
+            hasattr(self.predictor, "transformer")
+            and hasattr(self.predictor.transformer, "alphas")
+            or hasattr(self.predictor.module, "transformer")
+            and hasattr(self.predictor.module.transformer, "alphas")
+        ):
             alphas = {}
             for i, alpha in enumerate(self.predictor.transformer.alphas):
                 alphas[f"alpha_layer_{i}"] = alpha.item()
                 if alpha.grad is not None:
-                    alphas[f"alpha_layer_{i}_grad_norm"] = alpha.grad.norm().item()
+                    alphas[f"alpha_layer_{i}_grad_norm"] = (
+                        alpha.grad.norm().item()
+                    )
                 else:
                     alphas[f"alpha_layer_{i}_grad_norm"] = 0.0
             return alphas
@@ -1031,7 +1153,7 @@ def main(cfg: OmegaConf):
     trainer = Trainer(cfg)
     trainer.run()
     trainer.accelerator.end_training()
-    if trainer.accelerator.is_main_process and hasattr(trainer, 'wandb_run'):
+    if trainer.accelerator.is_main_process and hasattr(trainer, "wandb_run"):
         trainer.wandb_run.finish()
 
 

@@ -324,6 +324,9 @@ class VWorldModel(nn.Module):
 
         if hasattr(self.predictor, "reset_memory"):
             self.predictor.reset_memory()
+        else:
+            self.predictor.module.reset_memory()
+
 
         num_obs_init = obs_0['visual'].shape[1]
         act_0 = act[:, :num_obs_init]
@@ -336,6 +339,7 @@ class VWorldModel(nn.Module):
             z_new = z_pred[:, -inc:, ...]
             z_new = self.replace_actions_from_z(z_new, action[:, t : t + inc, :])
             z = torch.cat([z, z_new], dim=1)
+
             t += inc
 
         z_pred = self.predict(z[:, -self.num_hist :])
