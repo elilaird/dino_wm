@@ -711,7 +711,7 @@ class Trainer:
 
             if hasattr(self.model.predictor, "reset_memory"):
                 self.model.predictor.reset_memory()
-            else:
+            elif hasattr(self.model.predictor, "module") and hasattr(self.model.predictor.module, "reset_memory"):
                 self.model.predictor.module.reset_memory()
 
             batch_loss_components = defaultdict(float)
@@ -806,7 +806,7 @@ class Trainer:
 
             if hasattr(self.model.predictor, "reset_memory"):
                 self.model.predictor.reset_memory()
-            else:
+            elif hasattr(self.model.predictor, "module") and hasattr(self.model.predictor.module, "reset_memory"):
                 self.model.predictor.module.reset_memory()
 
             for window_idx in range(num_windows):
@@ -938,7 +938,7 @@ class Trainer:
 
         if hasattr(self.model.predictor, "reset_memory"):
             self.model.predictor.reset_memory()
-        else:
+        elif hasattr(self.model.predictor, "module") and hasattr(self.model.predictor.module, "reset_memory"):
             self.model.predictor.module.reset_memory()
 
         # sample traj
@@ -1132,8 +1132,9 @@ class Trainer:
         if (
             hasattr(self.predictor, "transformer")
             and hasattr(self.predictor.transformer, "alphas")
-            or hasattr(self.predictor.module, "transformer")
-            and hasattr(self.predictor.module.transformer, "alphas")
+            or (hasattr(self.predictor, "module")
+            and hasattr(self.predictor.module, "transformer")
+            and hasattr(self.predictor.module.transformer, "alphas"))
         ):
             alphas = {}
             for i, alpha in enumerate(self.predictor.transformer.alphas):

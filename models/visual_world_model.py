@@ -324,9 +324,9 @@ class VWorldModel(nn.Module):
 
         if hasattr(self.predictor, "reset_memory"):
             self.predictor.reset_memory()
-        else:
+        elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "reset_memory"):
             self.predictor.module.reset_memory()
-
+        
 
         num_obs_init = obs_0['visual'].shape[1]
         act_0 = act[:, :num_obs_init]

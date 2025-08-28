@@ -159,49 +159,49 @@ OPEN = \
 
 DEFAULT_CAMERA_CONFIG_LOOKUP = {
     U_MAZE: {
-        "azimuth": 90,
+        "azimuth": -90,
         "elevation": -90,
         "distance": 10.0,
         "lookat": [3, 3, 0],
     },
     MEDIUM_MAZE: {
-        "azimuth": 90,
+        "azimuth": -90,
         "elevation": -90,
         "distance": 11.0,
         "lookat": [4.5, 4.5, 2],
     },
     LARGE_MAZE: {
-        "azimuth": 90,
+        "azimuth": -90,
         "elevation": -90,
         "distance": 11.0,
         "lookat": [5, 6.5, 5],
     },
     U_MAZE_EVAL: {
-        "azimuth": 90,
+        "azimuth": -90,
         "elevation": -90,
         "distance": 10.0,
         "lookat": [3, 3, 0],
     },
     MEDIUM_MAZE_EVAL: {
-        "azimuth": 90,
+        "azimuth": -90,
         "elevation": -90,
         "distance": 11.0,
         "lookat": [4.5, 4.5, 2],
     },
     LARGE_MAZE_EVAL: {
-        "azimuth": 90,
+        "azimuth": -90,
         "elevation": -90,
         "distance": 11.0,
         "lookat": [5, 6.5, 5],
     },
     OPEN: {
-        "azimuth": 90,
+        "azimuth": -90,
         "elevation": -90,
         "distance": 11.0,
         "lookat": [3, 4, 0],
     },
     SMALL_MAZE: {
-        "azimuth": 90,
+        "azimuth": -90,
         "elevation": -90,
         "distance": 11.0,
         "lookat": [3, 3.5, 0],
