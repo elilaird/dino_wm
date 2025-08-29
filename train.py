@@ -177,9 +177,6 @@ class Trainer:
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
             OmegaConf.set_struct(cfg, True)
-            # wandb.run.name = "{}".format(model_name) + f"_{slurm_job_id}"
-            # if self.cfg.dry_run:
-            #     wandb.run.name += "_dry_run"
             with open(os.path.join(os.getcwd(), "hydra.yaml"), "w") as f:
                 f.write(OmegaConf.to_yaml(cfg, resolve=True))
 
@@ -417,40 +414,52 @@ class Trainer:
             print(self.model)
 
     def init_optimizers(self):
+        # Scale learning rates by number of processes for proper multi-GPU training
+        lr_scale = self.accelerator.num_processes
+        
         self.encoder_optimizer = torch.optim.Adam(
             self.encoder.parameters(),
-            lr=self.cfg.training.encoder_lr,
+            lr=self.cfg.training.encoder_lr * lr_scale,
         )
         self.encoder_optimizer = self.accelerator.prepare(
             self.encoder_optimizer
         )
+        if self.accelerator.is_main_process:
+            log.info(f"Scaling learning rates by {lr_scale} for {self.accelerator.num_processes} processes")
+            log.info(f"Encoder LR: {self.cfg.training.encoder_lr} -> {self.cfg.training.encoder_lr * lr_scale}")
         if self.cfg.has_predictor:
             self.predictor_optimizer = torch.optim.AdamW(
                 self.predictor.parameters(),
-                lr=self.cfg.training.predictor_lr,
+                lr=self.cfg.training.predictor_lr * lr_scale,
             )
             self.predictor_optimizer = self.accelerator.prepare(
                 self.predictor_optimizer
             )
+            if self.accelerator.is_main_process:
+                log.info(f"Predictor LR: {self.cfg.training.predictor_lr} -> {self.cfg.training.predictor_lr * lr_scale}")
 
             self.action_encoder_optimizer = torch.optim.AdamW(
                 itertools.chain(
                     self.action_encoder.parameters(),
                     self.proprio_encoder.parameters(),
                 ),
-                lr=self.cfg.training.action_encoder_lr,
+                lr=self.cfg.training.action_encoder_lr * lr_scale,
             )
             self.action_encoder_optimizer = self.accelerator.prepare(
                 self.action_encoder_optimizer
             )
+            if self.accelerator.is_main_process:
+                log.info(f"Action Encoder LR: {self.cfg.training.action_encoder_lr} -> {self.cfg.training.action_encoder_lr * lr_scale}")
 
         if self.cfg.has_decoder:
             self.decoder_optimizer = torch.optim.Adam(
-                self.decoder.parameters(), lr=self.cfg.training.decoder_lr
+                self.decoder.parameters(), lr=self.cfg.training.decoder_lr * lr_scale
             )
             self.decoder_optimizer = self.accelerator.prepare(
                 self.decoder_optimizer
             )
+            if self.accelerator.is_main_process:
+                log.info(f"Decoder LR: {self.cfg.training.decoder_lr} -> {self.cfg.training.decoder_lr * lr_scale}")
 
     def monitor_jobs(self, lock):
         """
@@ -665,22 +674,22 @@ class Trainer:
             self.model(obs, act)
         )
         self.accelerator.backward(loss)
+        assert not torch.isnan(loss), f"Loss is NaN at epoch {self.epoch}"
 
-        if torch.isnan(loss):
-            print(
-                f"[Rank {self.accelerator.process_index}] Loss is NaN at epoch {self.epoch}"
-            )
-            for name, param in self.model.named_parameters():
-                if param.grad is not None and torch.isnan(param.grad).any():
-                    print(f"NaN detected in gradients of {name}")
-            raise RuntimeError("NaN loss detected during training.")
+        # Gradient norm clipping
+        grad_norms = {}
+        if self.model.train_encoder:
+            grad_norms['encoder_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.cfg.training.max_grad_norm).item()
+        if self.cfg.has_predictor and self.model.train_predictor:
+            grad_norms['predictor_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.predictor.parameters(), self.cfg.training.max_grad_norm).item()
+            grad_norms['action_encoder_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.action_encoder.parameters(), self.cfg.training.max_grad_norm).item()
+            grad_norms['proprio_encoder_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.proprio_encoder.parameters(), self.cfg.training.max_grad_norm).item()
+        if self.cfg.has_decoder and self.model.train_decoder:
+            grad_norms['decoder_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.decoder.parameters(), self.cfg.training.max_grad_norm).item()
 
-        grad_norm = 0.0
-        for p in self.model.predictor.parameters():
-            if p.grad is not None:
-                grad_norm += p.grad.norm().item() ** 2
-        grad_norm = grad_norm**0.5
-        self.logs_update({"train_predictor_grad_norm": [grad_norm]})
+        if self.accelerator.is_main_process:
+            for name, norm in grad_norms.items():
+                self.logs_update({f"train_{name}": [norm]})
 
         if self.model.train_encoder:
             self.encoder_optimizer.step()
