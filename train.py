@@ -154,6 +154,9 @@ class Trainer:
                 log.info(f"Resuming Wandb run {wandb_run_id}")
 
             wandb_dict = OmegaConf.to_container(cfg, resolve=True)
+            run_name = "{}".format(model_name) + f"_{slurm_job_id}"
+            if self.cfg.dry_run:
+                run_name += "_dry_run"
             if self.cfg.debug:
                 log.info("WARNING: Running in debug mode...")
                 self.wandb_run = wandb.init(
@@ -161,6 +164,7 @@ class Trainer:
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
+                    name=run_name
                 )
             else:
                 self.wandb_run = wandb.init(
@@ -168,13 +172,14 @@ class Trainer:
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
+                    name=run_name
                 )
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
             OmegaConf.set_struct(cfg, True)
-            wandb.run.name = "{}".format(model_name) + f"_{slurm_job_id}"
-            if self.cfg.dry_run:
-                wandb.run.name += "_dry_run"
+            # wandb.run.name = "{}".format(model_name) + f"_{slurm_job_id}"
+            # if self.cfg.dry_run:
+            #     wandb.run.name += "_dry_run"
             with open(os.path.join(os.getcwd(), "hydra.yaml"), "w") as f:
                 f.write(OmegaConf.to_yaml(cfg, resolve=True))
 
