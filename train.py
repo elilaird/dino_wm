@@ -415,7 +415,7 @@ class Trainer:
 
     def init_optimizers(self):
         # Scale learning rates by number of processes for proper multi-GPU training
-        lr_scale = self.accelerator.num_processes
+        lr_scale = 1
         
         self.encoder_optimizer = torch.optim.Adam(
             self.encoder.parameters(),
@@ -1143,24 +1143,23 @@ class Trainer:
 
     def get_alpha_values(self):
         """Get current alpha values from the additive control transformer"""
-        if (
-            hasattr(self.predictor, "transformer")
-            and hasattr(self.predictor.transformer, "alphas")
-            or (hasattr(self.predictor, "module")
-            and hasattr(self.predictor.module, "transformer")
-            and hasattr(self.predictor.module.transformer, "alphas"))
-        ):
-            alphas = {}
-            for i, alpha in enumerate(self.predictor.transformer.alphas):
-                alphas[f"alpha_layer_{i}"] = alpha.item()
-                if alpha.grad is not None:
-                    alphas[f"alpha_layer_{i}_grad_norm"] = (
-                        alpha.grad.norm().item()
-                    )
-                else:
-                    alphas[f"alpha_layer_{i}_grad_norm"] = 0.0
-            return alphas
-        return {}
+        if hasattr(self.predictor, "transformer") and hasattr(self.predictor.transformer, "alphas"):
+            module = self.predictor.transformer
+        elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "transformer") and hasattr(self.predictor.module.transformer, "alphas"):
+            module = self.predictor.module.transformer
+        else:
+            return {}
+
+        alphas = {}
+        for i, alpha in enumerate(module.alphas):
+            alphas[f"alpha_layer_{i}"] = alpha.item()
+            if alpha.grad is not None:
+                alphas[f"alpha_layer_{i}_grad_norm"] = (
+                    alpha.grad.norm().item()
+                )
+            else:
+                alphas[f"alpha_layer_{i}_grad_norm"] = 0.0
+        return alphas
 
 
 @hydra.main(config_path="conf", config_name="train")

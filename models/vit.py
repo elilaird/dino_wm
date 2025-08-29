@@ -1282,8 +1282,98 @@ class StateSpaceTransformer(nn.Module):
     def reset_memory(self):
         self.H_buffer = None
 
+class MemoryInjectionSSMTransformer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        state_size,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        dropout=0.0,
+        dim_head=64,
+        dt: float = 1.0, # could change to frameskip
+        alpha_init: float = 0.1,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.depth = depth
+        self.heads = heads
+        self.mlp_dim = mlp_dim
+        self.dropout = dropout
+        self.dim_head = dim_head
+        self.state_size = state_size
+        self.dt = dt
+        self.num_patches = num_patches
+
+        self.ssm_cell = SSMCell(dim, state_size)
+        self.ln_in = nn.LayerNorm(dim)
+        self.ln_out = nn.LayerNorm(dim)
+
+        self.H_buffer = None # keep track of hidden memory state w/o passing around
+
+        self.alphas = nn.ParameterList([
+            nn.Parameter(torch.ones(1) * alpha_init) for _ in range(depth)
+        ])
+
+        self.layers = nn.ModuleList([])
+        self.injection_layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim,
+                            heads,
+                            dim_head,
+                            dropout,
+                        ),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            self.injection_layers.append(
+                nn.Linear(dim, dim)
+            )
+
+    @torch.no_grad()
+    def init_state(self, B: int, device=None):
+        return self.ssm_cell.init_state(B, self.num_patches, self.state_size, device=device)
+    
+    def forward(self, x):
+        B, T, D = x.shape
+        n_frames = T // self.num_patches
+
+        x = self.ln_in(x)
+
+        if self.H_buffer is None:
+            self.H_buffer = self.init_state(B, x.device)
+
+        # iterate through frames to aggregate memory
+        M_new = []
+        h_new = self.H_buffer
+        for i in range(n_frames):
+            x_i = x[:, i * self.num_patches : (i + 1) * self.num_patches, :]
+            h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)
+            M_new.append(m_i)
+
+        M_new = torch.cat(M_new, dim=1)
+        self.H_buffer = h_new.detach()
+
+        for i, (attn, ff) in enumerate(self.layers):
+            x = x + attn(x)
+            x = x + ff(x)
+            x = x + self.injection_layers[i](M_new) * self.alphas[i]
+            
+        return self.ln_out(x)
+
+    def reset_memory(self):
+        self.H_buffer = None
+
+
 class StateSpaceViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0):
+    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type: str = "sst", alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0):
         super().__init__()
         self.dim = dim
         self.state_size = state_size
@@ -1295,6 +1385,7 @@ class StateSpaceViTPredictor(nn.Module):
         self.use_gate = use_gate
         self.num_patches = num_patches
         self.num_frames = num_frames
+        assert ssm_type in ["sst", "misst"], f"Invalid SSM type: {ssm_type}"
 
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
@@ -1305,9 +1396,16 @@ class StateSpaceViTPredictor(nn.Module):
             torch.randn(1, num_frames * num_patches, dim)
         )
         self.dropout = nn.Dropout(emb_dropout)
-        self.transformer = StateSpaceTransformer(
-            dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, use_gate, dt
-        )
+
+        if ssm_type == "sst":
+            self.transformer = StateSpaceTransformer(
+                dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, use_gate, dt
+            )
+        elif ssm_type == "misst":
+            self.transformer = MemoryInjectionSSMTransformer(
+                dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init
+            )
+
 
     def forward(self, x):
         b, n, _ = x.shape
