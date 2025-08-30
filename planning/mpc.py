@@ -103,11 +103,12 @@ class MPCPlanner(BasePlanner):
                 obs_0=init_obs_0,
                 state_0=init_state_0,
             )
+            save_video = self.iter % 5 == 0
             logs, successes, e_obses, e_states = self.evaluator.eval_actions(
                 self.planned_actions,
                 self.action_len,
                 filename=f"plan{self.iter}",
-                save_video=False,
+                save_video=save_video,
             )
             new_successes = successes & ~self.is_success  # Identify new successes
             self.is_success = (

@@ -99,9 +99,9 @@ class PlanEvaluator:  # evaluator for planning
         trans_obs_0 = move_to_device(
             self.preprocessor.transform_obs(self.obs_0), self.device
         )
-        # trans_obs_g = move_to_device(
-        #     self.preprocessor.transform_obs(self.obs_g), self.device
-        # )
+        trans_obs_g = move_to_device(
+            self.preprocessor.transform_obs(self.obs_g), self.device
+        )
         with torch.no_grad():
             i_z_obses, _ = self.wm.rollout(
                 obs_0=trans_obs_0,
