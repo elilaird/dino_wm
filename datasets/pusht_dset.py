@@ -1,14 +1,16 @@
 import torch
-import decord
+# import decord
 import pickle
 import numpy as np
 from pathlib import Path
 from einops import rearrange
-from decord import VideoReader
+# from decord import VideoReader
 from typing import Callable, Optional
 from .traj_dset import TrajDataset, TrajSlicerDataset
 from typing import Optional, Callable, Any
-decord.bridge.set_bridge("torch")
+# decord.bridge.set_bridge("torch")
+import torchvision.io as tvio
+
 
 # precomputed dataset stats
 ACTION_MEAN = torch.tensor([-0.0087, 0.0068])
@@ -17,6 +19,13 @@ STATE_MEAN = torch.tensor([236.6155, 264.5674, 255.1307, 266.3721, 1.9584, -2.93
 STATE_STD = torch.tensor([101.1202, 87.0112, 52.7054, 57.4971, 1.7556, 74.84556075, 74.14009094])
 PROPRIO_MEAN = torch.tensor([236.6155, 264.5674, -2.93032027,  2.54307914])
 PROPRIO_STD = torch.tensor([101.1202, 87.0112, 74.84556075, 74.14009094])
+
+
+def get_frames_torchvision(video_path, frames):
+    # Read entire video
+    video, _, _ = tvio.read_video(str(video_path))
+    return video[frames]
+
 
 class PushTDataset(TrajDataset):
     def __init__(
@@ -104,16 +113,17 @@ class PushTDataset(TrajDataset):
             T = self.seq_lengths[i]
             result.append(self.actions[i, :T, :])
         return torch.cat(result, dim=0)
+    
 
     def get_frames(self, idx, frames):
         vid_dir = self.data_path / "obses"
-        reader = VideoReader(str(vid_dir / f"episode_{idx:03d}.mp4"), num_threads=1)
+        # reader = VideoReader(str(vid_dir / f"episode_{idx:03d}.mp4"), num_threads=1)
         act = self.actions[idx, frames]
         state = self.states[idx, frames]
         proprio = self.proprios[idx, frames]
         shape = self.shapes[idx]
 
-        image = reader.get_batch(frames)  # THWC
+        image = get_frames_torchvision(vid_dir / f"episode_{idx:03d}.mp4", frames)  # THWC
         image = image / 255.0
         image = rearrange(image, "T H W C -> T C H W")
         if self.transform:
@@ -144,6 +154,7 @@ def load_pusht_slice_train_val(
     num_pred=0,
     frameskip=0,
     with_velocity=True,
+    num_frames=None,
 ):
     train_dset = PushTDataset(
         n_rollout=n_rollout,
@@ -160,7 +171,7 @@ def load_pusht_slice_train_val(
         with_velocity=with_velocity,
     )
 
-    num_frames = num_hist + num_pred
+    num_frames = num_frames if num_frames else num_hist + num_pred
     train_slices = TrajSlicerDataset(train_dset, num_frames, frameskip)
     val_slices = TrajSlicerDataset(val_dset, num_frames, frameskip)
 
