@@ -1,10 +1,10 @@
 import torch
-import decord
+# import decord
 import numpy as np
 from pathlib import Path
 from typing import Callable, Optional
 from .traj_dset import TrajDataset, get_train_val_sliced, TrajSlicerDataset
-decord.bridge.set_bridge("torch")
+# decord.bridge.set_bridge("torch")
 
 # precomputed dataset stats
 ACTION_MEAN = torch.tensor([0.0006, 0.0015])
@@ -115,6 +115,7 @@ def load_wall_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=0,
+    num_frames=None,
 ):  
     if split_mode == "random":
         dset = WallDataset(
@@ -126,7 +127,7 @@ def load_wall_slice_train_val(
         dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
             traj_dataset=dset, 
             train_fraction=split_ratio, 
-            num_frames=num_hist + num_pred, 
+            num_frames=num_frames if num_frames else num_hist + num_pred, 
             frameskip=frameskip
         )
     elif split_mode == "folder":
@@ -142,7 +143,7 @@ def load_wall_slice_train_val(
             data_path=data_path + "/val",
             normalize_action=normalize_action,
         )
-        num_frames = num_hist + num_pred
+        num_frames = num_frames if num_frames else num_hist + num_pred
         train_slices = TrajSlicerDataset(dset_train, num_frames, frameskip)
         val_slices = TrajSlicerDataset(dset_val, num_frames, frameskip)
 
