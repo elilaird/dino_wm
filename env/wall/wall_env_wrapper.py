@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import random
 from torchvision import transforms  
+from gymnasium import spaces  # Add this import
 
 
 from utils import aggregate_dct
@@ -56,6 +57,19 @@ class WallEnvWrapper(DotWall):
         super().__init__(rng, wall_config, fix_wall, cross_wall, fix_wall_location=fix_wall_location, fix_door_location=fix_door_location, device=device,**kwargs)
         self.action_dim = ENV_ACTION_DIM
         self.transform = TRANSFORM
+        
+        # Override action and observation spaces if needed
+        self.action_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(ENV_ACTION_DIM,), dtype=np.float32
+        )
+        self.observation_space = spaces.Dict({
+            'visual': spaces.Box(
+                low=0, high=255, shape=(224, 224, 3), dtype=np.float32  # Note: permuted shape
+            ),
+            'proprio': spaces.Box(
+                low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32
+            )
+        })
 
     def eval_state(self, goal_state, cur_state):
         success = np.linalg.norm(goal_state[:2] - cur_state[:2]) < 4.5 
@@ -84,7 +98,7 @@ class WallEnvWrapper(DotWall):
         """
         self.seed(seed)
         self.set_init_state(init_state)
-        obs, state = self.reset()
+        obs, state = self.reset(seed=seed)
         obs['visual'] = self.transform(obs['visual'])
         obs['visual'] = obs['visual'].permute(1, 2, 0)
         return obs, state
@@ -93,20 +107,23 @@ class WallEnvWrapper(DotWall):
         obses = []
         rewards = []
         dones = []
+        truncateds = []
         infos = []
         for action in actions:
-            o, r, d, info = self.step(action)
+            o, r, d, tr, info = self.step(action)
             o['visual'] = self.transform(o['visual'])
             o['visual'] = o['visual'].permute(1, 2, 0)
             obses.append(o)
             rewards.append(r)
             dones.append(d)
+            truncateds.append(tr)
             infos.append(info)
         obses = aggregate_dct(obses)
         rewards = np.stack(rewards)
         dones = np.stack(dones)
+        truncateds = np.stack(truncateds)
         infos = aggregate_dct(infos)
-        return obses, rewards, dones, infos
+        return obses, rewards, dones, truncateds, infos
 
     def rollout(self, seed, init_state, actions):
         """
@@ -118,7 +135,7 @@ class WallEnvWrapper(DotWall):
         states: (T, D)
         """
         obs, state = self.prepare(seed, init_state)
-        obses, rewards, dones, infos = self.step_multiple(actions)
+        obses, rewards, dones, truncateds, infos = self.step_multiple(actions)
         for k in obses.keys():
             obses[k] = np.vstack([np.expand_dims(obs[k], 0), obses[k]])
         states = np.vstack([np.expand_dims(state, 0), infos["state"]])

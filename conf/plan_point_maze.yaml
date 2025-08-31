@@ -18,7 +18,7 @@ model_name: null
 model_epoch: latest
 
 seed: 99
-n_evals: 50 
+n_evals: 10 
 goal_source: 'random_state'
 goal_H: 5 
 n_plot_samples: 10

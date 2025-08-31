@@ -83,6 +83,7 @@ class PlanEvaluator:  # evaluator for planning
                 result[i, int(length[i]) :] = 0
         return result
 
+    @torch.no_grad()
     def eval_actions(
         self, actions, action_len=None, filename="output", save_video=False
     ):
@@ -127,6 +128,12 @@ class PlanEvaluator:  # evaluator for planning
             e_obs=e_final_obs,
             i_z_obs=i_final_z_obs,
         )
+
+        try:
+            del e_final_state, e_final_obs, i_final_z_obs
+            torch.cuda.empty_cache()
+        except:
+            pass
 
         # plot trajs
         if self.wm.decoder is not None and save_video:

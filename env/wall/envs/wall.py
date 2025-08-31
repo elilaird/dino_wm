@@ -2,9 +2,10 @@ import math
 from typing import Optional
 
 import torch
-import gym
+import gymnasium as gym
 import numpy as np
 import random
+from gymnasium import spaces
 
 from ..data.wall import WallDatasetConfig
 from ..data.wall_utils import generate_wall_layouts
@@ -46,6 +47,19 @@ class DotWall(gym.Env):
         self.right_wall_x = self.wall_x + self.wall_config.wall_width // 2
 
         self.reset_to_state = None
+        
+        # Add action and observation spaces
+        self.action_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32
+        )
+        self.observation_space = spaces.Dict({
+            'visual': spaces.Box(
+                low=0, high=255, shape=(3, 224, 224), dtype=np.float32
+            ),
+            'proprio': spaces.Box(
+                low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32
+            )
+        })
     
     def channels_to_img(self, wall_img, dot_img):
         h, w = wall_img.shape
@@ -62,9 +76,12 @@ class DotWall(gym.Env):
         return rgb_image
 
 
-    def reset(self, location=None):
+    def reset(self, location=None, seed=None, options=None):
         if location is None:
             location = self.reset_to_state # self.reset_to_state can be None
+
+        if seed is not None:
+            self.seed(seed)
 
         self.wall_img = self._render_walls(self.wall_x, self.hole_y)
         if location is None:
@@ -93,7 +110,7 @@ class DotWall(gym.Env):
         info = {}
         info['state'] = self.dot_position
         info['pos_agent'] = self.dot_position
-        return observation, 0, False, info # observation, reward, done, info
+        return observation, 0, False, False, info # observation, reward, done, truncated, info
 
     def _calculate_next_position(self, action):
         next_dot_position = self._generate_transition(self.dot_position, action)

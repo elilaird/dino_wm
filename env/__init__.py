@@ -5,6 +5,7 @@ register(
     entry_point="env.pusht.pusht_wrapper:PushTWrapper",
     max_episode_steps=300,
     reward_threshold=1.0,
+    disable_env_checker=True,
 )
 register(
     id='point_maze',
@@ -24,6 +25,7 @@ register(
     entry_point="env.wall.wall_env_wrapper:WallEnvWrapper",
     max_episode_steps=300,
     reward_threshold=1.0,
+    disable_env_checker=True,
 )
 
 register(
@@ -31,4 +33,5 @@ register(
     entry_point="env.deformable_env.FlexEnvWrapper:FlexEnvWrapper",
     max_episode_steps=300,
     reward_threshold=1.0,
+    disable_env_checker=True,
 )

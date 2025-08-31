@@ -470,7 +470,7 @@ def planning_main(cfg_dict):
         env = SerialVectorEnv(
             [
                 gym.make(
-                    model_cfg.env.name, *model_cfg.env.args, **model_cfg.env.kwargs
+                    model_cfg.env.name, *model_cfg.env.args, **model_cfg.env.kwargs, disable_env_checker=True
                 )
                 for _ in range(cfg_dict["n_evals"])
             ]

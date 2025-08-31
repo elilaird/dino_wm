@@ -15,17 +15,30 @@ class SerialVectorEnv:
         self.envs = envs
         self.num_envs = len(envs)
 
+    def _unwrap_env(self, env):
+        """Unwrap gymnasium wrappers but preserve custom wrappers"""
+        # Keep unwrapping until we find our custom WallEnvWrapper or reach the base
+        while hasattr(env, 'env'):
+            # Check if the current env is a gymnasium wrapper (like TimeLimit)
+            if hasattr(env, 'spec') and env.spec is not None:
+                # This is likely a gymnasium wrapper, unwrap it
+                env = env.env
+            else:
+                # This might be our custom wrapper, stop unwrapping
+                break
+        return env
+
     def sample_random_init_goal_states(self, seed):
-        init_state, goal_state = zip(*(self.envs[i].sample_random_init_goal_states(seed[i]) for i in range(self.num_envs)))
+        init_state, goal_state = zip(*(self._unwrap_env(self.envs[i]).sample_random_init_goal_states(seed[i]) for i in range(self.num_envs)))
         return np.stack(init_state), np.stack(goal_state)
     
     def update_env(self, env_info):
-        [self.envs[i].update_env(env_info[i]) for i in range(self.num_envs)]
+        [self._unwrap_env(self.envs[i]).update_env(env_info[i]) for i in range(self.num_envs)]
     
     def eval_state(self, goal_state, cur_state): 
         eval_result = []
         for i in range(self.num_envs):
-            env = self.envs[i]
+            env = self._unwrap_env(self.envs[i])
             eval_result.append(env.eval_state(goal_state[i], cur_state[i]))
         eval_result = aggregate_dct(eval_result)
         return eval_result
@@ -39,7 +52,7 @@ class SerialVectorEnv:
         obs = []
         state = []
         for i in range(self.num_envs):
-            env = self.envs[i]
+            env = self._unwrap_env(self.envs[i])
             cur_seed = seed[i]
             cur_init_state = init_state[i]
             o, s = env.prepare(cur_seed, cur_init_state)
@@ -60,7 +73,7 @@ class SerialVectorEnv:
         dones = []
         infos = []
         for i in range(self.num_envs):
-            env = self.envs[i]
+            env = self._unwrap_env(self.envs[i])
             cur_actions = actions[i]
             obs, reward, done, info = env.step_multiple(cur_actions)
             obses.append(obs)
@@ -83,7 +96,7 @@ class SerialVectorEnv:
         obses = []
         states = []
         for i in range(self.num_envs):
-            env = self.envs[i]
+            env = self._unwrap_env(self.envs[i])
             cur_seed = seed[i]
             cur_init_state = init_state[i]
             cur_actions = actions[i]

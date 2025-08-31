@@ -1,12 +1,12 @@
 import yaml
 import torch
-import decord
+# import decord
 import numpy as np
 from einops import rearrange
 from pathlib import Path
 from typing import Callable, Optional
 from .traj_dset import TrajDataset, get_train_val_sliced
-decord.bridge.set_bridge("torch")
+# decord.bridge.set_bridge("torch")
 
 def load_yaml(filename):
     # load YAML file
@@ -131,6 +131,7 @@ def load_deformable_dset_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=0,
+    num_frames=None,
 ):
     dset = DeformDataset(
         n_rollout=n_rollout,
@@ -142,7 +143,7 @@ def load_deformable_dset_slice_train_val(
     dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
         traj_dataset=dset,
         train_fraction=split_ratio,
-        num_frames=num_hist + num_pred,
+        num_frames=num_frames if num_frames else num_hist + num_pred,
         frameskip=frameskip,
     )
 
