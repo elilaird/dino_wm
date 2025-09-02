@@ -27,7 +27,7 @@ DATA_DIR=${DATA_DIR:-"/lustre/smuexa01/client/users/ejlaird/dino_wm_data"}
 MUJOCO_DIR=/users/ejlaird/.mujoco/mujoco210/bin
 
 if [ "${TYPE}" = "data" ]; then
-    PY_FILE="generate_point_maze_data.py"
+    PY_FILE="minigrid_env.py generate"
 elif [ "${TYPE}" = "plan" ]; then
     PY_FILE="plan.py"
 elif [ "${TYPE}" = "train" ]; then

@@ -158,6 +158,9 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         self.obs_mode = obs_mode
         self.seed = seed
         self.set_seed(seed)
+        
+        # Override action space to only include directional movement actions
+        self.action_space = spaces.Discrete(4)  # 0: up, 1: right, 2: down, 3: left
 
     def set_seed(self, seed=None):
         if seed is not None:
@@ -195,12 +198,26 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         gx = np.random.randint(1, mid_w - 1) + (quadrant % 2) * mid_w 
         gy = np.random.randint(1, mid_h - 1) + (quadrant // 2) * mid_h
         self.put_obj(Goal(), gx, gy)
+        self.goal_pos = (gx, gy)
 
         # agent spawn
         self.place_agent()
 
     def step(self, action):
-        obs, reward, terminated, truncated, info = super().step(action)
+        # First, rotate the agent to face the desired direction
+        target_dir = action  # 0=up, 1=right, 2=down, 3=left
+        
+        # Calculate how many left turns needed to face target direction
+        current_dir = self.agent_dir
+        turns_needed = (target_dir - current_dir) % 4
+        
+        # Execute the turns
+        for _ in range(turns_needed):
+            super().step(self.actions.left)
+
+        
+        # Now move forward in the desired direction
+        obs, reward, terminated, truncated, info = super().step(self.actions.forward)
         if isinstance(self.grid.get(*self.agent_pos), Goal):
             reward = 1.0
             terminated = True
@@ -525,7 +542,6 @@ class Trajectory:
 
 def run_episode(
     env: MiniGridEnv,
-    policy: str = "bfs",
     max_steps: Optional[int] = None,
     goal_img: Optional[np.ndarray] = None,
     seed: Optional[int] = None,
@@ -541,115 +557,122 @@ def run_episode(
 
     obs, _ = env.reset(seed=seed)
     obs_list.append(obs["image"])
-    T = 0
     max_T = max_steps or env.max_steps
+    obs_list, act_list, rew_list, done_list, info_list = [], [], [], [], []
 
-    def act_random():
-        return env.action_space.sample()
+    # def act_random():
+    #     return env.action_space.sample()
 
-    def step_and_record(a):
-        nonlocal T, obs_list, act_list, rew_list, done_list, info_list
-        ob, rw, terminated, truncated, info = env.step(a)
-        obs_list.append(ob["image"])
-        act_list.append(a)
-        rew_list.append(rw)
+    # def step_and_record(a):
+    #     nonlocal T, obs_list, act_list, rew_list, done_list, info_list
+    #     ob, rw, terminated, truncated, info = env.step(a)
+    #     obs_list.append(ob["image"])
+    #     act_list.append(a)
+    #     rew_list.append(rw)
+    #     done_list.append(terminated or truncated)
+    #     info_list.append(info)
+    #     T += 1
+    #     return terminated or truncated
+
+    for t in range(max_T):
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
+        obs_list.append(obs["image"])
+        act_list.append(action)
+        rew_list.append(reward)
         done_list.append(terminated or truncated)
         info_list.append(info)
-        T += 1
-        return terminated or truncated
+    
+        
 
-    if policy == "random":
-        while T < max_T:
-            if step_and_record(act_random()):
-                break
-    else:
-        # "bfs" policy
-        while T < max_T:
-            # MultiDoorsKeys: scripted goal
-            if isinstance(env, MultiDoorsKeysEnv):
-                # if not carrying a key, navigate to nearest key
-                if env.carrying is None:
-                    # find keys
-                    keys = []
-                    for x in range(env.grid.width):
-                        for y in range(env.grid.height):
-                            obj = env.grid.get(x, y)
-                            if isinstance(obj, Key):
-                                keys.append((x, y))
-                    if keys:
-                        # naive nearest key by manhattan
-                        keys.sort(
-                            key=lambda p: abs(p[0] - env.agent_pos[0])
-                            + abs(p[1] - env.agent_pos[1])
-                        )
-                        path = bfs_shortest_path(
-                            env.grid, tuple(env.agent_pos), keys[0]
-                        )
-                        planned = (
-                            plan_actions_from_path(env.agent_dir, path)
-                            if path
-                            else [act_random()]
-                        )
-                        if not planned:
-                            planned = [act_random()]
-                        a = planned[0]
-                        if step_and_record(a):
-                            break
-                        # pickup if on key
-                        if tuple(env.agent_pos) == keys[0]:
-                            if step_and_record(env.actions.pickup):
-                                break
-                        continue
-                # have a key: if color matches goal, navigate to that door, then toggle
-                target_pos, target_color = env.door_positions[
-                    env.goal_color_idx
-                ]
-                if (
-                    env.carrying
-                    and isinstance(env.carrying, Key)
-                    and env.carrying.color == target_color
-                ):
-                    path = bfs_shortest_path(
-                        env.grid, tuple(env.agent_pos), target_pos
-                    )
-                    planned = (
-                        plan_actions_from_path(env.agent_dir, path)
-                        if path
-                        else [act_random()]
-                    )
-                    a = planned[0] if planned else act_random()
-                    if step_and_record(a):
-                        break
-                    # attempt to toggle if in front of door
-                    fwd = env.front_pos
-                    if tuple(fwd) == target_pos:
-                        if step_and_record(env.actions.toggle):
-                            break
-                    continue
+    # else:
+    #     # "bfs" policy
+    #     while T < max_T:
+    #         # MultiDoorsKeys: scripted goal
+    #         if isinstance(env, MultiDoorsKeysEnv):
+    #             # if not carrying a key, navigate to nearest key
+    #             if env.carrying is None:
+    #                 # find keys
+    #                 keys = []
+    #                 for x in range(env.grid.width):
+    #                     for y in range(env.grid.height):
+    #                         obj = env.grid.get(x, y)
+    #                         if isinstance(obj, Key):
+    #                             keys.append((x, y))
+    #                 if keys:
+    #                     # naive nearest key by manhattan
+    #                     keys.sort(
+    #                         key=lambda p: abs(p[0] - env.agent_pos[0])
+    #                         + abs(p[1] - env.agent_pos[1])
+    #                     )
+    #                     path = bfs_shortest_path(
+    #                         env.grid, tuple(env.agent_pos), keys[0]
+    #                     )
+    #                     planned = (
+    #                         plan_actions_from_path(env.agent_dir, path)
+    #                         if path
+    #                         else [act_random()]
+    #                     )
+    #                     if not planned:
+    #                         planned = [act_random()]
+    #                     a = planned[0]
+    #                     if step_and_record(a):
+    #                         break
+    #                     # pickup if on key
+    #                     if tuple(env.agent_pos) == keys[0]:
+    #                         if step_and_record(env.actions.pickup):
+    #                             break
+    #                     continue
+    #             # have a key: if color matches goal, navigate to that door, then toggle
+    #             target_pos, target_color = env.door_positions[
+    #                 env.goal_color_idx
+    #             ]
+    #             if (
+    #                 env.carrying
+    #                 and isinstance(env.carrying, Key)
+    #                 and env.carrying.color == target_color
+    #             ):
+    #                 path = bfs_shortest_path(
+    #                     env.grid, tuple(env.agent_pos), target_pos
+    #                 )
+    #                 planned = (
+    #                     plan_actions_from_path(env.agent_dir, path)
+    #                     if path
+    #                     else [act_random()]
+    #                 )
+    #                 a = planned[0] if planned else act_random()
+    #                 if step_and_record(a):
+    #                     break
+    #                 # attempt to toggle if in front of door
+    #                 fwd = env.front_pos
+    #                 if tuple(fwd) == target_pos:
+    #                     if step_and_record(env.actions.toggle):
+    #                         break
+    #                 continue
 
-            # generic “head toward goal if visible in grid, else random”
-            # find Goal object
-            goal_pos = None
-            for x in range(env.grid.width):
-                for y in range(env.grid.height):
-                    obj = env.grid.get(x, y)
-                    if isinstance(obj, Goal):
-                        goal_pos = (x, y)
-                        break
-                if goal_pos:
-                    break
+    #         # generic “head toward goal if visible in grid, else random”
+    #         # find Goal object
+    #         goal_pos = None
+    #         for x in range(env.grid.width):
+    #             for y in range(env.grid.height):
+    #                 obj = env.grid.get(x, y)
+    #                 if isinstance(obj, Goal):
+    #                     goal_pos = (x, y)
+    #                     break
+    #             if goal_pos:
+    #                 break
 
-            a = act_random()
-            if goal_pos is not None:
-                path = bfs_shortest_path(
-                    env.grid, tuple(env.agent_pos), goal_pos
-                )
-                if path and len(path) > 1:
-                    planned = plan_actions_from_path(env.agent_dir, path)
-                    a = planned[0] if planned else act_random()
+    #         a = act_random()
+    #         if goal_pos is not None:
+    #             path = bfs_shortest_path(
+    #                 env.grid, tuple(env.agent_pos), goal_pos
+    #             )
+    #             if path and len(path) > 1:
+    #                 planned = plan_actions_from_path(env.agent_dir, path)
+    #                 a = planned[0] if planned else act_random()
 
-            if step_and_record(a):
-                break
+    #         if step_and_record(a):
+    #             break
 
     traj = Trajectory(
         observations=np.asarray(obs_list, dtype=np.uint8),
@@ -687,6 +710,8 @@ def save_trajectories_npz(trajectories: List[Trajectory], out_path: str):
             for t in trajectories
         ],
     }
+    if not os.path.exists(os.path.dirname(out_path)):
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
     np.savez_compressed(out_path, **pack)
 
 
@@ -704,7 +729,7 @@ class EvalStats:
 
 
 def evaluate_env(
-    env_ctor, n_episodes: int = 100, policy: str = "bfs", seed: Optional[int] = None
+    env_ctor, n_episodes: int = 100, max_steps: int = 100, seed: Optional[int] = None
 ) -> EvalStats:
     successes, returns, lengths = [], [], []
     for _ in tqdm(range(n_episodes), desc=f"Eval {env_ctor.__name__}"):
@@ -713,7 +738,7 @@ def evaluate_env(
         if isinstance(env, MultiDoorsKeysEnv):
             # capture the goal context image once per episode
             goal_img = env.get_goal_image()
-        traj = run_episode(env, policy=policy, goal_img=goal_img, seed=seed)
+        traj = run_episode(env, max_steps=max_steps, goal_img=goal_img, seed=seed)
         returns.append(traj.rewards.sum().item())
         lengths.append(len(traj.actions))
         # define success:
@@ -721,10 +746,10 @@ def evaluate_env(
             # success if target door is open at the end
             ((dx, dy), _) = env.door_positions[env.goal_color_idx]
             door = env.grid.get(dx, dy)
-            successes.append(int(isinstance(door, Door) and door.is_open))
+            successes.append(int(isinstance(door, Door) and door.is_open) and lengths[-1] <= max_steps)
         else:
             # success if got reward >= 1
-            successes.append(int(traj.rewards.sum() >= 1.0))
+            successes.append(int(traj.rewards.sum() >= 1.0) and lengths[-1] <= max_steps)
         env.close()
 
     sr = float(np.mean(successes)) if successes else 0.0
@@ -789,9 +814,10 @@ def main():
         "--env", choices=["four_rooms", "ten_rooms", "mdk"], required=True
     )
     g.add_argument("--episodes", type=int, default=1000)
-    g.add_argument("--out", type=str, default="dataset_shard.npz")
+    g.add_argument("--output-dir", type=str, default="data/minigrid_env")
     g.add_argument("--policy", choices=["random", "bfs"], default="bfs")
-    g.add_argument("--seed", type=int, default=None)
+    g.add_argument("--seed", type=int, default=42)
+    g.add_argument("--max-steps", type=int, default=100)
 
     # evaluate
     e = sub.add_parser("eval", help="Evaluate scripted policies")
@@ -803,44 +829,27 @@ def main():
 
     args = parser.parse_args()
 
-    if args.cmd == "generate":
-        if args.seed is not None:
-            np.random.seed(args.seed)
+    if args.seed is not None:
+        np.random.seed(args.seed)
 
-        if args.env == "four_rooms":
-            ctor = lambda: make_four_rooms()
-        elif args.env == "ten_rooms":
-            ctor = lambda: make_ten_rooms()
-        else:  # mdk
-            ctor = lambda: make_multi_doors_keys()
+    if args.env == "four_rooms":
+        ctor = lambda: make_four_rooms()
+    elif args.env == "ten_rooms":
+        ctor = lambda: make_ten_rooms()
+    else:  # mdk
+        ctor = lambda: make_multi_doors_keys()
 
-        trajectories: List[Trajectory] = []
-        for _ in tqdm(range(args.episodes), desc="Generating"):
-            env = ctor()
-            goal_img = (
-                env.get_goal_image()
-                if isinstance(env, MultiDoorsKeysEnv)
-                else None
-            )
-            traj = run_episode(env, policy=args.policy, goal_img=goal_img, seed=args.seed)
-            trajectories.append(traj)
-            env.close()
+    trajectories: List[Trajectory] = []
+    for _ in tqdm(range(args.episodes), desc="Generating"):
+        env = ctor()
+        traj = run_episode(env, max_steps=args.max_steps, seed=args.seed)
+        trajectories.append(traj)
+        env.close()
 
-        save_trajectories_npz(trajectories, args.out)
-        print(f"Saved {len(trajectories)} episodes to {args.out}")
+    output_path = os.path.join(args.output_dir, f"{args.env}_seed_{args.seed}_ep{args.episodes}_t{args.max_steps}.npz")
+    save_trajectories_npz(trajectories, output_path)
+    print(f"Saved {len(trajectories)} episodes to {output_path}")
 
-    elif args.cmd == "eval":
-        if args.env == "four_rooms":
-            ctor = make_four_rooms
-        elif args.env == "ten_rooms":
-            ctor = make_ten_rooms
-        else:
-            ctor = make_multi_doors_keys
-
-        stats = evaluate_env(
-            ctor, n_episodes=args.episodes, policy=args.policy, seed=args.seed
-        )
-        print(json.dumps(asdict(stats), indent=2))
 
 
 if __name__ == "__main__":
