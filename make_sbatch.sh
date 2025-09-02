@@ -8,7 +8,7 @@ DATETIME=$(date +"%Y%m%d_%H%M%S")
 TIME=${TIME:-2-00:00:00}
 PARTITION=${PARTITION:-batch}
 TYPE=${TYPE:-train} # jupyter, eval, test
-
+CONDA_ENV=${CONDA_ENV:-dino_clean}
 
 
 GPU=${GPU:-8}
@@ -62,7 +62,7 @@ echo "#!/usr/bin/env zsh
 
 module purge
 module load conda
-conda activate ${ENV_DIR}/dino_clean
+conda activate ${ENV_DIR}/${CONDA_ENV}
 
 which python
 echo $CONDA_PREFIX

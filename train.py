@@ -534,37 +534,7 @@ class Trainer:
             self.logs_flash(step=self.epoch)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
-                # main thread only: launch planning jobs on the saved ckpt
-                if (
-                    self.cfg.plan_settings.plan_cfg_path is not None
-                    and ckpt_path is not None
-                ):  # ckpt_path is only not None for main process
-                    from plan import build_plan_cfg_dicts, launch_plan_jobs
-
-                    cfg_dicts = build_plan_cfg_dicts(
-                        plan_cfg_path=os.path.join(
-                            self.base_path,
-                            self.cfg.plan_settings.plan_cfg_path,
-                        ),
-                        ckpt_base_path=self.cfg.ckpt_base_path,
-                        model_name=model_name,
-                        model_epoch=model_epoch,
-                        planner=self.cfg.plan_settings.planner,
-                        goal_source=self.cfg.plan_settings.goal_source,
-                        goal_H=self.cfg.plan_settings.goal_H,
-                        alpha=self.cfg.plan_settings.alpha,
-                    )
-                    jobs = launch_plan_jobs(
-                        epoch=self.epoch,
-                        cfg_dicts=cfg_dicts,
-                        plan_output_dir=os.path.join(
-                            os.getcwd(),
-                            "submitit-evals",
-                            f"epoch_{self.epoch}",
-                        ),
-                    )
-                    with lock:
-                        self.job_set.update(jobs)
+                
 
     def err_eval_single(self, z_pred, z_tgt):
         logs = {}
@@ -793,16 +763,19 @@ class Trainer:
     def val(self):
         self.model.eval()
         if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
+            rand_start_end = False if self.cfg.env == "deformable_env" else True
             with torch.no_grad():
                 train_rollout_logs = self.openloop_rollout(
-                    self.train_traj_dset, mode="train"
+                    self.train_traj_dset, mode="train",
+                    rand_start_end=rand_start_end,
                 )
                 train_rollout_logs = {
                     f"train_{k}": [v] for k, v in train_rollout_logs.items()
                 }
                 self.logs_update(train_rollout_logs)
                 val_rollout_logs = self.openloop_rollout(
-                    self.val_traj_dset, mode="val"
+                    self.val_traj_dset, mode="val",
+                    rand_start_end=rand_start_end,
                 )
                 val_rollout_logs = {
                     f"val_{k}": [v] for k, v in val_rollout_logs.items()
@@ -989,6 +962,9 @@ class Trainer:
                     horizon = (
                         obs["visual"].shape[0] - 1
                     ) // self.cfg.frameskip
+                
+                if self.cfg.dry_run:
+                    return {}
 
             for k in obs.keys():
                 obs[k] = obs[k][
