@@ -58,7 +58,7 @@ class MiniGridDataset(Dataset):
         first_chunk_path = self.data_path / f"chunk_0000.npz"
         with np.load(first_chunk_path) as data:
             sample_obs = data['observations'][0]
-            sample_act = data['actions'][0]
+            sample_act = data['actions'][0].reshape(-1, 1)
         
         # Determine dimensions
         if len(sample_obs.shape) == 3:  # (H, W, C)
@@ -69,6 +69,13 @@ class MiniGridDataset(Dataset):
             self.obs_dim = sample_obs.shape[-1] if len(sample_obs.shape) > 1 else 1
         
         self.action_dim = sample_act.shape[-1] if len(sample_act.shape) > 1 else 1
+        self.proprio_dim = self.action_dim
+        self.state_dim = self.action_dim
+        self.proprio_mean = torch.zeros(self.action_dim)
+        self.proprio_std = torch.ones(self.action_dim)
+        self.state_mean = torch.zeros(self.action_dim)
+        self.state_std = torch.ones(self.action_dim)
+        
         
         # Load sequence lengths from all chunks
         self.seq_lengths = []
@@ -141,7 +148,7 @@ class MiniGridDataset(Dataset):
         
         with np.load(chunk_path) as data:
             obs = data['observations'][local_idx]
-            actions = data['actions'][local_idx]
+            actions = data['actions'][local_idx].reshape(-1, 1)
 
         # Convert to torch tensors
         obs = torch.from_numpy(obs).float()
@@ -154,6 +161,10 @@ class MiniGridDataset(Dataset):
         
         # Normalize actions
         actions = (actions - self.action_mean) / self.action_std
+
+        # dummy proprio and state
+        proprio = torch.zeros_like(actions)
+        state = torch.zeros_like(actions)
         
         # Apply frame slicing
         obs = obs[frame_indices]
@@ -162,10 +173,10 @@ class MiniGridDataset(Dataset):
         # Create observation dict
         obs_dict = {
             "visual": obs,
-            "actions": actions,
+            "proprio": proprio,
         }
         
-        return obs_dict
+        return obs_dict, actions, state
 
     def __getitem__(self, idx):
         """Get trajectory at index idx."""
@@ -182,6 +193,12 @@ class MiniGridDataset(Dataset):
             obs = self[i]
             result.append(obs['actions'][:T])
         return torch.cat(result, dim=0)
+    
+    def preprocess_imgs(self, imgs):
+        if isinstance(imgs, np.ndarray):
+            raise NotImplementedError
+        elif isinstance(imgs, torch.Tensor):
+            return rearrange(imgs, "b h w c -> b c h w") / 255.0
 
 
 # Factory functions following the same pattern as point_maze_dset.py
