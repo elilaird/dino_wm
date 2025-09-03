@@ -693,6 +693,7 @@ def run_episode(
 # Dataset writing
 # -------------------------
 def save_trajectories_npz(trajectories: List[Trajectory], out_path: str):
+    """Save a single chunk of trajectories to NPZ format."""
     pack = {
         "observations": [t.observations for t in trajectories],
         "actions": [t.actions for t in trajectories],
@@ -713,6 +714,34 @@ def save_trajectories_npz(trajectories: List[Trajectory], out_path: str):
     if not os.path.exists(os.path.dirname(out_path)):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
     np.savez_compressed(out_path, **pack)
+
+
+def save_trajectories_chunked(episodes: List[Trajectory], out_dir: str, episodes_per_chunk: int = 1000):
+    """Save trajectories into multiple NPZ files with an index for efficient loading."""
+    os.makedirs(out_dir, exist_ok=True)
+    
+    n_chunks = (len(episodes) + episodes_per_chunk - 1) // episodes_per_chunk
+    
+    for chunk_idx in range(n_chunks):
+        start_idx = chunk_idx * episodes_per_chunk
+        end_idx = min(start_idx + episodes_per_chunk, len(episodes))
+        chunk_trajectories = episodes[start_idx:end_idx]
+        
+        chunk_path = os.path.join(out_dir, f"chunk_{chunk_idx:04d}.npz")
+        save_trajectories_npz(chunk_trajectories, chunk_path)
+    
+    # Create index file
+    index = {
+        'total_episodes': len(episodes),
+        'episodes_per_chunk': episodes_per_chunk,
+        'n_chunks': n_chunks,
+    }
+    
+    index_path = os.path.join(out_dir, 'index.json')
+    with open(index_path, 'w') as f:
+        json.dump(index, f, indent=2)
+    
+    print(f"Saved {len(episodes)} episodes in {n_chunks} chunks to {out_dir}")
 
 
 # -------------------------
@@ -814,11 +843,11 @@ def main():
         "--env", choices=["four_rooms", "ten_rooms", "mdk"], required=True
     )
     g.add_argument("--episodes", type=int, default=1000)
-    g.add_argument("--output-dir", type=str, default="data/minigrid_env")
+    g.add_argument("--output-dir", type=str, default="minigrid_env")
     g.add_argument("--policy", choices=["random", "bfs"], default="bfs")
     g.add_argument("--seed", type=int, default=42)
     g.add_argument("--max-steps", type=int, default=100)
-
+    g.add_argument("--episodes-per-chunk", type=int, default=100)
     # evaluate
     e = sub.add_parser("eval", help="Evaluate scripted policies")
     e.add_argument(
@@ -846,8 +875,10 @@ def main():
         trajectories.append(traj)
         env.close()
 
-    output_path = os.path.join(args.output_dir, f"{args.env}_seed_{args.seed}_ep{args.episodes}_t{args.max_steps}.npz")
-    save_trajectories_npz(trajectories, output_path)
+    dataset_dir = os.environ["DATASET_DIR"]
+    assert dataset_dir is not None, "DATASET_DIR must be set"
+    output_path = os.path.join(dataset_dir, args.output_dir, f"{args.env}_seed_{args.seed}_ep{args.episodes}_t{args.max_steps}")
+    save_trajectories_chunked(trajectories, output_path, episodes_per_chunk=args.episodes_per_chunk)
     print(f"Saved {len(trajectories)} episodes to {output_path}")
 
 

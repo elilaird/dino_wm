@@ -47,7 +47,7 @@ fi
 
 LOG_FILE="output/${TYPE}/${TYPE}_%j.out"
 
-echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TIME=${TIME} TYPE=${TYPE} ./make_sbatch.sh ${COMMAND}"
+echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TIME=${TIME} TYPE=${TYPE} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
 
 # write sbatch script
 echo "#!/usr/bin/env zsh
@@ -67,7 +67,7 @@ conda activate ${ENV_DIR}/${CONDA_ENV}
 which python
 echo $CONDA_PREFIX
 
-echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TYPE=${TYPE} TIME=${TIME} ./make_sbatch.sh ${COMMAND}"
+echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TYPE=${TYPE} TIME=${TIME} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
 
 export DATA_DIR=${DATA_DIR}
 export LD_LIBRARY_PATH=/users/ejlaird/.mujoco/mujoco210/bin:$LD_LIBRARY_PATH
