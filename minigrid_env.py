@@ -867,18 +867,59 @@ def main():
     else:  # mdk
         ctor = lambda: make_multi_doors_keys()
 
-    trajectories: List[Trajectory] = []
-    for _ in tqdm(range(args.episodes), desc="Generating"):
-        env = ctor()
-        traj = run_episode(env, max_steps=args.max_steps, seed=args.seed, policy=args.policy)
-        trajectories.append(traj)
-        env.close()
-
     dataset_dir = os.environ["DATASET_DIR"]
     assert dataset_dir is not None, "DATASET_DIR must be set"
     output_path = os.path.join(dataset_dir, args.output_dir, f"{args.env}_seed_{args.seed}_ep{args.episodes}_t{args.max_steps}")
-    save_trajectories_chunked(trajectories, output_path, episodes_per_chunk=args.episodes_per_chunk)
-    print(f"Saved {len(trajectories)} episodes to {output_path}")
+    
+    # Create output directory
+    os.makedirs(output_path, exist_ok=True)
+    
+    # Initialize chunking variables
+    current_chunk = []
+    chunk_idx = 0
+    total_episodes = 0
+    
+    for episode_idx in tqdm(range(args.episodes), desc="Generating"):
+        env = ctor()
+        traj = run_episode(env, max_steps=args.max_steps, seed=args.seed, policy=args.policy)
+        current_chunk.append(traj)
+        env.close()
+        total_episodes += 1
+        
+        # Save chunk when it reaches the target size
+        if len(current_chunk) >= args.episodes_per_chunk:
+            chunk_path = os.path.join(output_path, f"chunk_{chunk_idx:04d}.npz")
+            save_trajectories_npz(current_chunk, chunk_path)
+            print(f"Saved chunk {chunk_idx} with {len(current_chunk)} episodes")
+            current_chunk = []
+            chunk_idx += 1
+    
+    # Save final partial chunk if it has any episodes
+    if current_chunk:
+        chunk_path = os.path.join(output_path, f"chunk_{chunk_idx:04d}.npz")
+        save_trajectories_npz(current_chunk, chunk_path)
+        print(f"Saved final chunk {chunk_idx} with {len(current_chunk)} episodes")
+        chunk_idx += 1
+    
+    # Create index file
+    index = {
+        'total_episodes': total_episodes,
+        'episodes_per_chunk': args.episodes_per_chunk,
+        'n_chunks': chunk_idx,
+        'seed': args.seed,
+        'policy': args.policy,
+        'max_steps': args.max_steps,
+        'episodes_per_chunk': args.episodes_per_chunk,
+        'episodes': args.episodes,
+        'output_dir': args.output_dir,
+        'env': args.env,
+    }
+    
+    index_path = os.path.join(output_path, 'index.json')
+    with open(index_path, 'w') as f:
+        json.dump(index, f, indent=2)
+    
+    print(f"Saved {total_episodes} episodes in {chunk_idx} chunks to {output_path}")
 
 
 
