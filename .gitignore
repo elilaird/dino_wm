@@ -7,3 +7,5 @@ checkpoints
 data
 contexts
 examples
+legacy_outputs
+output

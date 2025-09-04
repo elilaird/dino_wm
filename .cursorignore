@@ -6,3 +6,5 @@ checkpoints
 .DS_Store
 data
 assets
+legacy_outputs
+outputs

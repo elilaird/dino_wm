@@ -1,0 +1,28 @@
+# configs/hm3d_rgbd.yaml
+habitat:
+  simulator:
+    seed: 123
+    # Point directly to one HM3D scene .glb
+    scene: "/lustre/smuexa01/client/users/ejlaird/dino_wm_data/habitat/scene_datasets/hm3d/minival/00800-TEEsavR23oF/TEEsavR23oF.basis.glb"
+
+    agent_0:
+      height: 1.5
+      radius: 0.1
+      sensors:
+        rgb_sensor:
+          type: HabitatSimRGBSensor
+          width: 640
+          height: 480
+          hfov: 90
+          position: [0, 1.5, 0]
+        depth_sensor:
+          type: HabitatSimDepthSensor
+          width: 640
+          height: 480
+          min_depth: 0.1
+          max_depth: 10.0
+          position: [0, 1.5, 0]
+
+  task:
+    type: Nav-v0
+    measurements: []

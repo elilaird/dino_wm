@@ -1,0 +1,43 @@
+# @package _global_
+habitat:
+  environment:
+    max_episode_steps: 1000
+
+  simulator:
+    habita_sim_v0: {}        # keep defaults
+    agents:
+      main_agent:
+        height: 1.5
+        radius: 0.1
+        sim_sensors: [rgb_sensor, depth_sensor]
+    rgb_sensor:
+      width: 256
+      height: 256
+      hfov: 90
+    depth_sensor:
+      width: 256
+      height: 256
+      normalize_depth: true
+
+  task:
+    type: Nav-v0
+    measurements: [distance_to_goal, success, spl]
+    success:
+      success_distance: 0.2
+    actions:
+      stop:
+        type: StopAction
+      move_forward:
+        type: MoveForwardAction
+      turn_left:
+        type: TurnLeftAction
+      turn_right:
+        type: TurnRightAction
+    possible_actions: [stop, move_forward, turn_left, turn_right]
+
+  dataset:
+    type: PointNav-v1
+    split: train
+    # adjust these to your local paths
+    data_path: data/datasets/pointnav/hm3d/v1/{split}/{split}.json.gz
+    scenes_dir: data/scene_datasets/hm3d/
