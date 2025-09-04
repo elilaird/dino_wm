@@ -3,6 +3,8 @@
 # Example usage:
 # GPU=4 TIME=0-04:00:00 PARTITION=batch TYPE=train ./make_sbatch.sh
 
+# hm3d_train_v0.2
+
 DATETIME=$(date +"%Y%m%d_%H%M%S")
 
 TIME=${TIME:-2-00:00:00}
@@ -32,10 +34,14 @@ elif [ "${TYPE}" = "plan" ]; then
     PY_FILE="plan.py"
 elif [ "${TYPE}" = "train" ]; then
     PY_FILE="train.py --config-name train.yaml"
+elif [ "${TYPE}" = "memory_maze_download" ]; then
+    PY_FILE="memory_maze_download.py --output_dir ${DATA_DIR}/memory_maze"
 fi
 
 if [ "${TYPE}" = "jupyter" ]; then
     COMMAND="jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
+elif [ "${TYPE}" = "habitat" ]; then
+    COMMAND="python -m habitat_sim.utils.datasets_download --username fde8b8c1eb409327 --password bf777aaf24d6340bf647eb08c3b31817 --uids ${PY_ARGS}  --data-path ${DATA_DIR}/habitat"
 else
     # Use accelerate for distributed training
     if [ "${GPU}" -gt 1 ]; then
@@ -62,6 +68,8 @@ echo "#!/usr/bin/env zsh
 
 module purge
 module load conda
+module load gcc/11.2.0
+module load git-lfs
 conda activate ${ENV_DIR}/${CONDA_ENV}
 
 which python
