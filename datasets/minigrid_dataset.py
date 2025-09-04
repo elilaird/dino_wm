@@ -178,6 +178,163 @@ def make_minigrid_dataset(
     )
 
 
+class MiniGridInMemoryDataset(Dataset):
+
+    def __init__(
+        self,
+        data_path: str,
+        n_rollout: Optional[int] = None,
+        transform: Optional[Callable] = None,
+        normalize_action: bool = False,
+        action_scale: float = 1.0,
+    ):
+        self.data_path = Path(data_path)
+        self.transform = transform
+        self.normalize_action = normalize_action
+        self.action_scale = action_scale
+
+        # Load index
+        with open(self.data_path / 'index.json', 'r') as f:
+            self.index = json.load(f)
+
+        self.episodes_per_chunk = self.index['episodes_per_chunk']
+        self.total_episodes = self.index['total_episodes']
+        self.n_chunks = self.index['n_chunks']
+
+        # Limit to n_rollout if specified
+        if n_rollout:
+            self.n_rollout = min(n_rollout, self.total_episodes)
+        else:
+            self.n_rollout = self.total_episodes
+
+        # Load all data into memory
+        self._load_all_data_into_tensors()
+
+        # Initialize normalization
+        self._init_default_normalization()
+
+        print(f"Loaded {self.n_rollout} rollouts from {self.n_chunks} chunks into memory")
+
+    def _load_all_data_into_tensors(self):
+        """Load all chunk data into memory as concatenated tensors."""
+        print("Loading all chunks into memory as tensors...")
+        
+        all_observations = []
+        all_actions = []
+        
+        # Load all data from chunks
+        for chunk_idx in range(self.n_chunks):
+            chunk_path = self.data_path / f"chunk_{chunk_idx:04d}.npz"
+            with np.load(chunk_path) as data:
+                chunk_obs = data['observations']
+                chunk_actions = data['actions']
+                
+                # Add all trajectories from this chunk
+                all_observations.extend(chunk_obs)
+                all_actions.extend(chunk_actions)
+                
+                # Stop if we have enough rollouts
+                if len(all_observations) >= self.n_rollout:
+                    break
+        
+        # Limit to n_rollout
+        all_observations = all_observations[:self.n_rollout]
+        all_actions = all_actions[:self.n_rollout]
+        
+        # Get dimensions from first sample
+        sample_obs = all_observations[0]
+        sample_act = all_actions[0].reshape(-1, 1)
+        
+        if len(sample_obs.shape) == 3:  # (H, W, C)
+            self.obs_shape = sample_obs.shape
+            self.obs_dim = sample_obs.shape[-1] if len(sample_obs.shape) > 2 else 1
+        else:
+            self.obs_shape = sample_obs.shape
+            self.obs_dim = sample_obs.shape[-1] if len(sample_obs.shape) > 1 else 1
+
+        self.action_dim = sample_act.shape[-1] if len(sample_act.shape) > 1 else 1
+        self.proprio_dim = self.action_dim
+        self.state_dim = self.action_dim
+        
+        # Since all sequences have the same length, we can use concatenation
+        seq_len = len(all_actions[0])
+        self.seq_lengths = torch.full((self.n_rollout,), seq_len, dtype=torch.long)
+        
+        # Convert to tensors using concatenation - much more efficient
+        self.observations = torch.from_numpy(np.stack(all_observations)).to(torch.uint8)
+        self.actions = torch.from_numpy(np.stack(all_actions)).to(torch.float32)
+        
+        # Reshape actions to have proper action_dim
+        if self.actions.dim() == 2:  # (n_rollout, seq_len)
+            self.actions = self.actions.unsqueeze(-1)  # (n_rollout, seq_len, 1)
+        
+        print(f"Loaded {len(all_observations)} trajectories into memory tensors")
+        print(f"Tensor shapes - obs: {self.observations.shape}, actions: {self.actions.shape}")
+        print(f"All sequences have length: {seq_len}")
+
+    def _init_default_normalization(self):
+        """Initialize default normalization (no scaling)."""
+        self.obs_mean = torch.zeros(self.obs_dim)
+        self.obs_std = torch.ones(self.obs_dim)
+        self.action_mean = torch.zeros(self.action_dim)
+        self.action_std = torch.ones(self.action_dim)
+        self.proprio_mean = torch.zeros(self.action_dim)
+        self.proprio_std = torch.ones(self.action_dim)
+        self.state_mean = torch.zeros(self.action_dim)
+        self.state_std = torch.ones(self.action_dim)
+
+    def get_seq_length(self, idx):
+        """Returns the length of the idx-th trajectory."""
+        return self.seq_lengths[idx]
+
+    def get_frames(self, idx, frame_indices):
+        """Get specific frames from trajectory at index idx."""
+        if idx >= self.n_rollout:
+            raise IndexError(f"Index {idx} out of bounds for {self.n_rollout} rollouts")
+
+        # Direct tensor access - very fast
+        obs = self.observations[idx, frame_indices].float()
+        obs = obs / 255.0
+        obs = rearrange(obs, "T H W C -> T C H W")
+        if self.transform:
+            obs = self.transform(obs)
+
+        actions = self.actions[idx, frame_indices]
+
+        # dummy proprio and state
+        proprio = torch.zeros_like(actions)
+        state = torch.zeros_like(actions)
+
+        # Create observation dict
+        obs_dict = {
+            "visual": obs,
+            "proprio": proprio,
+        }
+
+        return obs_dict, actions, state, {}
+
+    def __getitem__(self, idx):
+        """Get trajectory at index idx."""
+        return self.get_frames(idx, range(self.get_seq_length(idx)))
+
+    def __len__(self):
+        return self.n_rollout
+
+    def get_all_actions(self):
+        """Get all actions from all trajectories (useful for training)."""
+        result = []
+        for i in range(len(self.seq_lengths)):
+            T = self.seq_lengths[i]
+            result.append(self.actions[i, :T])
+        return torch.cat(result, dim=0)
+
+    def preprocess_imgs(self, imgs):
+        if isinstance(imgs, np.ndarray):
+            raise NotImplementedError
+        elif isinstance(imgs, torch.Tensor):
+            return rearrange(imgs, "b h w c -> b c h w") / 255.0
+
+
 def load_minigrid_slice_train_val(
     transform,
     n_rollout=50,
@@ -192,7 +349,7 @@ def load_minigrid_slice_train_val(
 ):
     """Load and split MiniGrid dataset following the same pattern as point_maze_dset.py."""
     
-    dset = MiniGridDataset(
+    dset = MiniGridInMemoryDataset(
         n_rollout=n_rollout,
         transform=transform,
         data_path=data_path,
