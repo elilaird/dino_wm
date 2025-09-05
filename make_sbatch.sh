@@ -28,7 +28,7 @@ PROJECT_DIR=${PROJECT_DIR:-"${HOME}/Projects/dino_wm"}
 DATA_DIR=${DATA_DIR:-"/lustre/smuexa01/client/users/ejlaird/dino_wm_data"}
 MUJOCO_DIR=/users/ejlaird/.mujoco/mujoco210/bin
 
-if [ "${TYPE}" = "data" ]; then
+if [ "${TYPE}" = "minigrid" ]; then
     PY_FILE="minigrid_env.py generate"
 elif [ "${TYPE}" = "plan" ]; then
     PY_FILE="plan.py"
@@ -36,6 +36,8 @@ elif [ "${TYPE}" = "train" ]; then
     PY_FILE="train.py --config-name train.yaml"
 elif [ "${TYPE}" = "memory_maze_download" ]; then
     PY_FILE="memory_maze_download.py --output_dir ${DATA_DIR}/memory_maze"
+elif [ "${TYPE}" = "memory_maze_chunk" ]; then
+    PY_FILE="chunk_memory_maze_data.py"
 fi
 
 if [ "${TYPE}" = "jupyter" ]; then
