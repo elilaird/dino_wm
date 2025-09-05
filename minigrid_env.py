@@ -532,63 +532,28 @@ class MultiDoorsKeysEnv(MiniGridEnv):
 class Trajectory:
     observations: np.ndarray  # [T, H, W, 3]
     actions: np.ndarray  # [T]
-    rewards: np.ndarray  # [T]
-    dones: np.ndarray  # [T]
-    infos: List[Dict[str, Any]]
-    goal_image: Optional[np.ndarray] = None
-    env_name: str = ""
-    seed: int = 0
+    # rewards: np.ndarray  # [T]
+    # dones: np.ndarray  # [T]
+    # infos: List[Dict[str, Any]]
+    # goal_image: Optional[np.ndarray] = None
+    # env_name: str = ""
+    # seed: int = 0
 
 
-def run_episode(
-    env: MiniGridEnv,
-    max_steps: Optional[int] = None,
-    goal_img: Optional[np.ndarray] = None,
-    seed: Optional[int] = None,
-    policy: str = "random",
-) -> Trajectory:
-    """
-    Run one episode, return a Trajectory. 
-    Policy options:
-    - 'random': Random actions
-    - 'explore': Systematic exploration for FourRoomsMemoryEnv (covers all rooms and actions)
-    - 'bfs': BFS-based navigation (for other envs)
-    """
-    obs_list, act_list, rew_list, done_list, info_list = [], [], [], [], []
-    rng_seed = seed
+def get_room_quadrant(pos, width, height):
+    """Determine which quadrant/room a position is in"""
+    mid_w, mid_h = width // 2, height // 2
+    x, y = pos
+    if x < mid_w and y < mid_h:
+        return 0  # top-left
+    elif x >= mid_w and y < mid_h:
+        return 1  # top-right
+    elif x < mid_w and y >= mid_h:
+        return 2  # bottom-left
+    else:
+        return 3  # bottom-right
 
-    obs, _ = env.reset(seed=seed)
-    obs_list.append(obs["image"])
-    max_T = max_steps or env.max_steps
-    obs_list, act_list, rew_list, done_list, info_list = [], [], [], [], []
-
-    def step_and_record(action):
-        """Helper to step environment and record trajectory data"""
-        obs, reward, terminated, truncated, info = env.step(action)
-        obs_list.append(obs["image"])
-        act_list.append(action)
-        rew_list.append(reward)
-        done_list.append(terminated or truncated)
-        info_list.append(info)
-
-    def act_random():
-        """Random action fallback"""
-        return env.action_space.sample()
-
-    def get_room_quadrant(pos, width, height):
-        """Determine which quadrant/room a position is in"""
-        mid_w, mid_h = width // 2, height // 2
-        x, y = pos
-        if x < mid_w and y < mid_h:
-            return 0  # top-left
-        elif x >= mid_w and y < mid_h:
-            return 1  # top-right
-        elif x < mid_w and y >= mid_h:
-            return 2  # bottom-left
-        else:
-            return 3  # bottom-right
-
-    def get_room_center(quadrant, width, height):
+def get_room_center(quadrant, width, height):
         """Get approximate center position of a room quadrant"""
         mid_w, mid_h = width // 2, height // 2
         if quadrant == 0:  # top-left
@@ -599,7 +564,13 @@ def run_episode(
             return (mid_w // 2, mid_h + mid_h // 2)
         else:  # bottom-right
             return (mid_w + mid_w // 2, mid_h + mid_h // 2)
+        
 
+def run_explore_policy_four_rooms(env, max_T, step_and_record, act_random):
+    """Systematic exploration policy for FourRoomsMemoryEnv"""
+    visited_rooms = set()
+    total_steps = 0
+    
     def explore_room_systematically(env, max_steps_in_room=20):
         """Systematically explore current room with diverse actions"""
         actions_taken = 0
@@ -625,65 +596,284 @@ def run_episode(
                 continue
                 
         return actions_taken
-
-    # Main episode loop
-    if policy == "explore" and isinstance(env, FourRoomsMemoryEnv):
-        # Systematic exploration policy for FourRoomsMemoryEnv
-        visited_rooms = set()
-        total_steps = 0
+    
+    while total_steps < max_T:
+        current_room = get_room_quadrant(env.agent_pos, env.width, env.height)
         
-        while total_steps < max_T:
-            current_room = get_room_quadrant(env.agent_pos, env.width, env.height)
+        # If we haven't explored this room much, do systematic exploration
+        if current_room not in visited_rooms or len(visited_rooms) < 4:
+            steps_taken = explore_room_systematically(env, max_steps_in_room=15)
+            total_steps += steps_taken
+            visited_rooms.add(current_room)
             
-            # If we haven't explored this room much, do systematic exploration
-            if current_room not in visited_rooms or len(visited_rooms) < 4:
-                steps_taken = explore_room_systematically(env, max_steps_in_room=15)
-                total_steps += steps_taken
-                visited_rooms.add(current_room)
+            step_and_record(0)
+            
+        else:
+            # Try to navigate to an unexplored room or do random exploration
+            unexplored_rooms = set([0, 1, 2, 3]) - visited_rooms
+            if unexplored_rooms:
+                target_room = random.choice(list(unexplored_rooms))
+                target_pos = get_room_center(target_room, env.width, env.height)
                 
-                step_and_record(0)
-                
+                # Use BFS to navigate to target room
+                path = bfs_shortest_path(env.grid, tuple(env.agent_pos), target_pos)
+                if path and len(path) > 1:
+                    planned_actions = plan_actions_from_path(env.agent_dir, path)
+                    for action in planned_actions[:3]:  # Limit path following
+                        if total_steps >= max_T:
+                            break
+                        step_and_record(action)
+                        total_steps += 1
+                else:
+                    # Fallback to random action
+                    step_and_record(act_random())
+                    total_steps += 1
             else:
-                # Try to navigate to an unexplored room or do random exploration
-                unexplored_rooms = set([0, 1, 2, 3]) - visited_rooms
-                if unexplored_rooms:
-                    target_room = random.choice(list(unexplored_rooms))
-                    target_pos = get_room_center(target_room, env.width, env.height)
-                    
-                    # Use BFS to navigate to target room
-                    path = bfs_shortest_path(env.grid, tuple(env.agent_pos), target_pos)
-                    if path and len(path) > 1:
-                        planned_actions = plan_actions_from_path(env.agent_dir, path)
-                        for action in planned_actions[:3]:  # Limit path following
-                            if total_steps >= max_T:
-                                break
-                            step_and_record(action)
-                            total_steps += 1
+                # All rooms visited, do some random exploration
+                step_and_record(act_random())
+                total_steps += 1
+
+
+def run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random):
+    """BFS-based optimal navigation policy for FourRoomsMemoryEnv"""
+    total_steps = 0
+    goal_pos = env.goal_pos
+    
+    while total_steps < max_T:
+        current_pos = tuple(env.agent_pos)
+        
+        # Check if we've reached the goal
+        if current_pos == goal_pos:
+            break
+        
+        # Find shortest path to goal
+        path = bfs_shortest_path(env.grid, current_pos, goal_pos)
+        if path and len(path) > 1:
+            # Convert path to actions and execute one step
+            planned_actions = plan_actions_from_path(env.agent_dir, path)
+            if planned_actions:
+                # Execute the first action from the planned path
+                action = planned_actions[0]
+                step_and_record(action)
+                total_steps += 1
+            else:
+                # No valid actions, try random
+                step_and_record(act_random())
+                total_steps += 1
+        else:
+            # No path found, try random action
+            step_and_record(act_random())
+            total_steps += 1
+
+
+def run_bfs_policy_ten_rooms(env, max_T, step_and_record, act_random):
+    """BFS-based optimal navigation policy for TenRoomsMemoryEnv"""
+    total_steps = 0
+    
+    # Find the goal position (should be in the last room)
+    goal_pos = None
+    for x in range(env.width - 2, 0, -1):
+        for y in range(1, env.height - 1):
+            obj = env.grid.get(x, y)
+            if obj is not None and hasattr(obj, 'type') and obj.type == 'goal':
+                goal_pos = (x, y)
+                break
+        if goal_pos:
+            break
+    
+    if goal_pos:
+        while total_steps < max_T:
+            current_pos = tuple(env.agent_pos)
+            
+            # Check if we've reached the goal
+            if current_pos == goal_pos:
+                break
+            
+            # Find shortest path to goal
+            path = bfs_shortest_path(env.grid, current_pos, goal_pos)
+            if path and len(path) > 1:
+                # Convert path to actions and execute one step
+                planned_actions = plan_actions_from_path(env.agent_dir, path)
+                if planned_actions:
+                    # Execute the first action from the planned path
+                    action = planned_actions[0]
+                    step_and_record(action)
+                    total_steps += 1
+                else:
+                    # No valid actions, try random
+                    step_and_record(act_random())
+                    total_steps += 1
+            else:
+                # No path found, try random action
+                step_and_record(act_random())
+                total_steps += 1
+    else:
+        # Goal not found, fall back to random
+        for t in range(max_T):
+            step_and_record(act_random())
+
+
+def run_bfs_policy_multi_doors_keys(env, max_T, step_and_record, act_random):
+    """BFS-based optimal navigation policy for MultiDoorsKeysEnv"""
+    total_steps = 0
+    key_picked_up = False
+    target_door_pos = None
+    
+    # Get target door position
+    if hasattr(env, 'door_positions') and env.goal_color_idx is not None:
+        target_door_pos, _ = env.door_positions[env.goal_color_idx]
+    
+    while total_steps < max_T:
+        current_pos = tuple(env.agent_pos)
+        
+        if not key_picked_up:
+            # Phase 1: Find and pick up the correct key
+            # Find the key that matches the target door color
+            target_key_pos = None
+            for x in range(1, env.width // 2):  # Keys are on left half
+                for y in range(1, env.height - 1):
+                    obj = env.grid.get(x, y)
+                    if (obj is not None and hasattr(obj, 'type') and 
+                        obj.type == 'key' and hasattr(obj, 'color') and 
+                        obj.color == env.goal_color):
+                        target_key_pos = (x, y)
+                        break
+                if target_key_pos:
+                    break
+            
+            if target_key_pos:
+                # Navigate to the key
+                path = bfs_shortest_path(env.grid, current_pos, target_key_pos)
+                if path and len(path) > 1:
+                    planned_actions = plan_actions_from_path(env.agent_dir, path)
+                    if planned_actions:
+                        action = planned_actions[0]
+                        step_and_record(action)
+                        total_steps += 1
+                        
+                        # Check if we're now carrying the key
+                        if env.carrying is not None and hasattr(env.carrying, 'color') and env.carrying.color == env.goal_color:
+                            key_picked_up = True
                     else:
-                        # Fallback to random action
                         step_and_record(act_random())
                         total_steps += 1
                 else:
-                    # All rooms visited, do some random exploration
                     step_and_record(act_random())
                     total_steps += 1
+            else:
+                # Key not found, try random
+                step_and_record(act_random())
+                total_steps += 1
+        else:
+            # Phase 2: Navigate to target door and unlock it
+            if target_door_pos:
+                path = bfs_shortest_path(env.grid, current_pos, target_door_pos)
+                if path and len(path) > 1:
+                    planned_actions = plan_actions_from_path(env.agent_dir, path)
+                    if planned_actions:
+                        action = planned_actions[0]
+                        step_and_record(action)
+                        total_steps += 1
+                        
+                        # Check if we're in front of the target door and can unlock it
+                        if (tuple(env.agent_pos) == target_door_pos and 
+                            env.carrying is not None and hasattr(env.carrying, 'color') and 
+                            env.carrying.color == env.goal_color):
+                            # Try to unlock the door
+                            step_and_record(5)  # toggle action
+                            total_steps += 1
+                    else:
+                        step_and_record(act_random())
+                        total_steps += 1
+                else:
+                    step_and_record(act_random())
+                    total_steps += 1
+            else:
+                step_and_record(act_random())
+                total_steps += 1
+
+
+def run_random_policy(env, max_T, step_and_record, act_random):
+    """Random policy (default fallback)"""
+    for t in range(max_T):
+        step_and_record(act_random())
+
+
+def run_episode(
+    env: MiniGridEnv,
+    max_steps: Optional[int] = None,
+    goal_img: Optional[np.ndarray] = None,
+    seed: Optional[int] = None,
+    policy: str = "random",
+) -> Trajectory:
+    """
+    Run one episode, return a Trajectory. 
+    Policy options:
+    - 'random': Random actions
+    - 'explore': Systematic exploration for FourRoomsMemoryEnv (covers all rooms and actions)
+    - 'bfs': BFS-based navigation (for all envs)
+    """
+    obs_list, act_list, rew_list, done_list, info_list = [], [], [], [], []
+    rng_seed = seed
+
+    obs, _ = env.reset(seed=seed)
+    obs_list.append(obs["image"])
+    max_T = max_steps or env.max_steps
+
+    def step_and_record(action):
+        """Helper to step environment and record trajectory data"""
+        obs, _, _, _, _ = env.step(action)
+        obs_list.append(obs["image"])
+        act_list.append(action)
+        # rew_list.append(reward)
+        # done_list.append(terminated or truncated)
+        # info_list.append(info)
+
+    def act_random():
+        """Random action fallback"""
+        return env.action_space.sample()
+
+    # Main episode loop - delegate to policy-specific functions
+    if policy == "explore" and isinstance(env, FourRoomsMemoryEnv):
+        run_explore_policy_four_rooms(env, max_T, step_and_record, act_random)
+    elif policy == "bfs":
+        if isinstance(env, FourRoomsMemoryEnv):
+            run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random)
+        elif isinstance(env, TenRoomsMemoryEnv):
+            run_bfs_policy_ten_rooms(env, max_T, step_and_record, act_random)
+        elif isinstance(env, MultiDoorsKeysEnv):
+            run_bfs_policy_multi_doors_keys(env, max_T, step_and_record, act_random)
+        else:
+            # Unknown environment, fall back to random
+            run_random_policy(env, max_T, step_and_record, act_random)
     else:
         # Random policy (default)
-        for t in range(max_T):
-            step_and_record(act_random())
+        run_random_policy(env, max_T, step_and_record, act_random)
     
+    # cap the length of the trajectory to max_T
+    obs_list = obs_list[:max_T]
+    act_list = act_list[:max_T]
+    # rew_list = rew_list[:max_T]
+    # done_list = done_list[:max_T]
+    # info_list = info_list[:max_T]
+
+    obs_list = np.stack(obs_list, axis=0) # [max_T, H, W, 3]
+    act_list = np.array(act_list)
+    # rew_list = np.array(rew_list)
+    # done_list = np.array(done_list)
+    # info_list = info_list
         
     traj = Trajectory(
-        observations=np.asarray(obs_list, dtype=np.uint8),
-        actions=np.asarray(act_list, dtype=np.int64),
-        rewards=np.asarray(rew_list, dtype=np.float32),
-        dones=np.asarray(done_list, dtype=np.bool_),
-        infos=info_list,
-        goal_image=goal_img,
-        env_name=(
-            env.spec.id if env.spec is not None else env.__class__.__name__
-        ),
-        seed=rng_seed,
+        observations=obs_list,
+        actions=act_list,
+        # rewards=rew_list,
+        # dones=done_list,
+        # infos=info_list,
+        # goal_image=goal_img,
+        # env_name=(
+        #     env.spec.id if env.spec is not None else env.__class__.__name__
+        # ),
+        # seed=rng_seed,
     )
     return traj
 
@@ -694,21 +884,14 @@ def run_episode(
 def save_trajectories_npz(trajectories: List[Trajectory], out_path: str):
     """Save a single chunk of trajectories to NPZ format."""
     pack = {
-        "observations": [t.observations for t in trajectories],
-        "actions": [t.actions for t in trajectories],
-        "rewards": [t.rewards for t in trajectories],
-        "dones": [t.dones for t in trajectories],
-        "infos": [json.dumps(t.infos) for t in trajectories],
-        "env_names": [t.env_name for t in trajectories],
-        "seeds": [t.seed for t in trajectories],
-        "goal_images": [
-            (
-                t.goal_image
-                if t.goal_image is not None
-                else np.array([], dtype=np.uint8)
-            )
-            for t in trajectories
-        ],
+        "observations": np.stack([t.observations for t in trajectories]),  # Single array (N, T, H, W, 3)
+        "actions": np.stack([t.actions for t in trajectories]),           # Single array (N, T)
+        # "rewards": np.stack([t.rewards for t in trajectories]),           # Single array (N, T)
+        # "dones": np.stack([t.dones for t in trajectories]),               # Single array (N, T)
+        # "infos": [json.dumps(t.infos) for t in trajectories],            # Keep as list (can't stack dicts)
+        # "env_names": [t.env_name for t in trajectories],                 # Keep as list (strings)
+        # "seeds": np.array([t.seed for t in trajectories]),               # Single array (N,)
+        # "goal_images": np.stack([t.goal_image if t.goal_image is not None else np.zeros((t.observations.shape[1], t.observations.shape[2], 3), dtype=np.uint8) for t in trajectories]),  # Single array (N, H, W, 3)
     }
     if not os.path.exists(os.path.dirname(out_path)):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -869,7 +1052,7 @@ def main():
 
     dataset_dir = os.environ["DATASET_DIR"]
     assert dataset_dir is not None, "DATASET_DIR must be set"
-    output_path = os.path.join(dataset_dir, args.output_dir, f"{args.env}_seed_{args.seed}_ep{args.episodes}_t{args.max_steps}")
+    output_path = os.path.join(dataset_dir, args.output_dir, f"{args.env}_policy_{args.policy}_seed_{args.seed}_ep{args.episodes}_t{args.max_steps}")
     
     # Create output directory
     os.makedirs(output_path, exist_ok=True)
@@ -920,7 +1103,6 @@ def main():
         json.dump(index, f, indent=2)
     
     print(f"Saved {total_episodes} episodes in {chunk_idx} chunks to {output_path}")
-
 
 
 if __name__ == "__main__":
