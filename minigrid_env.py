@@ -532,12 +532,6 @@ class MultiDoorsKeysEnv(MiniGridEnv):
 class Trajectory:
     observations: np.ndarray  # [T, H, W, 3]
     actions: np.ndarray  # [T]
-    # rewards: np.ndarray  # [T]
-    # dones: np.ndarray  # [T]
-    # infos: List[Dict[str, Any]]
-    # goal_image: Optional[np.ndarray] = None
-    # env_name: str = ""
-    # seed: int = 0
 
 
 def get_room_quadrant(pos, width, height):
@@ -825,9 +819,6 @@ def run_episode(
         obs, _, _, _, _ = env.step(action)
         obs_list.append(obs["image"])
         act_list.append(action)
-        # rew_list.append(reward)
-        # done_list.append(terminated or truncated)
-        # info_list.append(info)
 
     def act_random():
         """Random action fallback"""
@@ -853,27 +844,14 @@ def run_episode(
     # cap the length of the trajectory to max_T
     obs_list = obs_list[:max_T]
     act_list = act_list[:max_T]
-    # rew_list = rew_list[:max_T]
-    # done_list = done_list[:max_T]
-    # info_list = info_list[:max_T]
 
     obs_list = np.stack(obs_list, axis=0) # [max_T, H, W, 3]
     act_list = np.array(act_list)
-    # rew_list = np.array(rew_list)
-    # done_list = np.array(done_list)
-    # info_list = info_list
+
         
     traj = Trajectory(
         observations=obs_list,
         actions=act_list,
-        # rewards=rew_list,
-        # dones=done_list,
-        # infos=info_list,
-        # goal_image=goal_img,
-        # env_name=(
-        #     env.spec.id if env.spec is not None else env.__class__.__name__
-        # ),
-        # seed=rng_seed,
     )
     return traj
 
@@ -881,49 +859,26 @@ def run_episode(
 # -------------------------
 # Dataset writing
 # -------------------------
-def save_trajectories_npz(trajectories: List[Trajectory], out_path: str):
-    """Save a single chunk of trajectories to NPZ format."""
-    pack = {
-        "observations": np.stack([t.observations for t in trajectories]),  # Single array (N, T, H, W, 3)
-        "actions": np.stack([t.actions for t in trajectories]),           # Single array (N, T)
-        # "rewards": np.stack([t.rewards for t in trajectories]),           # Single array (N, T)
-        # "dones": np.stack([t.dones for t in trajectories]),               # Single array (N, T)
-        # "infos": [json.dumps(t.infos) for t in trajectories],            # Keep as list (can't stack dicts)
-        # "env_names": [t.env_name for t in trajectories],                 # Keep as list (strings)
-        # "seeds": np.array([t.seed for t in trajectories]),               # Single array (N,)
-        # "goal_images": np.stack([t.goal_image if t.goal_image is not None else np.zeros((t.observations.shape[1], t.observations.shape[2], 3), dtype=np.uint8) for t in trajectories]),  # Single array (N, H, W, 3)
-    }
-    if not os.path.exists(os.path.dirname(out_path)):
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    np.savez_compressed(out_path, **pack)
+def save_trajectories_npy(trajectories: List[Trajectory], out_dir: str, chunk_idx: int):
+    """Save a single chunk of trajectories to separate NPY files for efficient memmap loading."""
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+    
+    # Stack trajectories into single arrays
+    observations = np.stack([t.observations for t in trajectories])  # (N, T, H, W, 3)
+    actions = np.stack([t.actions for t in trajectories])           # (N, T)
+    
+    # Save as separate NPY files
+    obs_path = os.path.join(out_dir, f"observations_{chunk_idx:04d}.npy")
+    act_path = os.path.join(out_dir, f"actions_{chunk_idx:04d}.npy")
+    
+    np.save(obs_path, observations)
+    np.save(act_path, actions)
+    
+    return obs_path, act_path
 
 
-def save_trajectories_chunked(episodes: List[Trajectory], out_dir: str, episodes_per_chunk: int = 1000):
-    """Save trajectories into multiple NPZ files with an index for efficient loading."""
-    os.makedirs(out_dir, exist_ok=True)
-    
-    n_chunks = (len(episodes) + episodes_per_chunk - 1) // episodes_per_chunk
-    
-    for chunk_idx in range(n_chunks):
-        start_idx = chunk_idx * episodes_per_chunk
-        end_idx = min(start_idx + episodes_per_chunk, len(episodes))
-        chunk_trajectories = episodes[start_idx:end_idx]
-        
-        chunk_path = os.path.join(out_dir, f"chunk_{chunk_idx:04d}.npz")
-        save_trajectories_npz(chunk_trajectories, chunk_path)
-    
-    # Create index file
-    index = {
-        'total_episodes': len(episodes),
-        'episodes_per_chunk': episodes_per_chunk,
-        'n_chunks': n_chunks,
-    }
-    
-    index_path = os.path.join(out_dir, 'index.json')
-    with open(index_path, 'w') as f:
-        json.dump(index, f, indent=2)
-    
-    print(f"Saved {len(episodes)} episodes in {n_chunks} chunks to {out_dir}")
+
 
 
 # -------------------------
@@ -1052,7 +1007,7 @@ def main():
 
     dataset_dir = os.environ["DATASET_DIR"]
     assert dataset_dir is not None, "DATASET_DIR must be set"
-    output_path = os.path.join(dataset_dir, args.output_dir, f"{args.env}_policy_{args.policy}_seed_{args.seed}_ep{args.episodes}_t{args.max_steps}")
+    output_path = os.path.join(dataset_dir, args.output_dir, f"{args.env}_{args.policy}")
     
     # Create output directory
     os.makedirs(output_path, exist_ok=True)
@@ -1071,16 +1026,16 @@ def main():
         
         # Save chunk when it reaches the target size
         if len(current_chunk) >= args.episodes_per_chunk:
-            chunk_path = os.path.join(output_path, f"chunk_{chunk_idx:04d}.npz")
-            save_trajectories_npz(current_chunk, chunk_path)
+            obs_path, act_path = save_trajectories_npy(current_chunk, output_path, chunk_idx)
+      
             print(f"Saved chunk {chunk_idx} with {len(current_chunk)} episodes")
             current_chunk = []
             chunk_idx += 1
     
     # Save final partial chunk if it has any episodes
     if current_chunk:
-        chunk_path = os.path.join(output_path, f"chunk_{chunk_idx:04d}.npz")
-        save_trajectories_npz(current_chunk, chunk_path)
+        obs_path, act_path = save_trajectories_npy(current_chunk, output_path, chunk_idx)
+
         print(f"Saved final chunk {chunk_idx} with {len(current_chunk)} episodes")
         chunk_idx += 1
     

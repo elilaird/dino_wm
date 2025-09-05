@@ -202,7 +202,7 @@ class Trainer:
             x: torch.utils.data.DataLoader(
                 self.datasets[x],
                 batch_size=self.cfg.gpu_batch_size,
-                shuffle=False,
+                shuffle=True,
                 num_workers=nw if x == "train" else 1,
                 collate_fn=None,
                 pin_memory=True,
