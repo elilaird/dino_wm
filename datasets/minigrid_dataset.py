@@ -129,6 +129,11 @@ class MiniGridInMemoryDataset(Dataset):
             obs = self.transform(obs)
 
         actions = self.actions[idx, frame_indices]
+        
+        # Convert one-hot actions to discrete integers if action_dim > 1
+        if self.action_dim > 1:
+            # Convert one-hot to discrete: [T, action_dim] -> [T, 1]
+            actions = torch.argmax(actions, dim=-1, keepdim=True).float()
 
         # dummy proprio and state
         proprio = torch.zeros_like(actions)
@@ -154,7 +159,14 @@ class MiniGridInMemoryDataset(Dataset):
         result = []
         for i in range(len(self.seq_lengths)):
             T = self.seq_lengths[i]
-            result.append(self.actions[i, :T])
+            actions = self.actions[i, :T]
+            
+            # Convert one-hot actions to discrete integers if action_dim > 1
+            if self.action_dim > 1:
+                # Convert one-hot to discrete: [T, action_dim] -> [T, 1]
+                actions = torch.argmax(actions, dim=-1, keepdim=True).float()
+            
+            result.append(actions)
         return torch.cat(result, dim=0)
 
     def preprocess_imgs(self, imgs):
@@ -371,8 +383,16 @@ class MiniGridMemmapDataset(Dataset):
 
         # Actions → float, (T, A)
         acts = torch.from_numpy(acts_np[frame_indices]).float()
+        # Convert one-hot actions to discrete integers if action_dim > 1
+        if self.action_dim > 1:
+            # Convert one-hot to discrete: [T, action_dim] -> [T, 1]
+            acts = torch.argmax(acts, dim=-1, keepdim=True).float()
+            
         if acts.ndim == 1:
             acts = acts.unsqueeze(-1)
+        
+        
+        
         if self.normalize_action:
             # keep as identity unless you later set mean/std
             acts = (acts - self.action_mean) / (self.action_std + 1e-8)
@@ -406,6 +426,12 @@ class MiniGridMemmapDataset(Dataset):
             t = torch.from_numpy(acts_np).float()
             if t.ndim == 1:
                 t = t.unsqueeze(-1)
+            
+            # Convert one-hot actions to discrete integers if action_dim > 1
+            if self.action_dim > 1:
+                # Convert one-hot to discrete: [T, action_dim] -> [T, 1]
+                t = torch.argmax(t, dim=-1, keepdim=True).float()
+            
             out.append(t)
         return torch.cat(out, dim=0)
 

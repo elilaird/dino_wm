@@ -632,16 +632,29 @@ def run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random):
     """BFS-based optimal navigation policy for FourRoomsMemoryEnv"""
     total_steps = 0
     goal_pos = env.goal_pos
+    goal_reached = False
+    current_target = goal_pos
     
     while total_steps < max_T:
         current_pos = tuple(env.agent_pos)
         
-        # Check if we've reached the goal
-        if current_pos == goal_pos:
-            break
+        # Check if we've reached the current target
+        if current_pos == current_target:
+            if not goal_reached and current_target == goal_pos:
+                goal_reached = True
+            
+            # Select a new random target point on the grid
+            while True:
+                # Try to find a valid random position
+                rx = np.random.randint(1, env.width - 1)
+                ry = np.random.randint(1, env.height - 1)
+                obj = env.grid.get(rx, ry)
+                if obj is None:  # Empty cell
+                    current_target = (rx, ry)
+                    break
         
-        # Find shortest path to goal
-        path = bfs_shortest_path(env.grid, current_pos, goal_pos)
+        # Find shortest path to current target
+        path = bfs_shortest_path(env.grid, current_pos, current_target)
         if path and len(path) > 1:
             # Convert path to actions and execute one step
             planned_actions = plan_actions_from_path(env.agent_dir, path)
@@ -676,15 +689,29 @@ def run_bfs_policy_ten_rooms(env, max_T, step_and_record, act_random):
             break
     
     if goal_pos:
+        goal_reached = False
+        current_target = goal_pos
+        
         while total_steps < max_T:
             current_pos = tuple(env.agent_pos)
             
-            # Check if we've reached the goal
-            if current_pos == goal_pos:
-                break
+            # Check if we've reached the current target
+            if current_pos == current_target:
+                if not goal_reached and current_target == goal_pos:
+                    goal_reached = True
+                
+                # Select a new random target point on the grid
+                while True:
+                    # Try to find a valid random position
+                    rx = np.random.randint(1, env.width - 1)
+                    ry = np.random.randint(1, env.height - 1)
+                    obj = env.grid.get(rx, ry)
+                    if obj is None:  # Empty cell
+                        current_target = (rx, ry)
+                        break
             
-            # Find shortest path to goal
-            path = bfs_shortest_path(env.grid, current_pos, goal_pos)
+            # Find shortest path to current target
+            path = bfs_shortest_path(env.grid, current_pos, current_target)
             if path and len(path) > 1:
                 # Convert path to actions and execute one step
                 planned_actions = plan_actions_from_path(env.agent_dir, path)
@@ -712,6 +739,8 @@ def run_bfs_policy_multi_doors_keys(env, max_T, step_and_record, act_random):
     total_steps = 0
     key_picked_up = False
     target_door_pos = None
+    door_unlocked = False
+    current_target = None
     
     # Get target door position
     if hasattr(env, 'door_positions') and env.goal_color_idx is not None:
@@ -719,6 +748,18 @@ def run_bfs_policy_multi_doors_keys(env, max_T, step_and_record, act_random):
     
     while total_steps < max_T:
         current_pos = tuple(env.agent_pos)
+        
+        # Check if we've reached the current target
+        if current_target and current_pos == current_target:
+            # Select a new random target point on the grid
+            while True:
+                # Try to find a valid random position
+                rx = np.random.randint(1, env.width - 1)
+                ry = np.random.randint(1, env.height - 1)
+                obj = env.grid.get(rx, ry)
+                if obj is None:  # Empty cell
+                    current_target = (rx, ry)
+                    break
         
         if not key_picked_up:
             # Phase 1: Find and pick up the correct key
@@ -736,6 +777,7 @@ def run_bfs_policy_multi_doors_keys(env, max_T, step_and_record, act_random):
                     break
             
             if target_key_pos:
+                current_target = target_key_pos
                 # Navigate to the key
                 path = bfs_shortest_path(env.grid, current_pos, target_key_pos)
                 if path and len(path) > 1:
@@ -758,9 +800,10 @@ def run_bfs_policy_multi_doors_keys(env, max_T, step_and_record, act_random):
                 # Key not found, try random
                 step_and_record(act_random())
                 total_steps += 1
-        else:
+        elif not door_unlocked:
             # Phase 2: Navigate to target door and unlock it
             if target_door_pos:
+                current_target = target_door_pos
                 path = bfs_shortest_path(env.grid, current_pos, target_door_pos)
                 if path and len(path) > 1:
                     planned_actions = plan_actions_from_path(env.agent_dir, path)
@@ -776,9 +819,37 @@ def run_bfs_policy_multi_doors_keys(env, max_T, step_and_record, act_random):
                             # Try to unlock the door
                             step_and_record(5)  # toggle action
                             total_steps += 1
+                            door_unlocked = True
                     else:
                         step_and_record(act_random())
                         total_steps += 1
+                else:
+                    step_and_record(act_random())
+                    total_steps += 1
+            else:
+                step_and_record(act_random())
+                total_steps += 1
+        else:
+            # Phase 3: Continue to random points after completing the task
+            if not current_target:
+                # Select a new random target point on the grid
+                while True:
+                    # Try to find a valid random position
+                    rx = np.random.randint(1, env.width - 1)
+                    ry = np.random.randint(1, env.height - 1)
+                    obj = env.grid.get(rx, ry)
+                    if obj is None:  # Empty cell
+                        current_target = (rx, ry)
+                        break
+            
+            # Navigate to current target
+            path = bfs_shortest_path(env.grid, current_pos, current_target)
+            if path and len(path) > 1:
+                planned_actions = plan_actions_from_path(env.agent_dir, path)
+                if planned_actions:
+                    action = planned_actions[0]
+                    step_and_record(action)
+                    total_steps += 1
                 else:
                     step_and_record(act_random())
                     total_steps += 1
