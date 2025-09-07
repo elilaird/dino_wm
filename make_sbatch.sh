@@ -11,7 +11,7 @@ TIME=${TIME:-2-00:00:00}
 PARTITION=${PARTITION:-batch}
 TYPE=${TYPE:-train} # jupyter, eval, test
 CONDA_ENV=${CONDA_ENV:-dino_clean}
-
+NODES=${NODES:-1}
 
 GPU=${GPU:-8}
 CPUS=${CPUS:-128}
@@ -63,7 +63,7 @@ echo "#!/usr/bin/env zsh
 #SBATCH -A coreyc_coreyc_mp_jepa_0001
 #SBATCH -o output/${TYPE}/${TYPE}_%j.out
 #SBATCH -c ${CPUS} --mem=${MEM}     
-#SBATCH --nodes=1
+#SBATCH --nodes=${NODES}
 #SBATCH -G ${GPU}
 #SBATCH --time=${TIME} 
 #SBATCH --partition=${PARTITION}

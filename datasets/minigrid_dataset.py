@@ -205,6 +205,7 @@ class MiniGridMemmapDataset(Dataset):
         transform: Optional[Callable] = None,
         normalize_action: bool = False,
         action_scale: float = 1.0,
+        total_episodes: Optional[int] = None,
     ):
         self.data_path = Path(data_path)
         self.transform = transform
@@ -216,9 +217,13 @@ class MiniGridMemmapDataset(Dataset):
             self.index = json.load(f)
 
         self.episodes_per_chunk: int = int(self.index.get("episodes_per_chunk", 0))
-        self.total_episodes: int = int(self.index["total_episodes"])
-        self.n_chunks: int = int(self.index["n_chunks"])
+        self.total_episodes: int = int(self.index["total_episodes"]) if total_episodes is None else total_episodes
+        self.n_chunks: int = int(self.index["n_chunks"]) if total_episodes is None else total_episodes // self.episodes_per_chunk
         self.seq_length = int(self.index["max_steps"])
+
+        print(f"Total episodes: {self.total_episodes}")
+        print(f"N chunks: {self.n_chunks}")
+        print(f"Episodes per chunk: {self.episodes_per_chunk}")
 
         # Limit to n_rollout if specified
         self.n_rollout = min(n_rollout, self.total_episodes) if n_rollout else self.total_episodes
@@ -382,7 +387,7 @@ class MiniGridMemmapDataset(Dataset):
             obs = self.transform(obs)
 
         # Actions → float, (T, A)
-        acts = torch.from_numpy(acts_np[frame_indices]).clone().float()
+        acts = torch.from_numpy(acts_np[frame_indices]).float()
         
         # Convert one-hot actions to discrete integers if action_dim > 1
         if acts.shape[-1] > 1:
@@ -450,6 +455,7 @@ def load_minigrid_slice_train_val(
     num_frames=None,
     full_sequence=False,
     in_memory=True,
+    total_episodes=None,
 ):
     """Load and split MiniGrid dataset following the same pattern as point_maze_dset.py."""
     
@@ -466,6 +472,7 @@ def load_minigrid_slice_train_val(
             transform=transform,
             data_path=data_path,
             normalize_action=normalize_action,
+            total_episodes=total_episodes,
         )
     
     if full_sequence:
