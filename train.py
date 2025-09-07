@@ -689,6 +689,7 @@ class Trainer:
         compute_start = torch.cuda.Event(enable_timing=True)
         compute_end = torch.cuda.Event(enable_timing=True)
         prev_time = time.perf_counter()
+
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):

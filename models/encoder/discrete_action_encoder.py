@@ -18,16 +18,15 @@ class DiscreteActionEncoder(nn.Module):
     
     def __init__(
         self,
-        num_actions: int,
+        in_chans: int, # num actions (action_dim)
         emb_dim: int,
         padding_idx: Optional[int] = None,
         max_norm: Optional[float] = None,
         dropout: float = 0.0,
-        in_chans: int = 0
     ):
         super().__init__()
         
-        self.num_actions = num_actions
+        self.num_actions = in_chans
         self.emb_dim = emb_dim
         self.padding_idx = padding_idx
         self.max_norm = max_norm
@@ -35,7 +34,7 @@ class DiscreteActionEncoder(nn.Module):
         
         # Learnable embedding table
         self.embedding = nn.Embedding(
-            num_embeddings=num_actions,
+            num_embeddings=in_chans,
             embedding_dim=emb_dim,
             padding_idx=padding_idx,
             max_norm=max_norm

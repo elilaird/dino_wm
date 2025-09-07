@@ -196,6 +196,7 @@ class VWorldModel(nn.Module):
         """
         loss = 0
         loss_components = {}
+
         z = self.encode(obs, act)
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)

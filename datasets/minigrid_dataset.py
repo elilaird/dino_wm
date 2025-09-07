@@ -382,22 +382,15 @@ class MiniGridMemmapDataset(Dataset):
             obs = self.transform(obs)
 
         # Actions → float, (T, A)
-        acts = torch.from_numpy(acts_np[frame_indices]).float()
+        acts = torch.from_numpy(acts_np[frame_indices]).clone().float()
+        
         # Convert one-hot actions to discrete integers if action_dim > 1
-        if self.action_dim > 1:
+        if acts.shape[-1] > 1:
             # Convert one-hot to discrete: [T, action_dim] -> [T, 1]
-            acts = torch.argmax(acts, dim=-1, keepdim=True).float()
-            
+            acts = torch.argmax(acts, dim=1, keepdim=True).float() 
+
         if acts.ndim == 1:
             acts = acts.unsqueeze(-1)
-        
-        
-        
-        if self.normalize_action:
-            # keep as identity unless you later set mean/std
-            acts = (acts - self.action_mean) / (self.action_std + 1e-8)
-        if self.action_scale != 1.0:
-            acts = acts * self.action_scale
 
         # Dummy proprio & state to preserve interface
         proprio = torch.zeros_like(acts)

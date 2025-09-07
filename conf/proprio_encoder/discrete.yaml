@@ -1,3 +1,2 @@
 _target_: models.encoder.discrete_action_encoder.DiscreteActionEncoder
-num_actions: 4
 emb_dim: 16
