@@ -202,6 +202,7 @@ class FourRoomsMemoryEnv(MiniGridEnv):
 
         # agent spawn
         self.place_agent()
+        self._last_agent_pos = self.agent_pos
 
     def step(self, action):
         # First, rotate the agent to face the desired direction
@@ -214,7 +215,9 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         # Execute the turns
         for _ in range(turns_needed):
             super().step(self.actions.left)
-
+        
+        # set last agent pos to current agent pos
+        self._last_agent_pos = self.agent_pos
         
         # Now move forward in the desired direction
         obs, reward, terminated, truncated, info = super().step(self.actions.forward)
@@ -243,14 +246,19 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         # Observations are dictionaries containing:
         # - an image (partially observable view of the environment)
         # - the agent's direction/orientation (acting as a compass)
-        # - a textual mission string (instructions for the agent)
         obs = {
             "image": image,
-            "direction": self.agent_dir,
-            "mission": self.mission,
+            "proprio": self._get_proprio(),
         }
 
         return obs
+    
+    def _get_proprio(self):
+        x, y = int(self.agent_pos[0]), int(self.agent_pos[1])
+        dx, dy = int(self._last_agent_pos[0]), int(self._last_agent_pos[1])
+        dx = x - dx
+        dy = y - dy
+        return np.array([x, y, dx + 1, dy + 1])
 
     def reset(self, seed=None, options=None):
         super().reset(seed=self.seed if seed is None else seed)
@@ -532,6 +540,7 @@ class MultiDoorsKeysEnv(MiniGridEnv):
 class Trajectory:
     observations: np.ndarray  # [T, H, W, 3]
     actions: np.ndarray  # [T]
+    proprio: np.ndarray  # [T, 4]
 
 
 def get_room_quadrant(pos, width, height):
@@ -878,17 +887,20 @@ def run_episode(
     - 'explore': Systematic exploration for FourRoomsMemoryEnv (covers all rooms and actions)
     - 'bfs': BFS-based navigation (for all envs)
     """
-    obs_list, act_list, rew_list, done_list, info_list = [], [], [], [], []
+    obs_list, act_list, proprio_list = [], [], []
     rng_seed = seed
 
     obs, _ = env.reset(seed=seed)
-    obs_list.append(obs["image"])
+    obs_list.append(obs['image'])
+    proprio_list.append(obs['proprio'])
+    act_list.append(0)
     max_T = max_steps or env.max_steps
 
     def step_and_record(action):
         """Helper to step environment and record trajectory data"""
         obs, _, _, _, _ = env.step(action)
-        obs_list.append(obs["image"])
+        obs_list.append(obs['image'])
+        proprio_list.append(obs['proprio'])
         act_list.append(action)
 
     def act_random():
@@ -915,14 +927,17 @@ def run_episode(
     # cap the length of the trajectory to max_T
     obs_list = obs_list[:max_T]
     act_list = act_list[:max_T]
+    proprio_list = proprio_list[:max_T]
 
     obs_list = np.stack(obs_list, axis=0) # [max_T, H, W, 3]
+    # obs_list = {k: np.stack([o[k] for o in obs_list], axis=0) for k in obs_list[0].keys()}
     act_list = np.array(act_list)
+    proprio_list = np.stack(proprio_list, axis=0) # [max_T, 4]
 
-        
     traj = Trajectory(
         observations=obs_list,
         actions=act_list,
+        proprio=proprio_list,
     )
     return traj
 
@@ -937,16 +952,19 @@ def save_trajectories_npy(trajectories: List[Trajectory], out_dir: str, chunk_id
     
     # Stack trajectories into single arrays
     observations = np.stack([t.observations for t in trajectories])  # (N, T, H, W, 3)
+    # observations = {k: np.stack([t.observations[k] for t in trajectories], axis=0) for k in trajectories[0].observations.keys()}
     actions = np.stack([t.actions for t in trajectories])           # (N, T)
+    proprio = np.stack([t.proprio for t in trajectories])           # (N, T, 4)
     
     # Save as separate NPY files
     obs_path = os.path.join(out_dir, f"observations_{chunk_idx:04d}.npy")
     act_path = os.path.join(out_dir, f"actions_{chunk_idx:04d}.npy")
+    proprio_path = os.path.join(out_dir, f"proprio_{chunk_idx:04d}.npy")
     
     np.save(obs_path, observations)
     np.save(act_path, actions)
-    
-    return obs_path, act_path
+    np.save(proprio_path, proprio)
+    return obs_path, act_path, proprio_path
 
 
 
@@ -1097,7 +1115,7 @@ def main():
         
         # Save chunk when it reaches the target size
         if len(current_chunk) >= args.episodes_per_chunk:
-            obs_path, act_path = save_trajectories_npy(current_chunk, output_path, chunk_idx)
+            obs_path, act_path, proprio_path = save_trajectories_npy(current_chunk, output_path, chunk_idx)
       
             print(f"Saved chunk {chunk_idx} with {len(current_chunk)} episodes")
             current_chunk = []
@@ -1105,7 +1123,7 @@ def main():
     
     # Save final partial chunk if it has any episodes
     if current_chunk:
-        obs_path, act_path = save_trajectories_npy(current_chunk, output_path, chunk_idx)
+        obs_path, act_path, proprio_path = save_trajectories_npy(current_chunk, output_path, chunk_idx)
 
         print(f"Saved final chunk {chunk_idx} with {len(current_chunk)} episodes")
         chunk_idx += 1

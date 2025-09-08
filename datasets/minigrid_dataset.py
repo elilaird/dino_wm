@@ -206,11 +206,13 @@ class MiniGridMemmapDataset(Dataset):
         normalize_action: bool = False,
         action_scale: float = 1.0,
         total_episodes: Optional[int] = None,
+        proprio_available: bool = False,
     ):
         self.data_path = Path(data_path)
         self.transform = transform
         self.normalize_action = normalize_action
         self.action_scale = float(action_scale)
+        self.proprio_available = proprio_available
 
         # Load index.json
         with open(self.data_path / "index.json", "r") as f:
@@ -251,7 +253,7 @@ class MiniGridMemmapDataset(Dataset):
     def _ensure_worker_caches(self):
         # Initialize per-worker cache dicts lazily (so each worker has its own)
         if self._mmaps is None:
-            self._mmaps = {"observations": {}, "actions": {}}
+            self._mmaps = {"observations": {}, "actions": {}, "proprio": {}}
 
     def _get_mmap(self, kind: str, chunk_idx: int) -> np.ndarray:
         self._ensure_worker_caches()
@@ -374,6 +376,9 @@ class MiniGridMemmapDataset(Dataset):
         obs_np = self._get_mmap("observations", cid)[local_idx]     # [T, H, W, C] (uint8 recommended)
         acts_np = self._get_mmap("actions", cid)[local_idx]         # [T, A] or [T]
 
+        if self.proprio_available:
+            proprio_np = self._get_mmap("proprio", cid)[local_idx]     # [T, P]
+
         # Fancy indexing with a list/array is fine on memmap (pages on demand)
         if not isinstance(frame_indices, slice):
             frame_indices = list(frame_indices)
@@ -399,9 +404,12 @@ class MiniGridMemmapDataset(Dataset):
         if acts.ndim == 1:
             acts = acts.unsqueeze(-1)
 
-        # Dummy proprio & state to preserve interface
-        proprio = torch.zeros_like(acts)
-        state = torch.zeros_like(acts)
+        if self.proprio_available:
+            proprio = torch.from_numpy(proprio_np[frame_indices]).float()
+            state = proprio[:, :2].float()
+        else:
+            proprio = torch.zeros_like(acts)
+            state = torch.zeros_like(acts)
 
         obs_dict = {"visual": obs, "proprio": proprio}
         return obs_dict, acts, state, {}
