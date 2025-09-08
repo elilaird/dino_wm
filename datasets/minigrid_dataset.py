@@ -131,7 +131,7 @@ class MiniGridInMemoryDataset(Dataset):
         actions = self.actions[idx, frame_indices]
         
         # Convert one-hot actions to discrete integers if action_dim > 1
-        if self.action_dim > 1:
+        if actions.ndim >= 2 and actions.shape[-1] > 1:
             # Convert one-hot to discrete: [T, action_dim] -> [T, 1]
             actions = torch.argmax(actions, dim=-1, keepdim=True).float()
 
@@ -162,7 +162,7 @@ class MiniGridInMemoryDataset(Dataset):
             actions = self.actions[i, :T]
             
             # Convert one-hot actions to discrete integers if action_dim > 1
-            if self.action_dim > 1:
+            if actions.shape[-1] > 1:
                 # Convert one-hot to discrete: [T, action_dim] -> [T, 1]
                 actions = torch.argmax(actions, dim=-1, keepdim=True).float()
             
@@ -321,7 +321,9 @@ class MiniGridMemmapDataset(Dataset):
 
         # action dims
         if act_np.ndim == 1:
-            action_dim = 1
+            # get unique action values
+            unique_actions = np.unique(act_np)
+            action_dim = len(unique_actions)
         elif act_np.ndim == 2:
             action_dim = act_np.shape[-1]
         else:
@@ -390,7 +392,7 @@ class MiniGridMemmapDataset(Dataset):
         acts = torch.from_numpy(acts_np[frame_indices]).float()
         
         # Convert one-hot actions to discrete integers if action_dim > 1
-        if acts.shape[-1] > 1:
+        if acts.ndim >= 2 and acts.shape[-1] > 1:
             # Convert one-hot to discrete: [T, action_dim] -> [T, 1]
             acts = torch.argmax(acts, dim=1, keepdim=True).float() 
 

@@ -77,3 +77,4 @@ plan_settings:
   alpha: [0.1, 1]
 
 num_workers: 5
+grad_accumulation_steps: 1
