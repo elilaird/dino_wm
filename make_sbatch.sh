@@ -3,8 +3,6 @@
 # Example usage:
 # GPU=4 TIME=0-04:00:00 PARTITION=batch TYPE=train ./make_sbatch.sh
 
-# hm3d_train_v0.2
-
 DATETIME=$(date +"%Y%m%d_%H%M%S")
 
 TIME=${TIME:-2-00:00:00}
@@ -47,7 +45,8 @@ elif [ "${TYPE}" = "habitat" ]; then
 else
     # Use accelerate for distributed training
     if [ "${GPU}" -gt 1 ]; then
-        COMMAND="HYDRA_FULL_ERROR=1 DATASET_DIR=${DATA_DIR} accelerate launch --num_machines 1 --dynamo_backend no --num_processes=${GPU} ${PY_FILE} ${PY_ARGS}"
+        # COMMAND="HYDRA_FULL_ERROR=1 DATASET_DIR=${DATA_DIR} accelerate launch --num_machines 1 --dynamo_backend no --num_processes=${GPU} ${PY_FILE} ${PY_ARGS}"
+        COMMAND="HYDRA_FULL_ERROR=1 DATASET_DIR=${DATA_DIR} ./launch.sh ${GPU} ${PY_FILE} ${PY_ARGS}"
     else
         COMMAND="HYDRA_FULL_ERROR=1  DATASET_DIR=${DATA_DIR} python ${PY_FILE} ${PY_ARGS}"
     fi
@@ -62,11 +61,13 @@ echo "#!/usr/bin/env zsh
 #SBATCH -J ${TYPE}
 #SBATCH -A coreyc_coreyc_mp_jepa_0001
 #SBATCH -o output/${TYPE}/${TYPE}_%j.out
-#SBATCH -c ${CPUS} --mem=${MEM}     
+#SBATCH --cpus-per-task=${CPUS} 
+#SBATCH --mem=${MEM}     
 #SBATCH --nodes=${NODES}
-#SBATCH -G ${GPU}
+#SBATCH --gres=gpu:${GPU}
 #SBATCH --time=${TIME} 
 #SBATCH --partition=${PARTITION}
+#SBATCH --tasks-per-node=1
 
 module purge
 module load conda
@@ -79,9 +80,20 @@ echo $CONDA_PREFIX
 
 echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TYPE=${TYPE} TIME=${TIME} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
 
+# If InfiniBand:
+# export NCCL_SOCKET_IFNAME=ib0
+# export GLOO_SOCKET_IFNAME=ib0
+# Or, if Ethernet:
+# export NCCL_SOCKET_IFNAME=eth0
+# export GLOO_SOCKET_IFNAME=eth0
+
+# export NCCL_ASYNC_ERROR_HANDLING=1
+# export TORCH_NCCL_BLOCKING_WAIT=1
+# export NCCL_DEBUG=INFO
+
 export DATA_DIR=${DATA_DIR}
 export LD_LIBRARY_PATH=/users/ejlaird/.mujoco/mujoco210/bin:$LD_LIBRARY_PATH
-srun bash -c \"${COMMAND}\"
+srun --ntasks=${NODES} --distribution=block  bash -c \"${COMMAND}\"
 " > ${TYPE}_${DATETIME}.sbatch
 
 # submit sbatch script

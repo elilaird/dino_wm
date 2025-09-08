@@ -116,6 +116,26 @@ class Trainer:
 
         self.accelerator = Accelerator(log_with="wandb")
 
+        import socket
+
+        global_rank = self.accelerator.process_index               # global rank
+        local_rank  = self.accelerator.local_process_index         # rank within the node
+        world_size  = self.accelerator.num_processes               # total processes
+        num_machines = int(os.environ.get("ACCELERATE_NUM_MACHINES",
+                            os.environ.get("SLURM_NNODES", "1")))
+        procs_per_machine = max(1, world_size // num_machines)
+        machine_rank = global_rank // procs_per_machine
+        self.accelerator.print(
+            f"world_size={world_size} "
+            f"host={socket.gethostname()} "
+            f"machine_rank={machine_rank} "
+            f"local_rank={local_rank} "
+            f"global_rank={global_rank} "
+            f"is_main={self.accelerator.is_main_process}"
+        )
+
+        # log.info(f"local_rank: {self.accelerator.local_process_index}, global_rank: {self.accelerator.process_index}")
+
         log.info(
             f"rank: {self.accelerator.local_process_index}  model_name: {model_name}"
         )
@@ -291,18 +311,28 @@ class Trainer:
             log.warning("Keys not found in ckpt: %s", not_in_ckpt)
 
     def init_models(self):
-        model_ckpt = (
-            Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
-        )
-        if model_ckpt.exists():
-            self.load_ckpt(model_ckpt)
-            log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+
+        with self.accelerator.main_process_first():
+            model_ckpt = (
+                Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
+            )
+            if model_ckpt.exists():
+                self.load_ckpt(model_ckpt)
+                log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+        self.accelerator.wait_for_everyone()
 
         # initialize encoder
-        if self.encoder is None:
-            self.encoder = hydra.utils.instantiate(
-                self.cfg.encoder,
-            )
+        with self.accelerator.main_process_first():
+            if self.encoder is None:
+                self.encoder = hydra.utils.instantiate(
+                    self.cfg.encoder,
+                )
+        self.accelerator.wait_for_everyone()
+
+        # Sanity: make sure everyone actually built it and it has params
+        n_params = sum(p.numel() for p in self.encoder.parameters())
+        assert n_params > 0, "Encoder has zero parameters on this rank BEFORE DDP."
+
         if not self.train_encoder:
             for param in self.encoder.parameters():
                 param.requires_grad = False
@@ -377,6 +407,14 @@ class Trainer:
             if not self.train_decoder:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
+
+        for name, mod in dict(encoder=self.encoder, predictor=self.predictor,
+                          decoder=self.decoder, proprio=self.proprio_encoder,
+                          action=self.action_encoder).items():
+            if mod is not None:
+                n = sum(p.numel() for p in mod.parameters())
+                assert n >= 0, f"{name} has negative param count?"
+        self.accelerator.wait_for_everyone()
 
         (
             self.encoder,
