@@ -1,9 +1,9 @@
 defaults:
   - _self_
-  - env: point_maze
+  - env: four_rooms_random
   - encoder: dino 
-  - action_encoder: proprio
-  - proprio_encoder: proprio
+  - action_encoder: discrete
+  - proprio_encoder: grid_dir
   - decoder: vqvae
   - predictor: vit
   - model: base
@@ -36,20 +36,20 @@ training:
 
 full_sequence: False
 img_size: 224 # should be a multiple of 224
-frameskip: 5
+frameskip: 1
 concat_dim: 1
 
-normalize_action: True
 
 # action encoder
 action_emb_dim: 12
 num_action_repeat: 1
+normalize_action: False
 
 # proprio encoder
 proprio_emb_dim: 12 
 num_proprio_repeat: 1
 
-num_frames: null
+num_frames: 15
 num_hist: 4
 num_pred: 1 # only supports 1
 has_predictor: True # set this to False for only training a decoder

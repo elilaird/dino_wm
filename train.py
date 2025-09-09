@@ -497,45 +497,7 @@ class Trainer:
             if self.accelerator.is_main_process:
                 log.info(f"Decoder LR: {self.cfg.training.decoder_lr} -> {self.cfg.training.decoder_lr * lr_scale}")
 
-    def monitor_jobs(self, lock):
-        """
-        check planning eval jobs' status and update logs
-        """
-        while True:
-            with lock:
-                finished_jobs = [
-                    job_tuple
-                    for job_tuple in self.job_set
-                    if job_tuple[2].done()
-                ]
-                for epoch, job_name, job in finished_jobs:
-                    result = job.result()
-                    print(
-                        f"Logging result for {job_name} at epoch {epoch}: {result}"
-                    )
-                    log_data = {
-                        f"{job_name}/{key}": value
-                        for key, value in result.items()
-                    }
-                    log_data["epoch"] = epoch
-                    self.wandb_run.log(log_data)
-                    self.job_set.remove((epoch, job_name, job))
-            time.sleep(1)
-
     def run(self):
-
-        if (
-            self.cfg.plan_settings.plan_cfg_path is not None
-            and self.accelerator.is_main_process
-        ):
-            # executor = ThreadPoolExecutor(max_workers=4)
-            self.job_set = set()
-            lock = threading.Lock()
-
-            self.monitor_thread = threading.Thread(
-                target=self.monitor_jobs, args=(lock,), daemon=True
-            )
-            self.monitor_thread.start()
 
         init_epoch = self.epoch + 1  # epoch starts from 1
         if self.cfg.dry_run:

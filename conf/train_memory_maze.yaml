@@ -1,9 +1,9 @@
 defaults:
   - _self_
-  - env: point_maze
+  - env: memory_maze_3x7
   - encoder: dino 
-  - action_encoder: proprio
-  - proprio_encoder: proprio
+  - action_encoder: discrete
+  - proprio_encoder: discrete
   - decoder: vqvae
   - predictor: vit
   - model: base
@@ -24,34 +24,34 @@ hydra:
 training:
   seed: 0
   epochs: 100
-  batch_size: 256 # gpu_batch_size
+  batch_size: 2048 # gpu_batch_size
   save_every_x_epoch: 10 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
   encoder_lr: 1e-6
   decoder_lr: 3e-4
-  predictor_lr: 5e-4
+  predictor_lr: 1e-4
   action_encoder_lr: 5e-4
   max_grad_norm: 0.5
 
 full_sequence: False
-img_size: 224 # should be a multiple of 224
-frameskip: 5
+img_size: 64 
+frameskip: 1
 concat_dim: 1
 
-normalize_action: True
 
 # action encoder
 action_emb_dim: 12
 num_action_repeat: 1
+normalize_action: False
 
 # proprio encoder
 proprio_emb_dim: 12 
 num_proprio_repeat: 1
 
-num_frames: null
-num_hist: 4
-num_pred: 1 # only supports 1
+num_frames: 100
+num_hist: 9
+num_pred: 1 
 has_predictor: True # set this to False for only training a decoder
 has_decoder: True # set this to False for only training a predictor
 
