@@ -322,6 +322,16 @@ class FourRoomsMemoryEnv(MiniGridEnv):
     def update_env(self, env_info):
         pass 
 
+    def eval_state(self, goal_state, cur_state):
+        gx, gy = int(goal_state[0]), int(goal_state[1])
+        cx, cy = int(cur_state[0]), int(cur_state[1])
+        success = (gx == cx) and (gy == cy)
+        state_dist = abs(gx - cx) + abs(gy - cy)
+        return {
+            'success': success,
+            'state_dist': state_dist,
+        }
+
 
 # -------------------------
 # Ten Rooms (corridor chain) Env

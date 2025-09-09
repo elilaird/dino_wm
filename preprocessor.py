@@ -44,18 +44,23 @@ class Preprocessor:
         return (state - self.state_mean) / self.state_std
 
     def preprocess_obs_visual(self, obs_visual):
-        return rearrange(obs_visual, "b t h w c -> b t c h w") / 255.0
+        return rearrange(obs_visual, "b t h w c -> (b t) c h w") / 255.0
 
     def transform_obs_visual(self, obs_visual):
         transformed_obs_visual = torch.tensor(obs_visual)
         transformed_obs_visual = self.preprocess_obs_visual(transformed_obs_visual)
         transformed_obs_visual = self.transform(transformed_obs_visual)
+        transformed_obs_visual = rearrange(transformed_obs_visual, "(b t) c h w -> b t c h w", b=obs_visual.shape[0])
         return transformed_obs_visual
     
     def transform_obs(self, obs):
         '''
         np arrays to tensors
         '''
+        # # add time dimension
+        # if obs['visual'].ndim == 4:
+        #     obs = {k: torch.tensor(v).unsqueeze(1) for k, v in obs.items()}
+
         transformed_obs = {}
         transformed_obs['visual'] = self.transform_obs_visual(obs['visual'])
         transformed_obs['proprio'] = self.normalize_proprios(torch.tensor(obs['proprio']))

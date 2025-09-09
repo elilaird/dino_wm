@@ -35,3 +35,17 @@ register(
     reward_threshold=1.0,
     disable_env_checker=True,
 )
+
+register(
+    id="four_rooms",
+    entry_point="env.minigrid.minigrid_env:FourRoomsMemoryEnv",
+    max_episode_steps=500,
+    reward_threshold=1.0,
+    disable_env_checker=True,
+    kwargs={
+        'world_size': 17,
+        'obs_mode': "top_down",
+        'tile_size': 14,
+        'agent_view_size': 7,
+    }
+)
