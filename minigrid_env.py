@@ -18,7 +18,7 @@ from minigrid.minigrid_env import MiniGridEnv
 from minigrid.core.world_object import Wall, Door, Key, Goal, Ball
 from minigrid.core.grid import Grid
 from minigrid.core.mission import MissionSpace
-
+from utils import aggregate_dct
 
 # -------------------------
 # Utility: BFS over free grid
@@ -142,6 +142,8 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         assert world_size % 2 == 1 and world_size >= 7, f"Size must be an odd number >= 7, got {world_size}"
         self.obs_mode = obs_mode
         self.world_size = world_size
+        self.set_seed(seed)
+        self.init_state = None
         mission_space = MissionSpace(
             mission_func=lambda: "Reach the green goal"
         )
@@ -155,16 +157,13 @@ class FourRoomsMemoryEnv(MiniGridEnv):
             render_mode=render_mode,
             tile_size=tile_size,
         )
-        self.obs_mode = obs_mode
-        self.seed = seed
-        self.set_seed(seed)
         
         # Override action space to only include directional movement actions
         self.action_space = spaces.Discrete(4)  # 0: up, 1: right, 2: down, 3: left
 
     def set_seed(self, seed=None):
+        self.seed = seed
         if seed is not None:
-            self._seed = seed
             np.random.seed(seed)
 
     def _gen_grid(self, width, height):
@@ -193,15 +192,30 @@ class FourRoomsMemoryEnv(MiniGridEnv):
             else:
                 self.grid.set(x, pos, None)
 
-        # goal in a random quadrant
+        # # goal in a random quadrant
+        # gx, gy = self.sample_random_pos()
+        # self.put_obj(Goal(), gx, gy)
+        # self.goal_pos = (gx, gy)
+
+        # agent spawn
+        self.place_agent(init_state=self.init_state)  
+            
+
+    def sample_random_pos(self):
+        mid_w = self.width // 2
+        mid_h = self.height // 2
         quadrant = np.random.randint(0, 4)
         gx = np.random.randint(1, mid_w - 1) + (quadrant % 2) * mid_w 
         gy = np.random.randint(1, mid_h - 1) + (quadrant // 2) * mid_h
-        self.put_obj(Goal(), gx, gy)
-        self.goal_pos = (gx, gy)
+        return (np.int64(gx), np.int64(gy))
 
-        # agent spawn
-        self.place_agent()
+    def place_agent(self, init_state=None):
+        if init_state is None:
+            super().place_agent()
+        else:
+            self.grid.set(int(init_state[0]), int(init_state[1]), None)
+            self.agent_pos = (np.int64(init_state[0]), np.int64(init_state[1]))
+            self.agent_dir = np.int64(1)
         self._last_agent_pos = self.agent_pos
 
     def step(self, action):
@@ -221,10 +235,34 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         
         # Now move forward in the desired direction
         obs, reward, terminated, truncated, info = super().step(self.actions.forward)
+
+        info = {}
+        info['state'] = self.agent_pos
+
         if isinstance(self.grid.get(*self.agent_pos), Goal):
             reward = 1.0
             terminated = True
         return obs, reward, terminated, truncated, info
+
+    def step_multiple(self, actions):
+        obses = []
+        infos = []
+        for action in actions:
+            obs, _, _, _, info = self.step(action)
+            obses.append(obs)
+            infos.append(info)
+        obses = aggregate_dct(obses)
+        infos = aggregate_dct(infos)
+        return obses, infos
+
+    def rollout(self, seed, init_state, actions):
+        obs, state = self.prepare(seed, init_state)
+        obses, infos = self.step_multiple(actions)
+        for k in obses.keys():
+            obses[k] = np.vstack([np.expand_dims(obs[k], 0), obses[k]])
+        states = np.vstack([np.expand_dims(state, 0), infos["state"]])
+        states = np.stack(states)
+        return obses, states
 
     def gen_obs(self):
         """
@@ -247,7 +285,7 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         # - an image (partially observable view of the environment)
         # - the agent's direction/orientation (acting as a compass)
         obs = {
-            "image": image,
+            "visual": image,
             "proprio": self._get_proprio(),
         }
 
@@ -260,9 +298,29 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         dy = y - dy
         return np.array([x, y, dx + 1, dy + 1])
 
+    def set_init_state(self, init_state):
+        self.init_state = init_state
+
+    def prepare(self, seed, init_state):
+        self.set_init_state(init_state)
+        obs, state = self.reset(seed)
+        return obs, state
+
+
     def reset(self, seed=None, options=None):
-        super().reset(seed=self.seed if seed is None else seed)
-        return self.gen_obs(), {}
+        obs, _ = super().reset(seed=self.seed if seed is None else seed)
+        return obs, self.agent_pos
+
+    def sample_random_init_goal_states(self, seed):
+        self.set_seed(seed)
+        ax, ay = self.sample_random_pos()
+
+        # sample random goal state for goal
+        gx, gy = self.sample_random_pos()
+        return (ax, ay), (gx, gy)
+
+    def update_env(self, env_info):
+        pass 
 
 
 # -------------------------
@@ -891,7 +949,7 @@ def run_episode(
     rng_seed = seed
 
     obs, _ = env.reset(seed=seed)
-    obs_list.append(obs['image'])
+    obs_list.append(obs['visual'])
     proprio_list.append(obs['proprio'])
     act_list.append(0)
     max_T = max_steps or env.max_steps
@@ -899,7 +957,7 @@ def run_episode(
     def step_and_record(action):
         """Helper to step environment and record trajectory data"""
         obs, _, _, _, _ = env.step(action)
-        obs_list.append(obs['image'])
+        obs_list.append(obs['visual'])
         proprio_list.append(obs['proprio'])
         act_list.append(action)
 

@@ -32,40 +32,6 @@ ALL_MODEL_KEYS = [
     "action_encoder",
 ]
 
-def planning_main_in_dir(working_dir, cfg_dict):
-    os.chdir(working_dir)
-    return planning_main(cfg_dict=cfg_dict)
-
-def launch_plan_jobs(
-    epoch,
-    cfg_dicts,
-    plan_output_dir,
-):
-    with submitit.helpers.clean_env():
-        jobs = []
-        for cfg_dict in cfg_dicts:
-            subdir_name = f"{cfg_dict['planner']['name']}_goal_source={cfg_dict['goal_source']}_goal_H={cfg_dict['goal_H']}_alpha={cfg_dict['objective']['alpha']}"
-            subdir_path = os.path.join(plan_output_dir, subdir_name)
-            executor = submitit.AutoExecutor(
-                folder=subdir_path, slurm_max_num_timeout=20
-            )
-            executor.update_parameters(
-                **{
-                    k: v
-                    for k, v in cfg_dict["hydra"]["launcher"].items()
-                    if k != "submitit_folder"
-                }
-            )
-            cfg_dict["saved_folder"] = subdir_path
-            cfg_dict["wandb_logging"] = False  # don't init wandb
-            job = executor.submit(planning_main_in_dir, subdir_path, cfg_dict)
-            jobs.append((epoch, subdir_name, job))
-            print(
-                f"Submitted evaluation job for checkpoint: {subdir_path}, job id: {job.job_id}"
-            )
-        return jobs
-
-
 def build_plan_cfg_dicts(
     plan_cfg_path="",
     ckpt_base_path="",
@@ -177,7 +143,7 @@ class PlanWorkspace:
         self.log_filename = "logs.json"  # planner and final eval logs are dumped here
         self.planner = hydra.utils.instantiate(
             self.cfg_dict["planner"],
-            wm=self.wm,
+            wm=self.wm, 
             env=self.env,  # only for mpc
             action_dim=self.action_dim,
             objective_fn=objective_fn,
