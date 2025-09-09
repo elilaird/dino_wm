@@ -43,11 +43,11 @@ concat_dim: 1
 normalize_action: True
 
 # action encoder
-action_emb_dim: 10
+action_emb_dim: 12
 num_action_repeat: 1
 
 # proprio encoder
-proprio_emb_dim: 10 
+proprio_emb_dim: 12 
 num_proprio_repeat: 1
 
 num_frames: null
@@ -56,14 +56,6 @@ num_pred: 1 # only supports 1
 has_predictor: True # set this to False for only training a decoder
 has_decoder: True # set this to False for only training a predictor
 
-# model:
-#   _target_: models.visual_world_model.VWorldModel
-#   image_size: ${img_size}
-#   num_hist: ${num_hist}
-#   num_pred: ${num_pred}
-#   train_encoder: False
-#   train_predictor: True
-#   train_decoder: True
 
 debug: False 
 

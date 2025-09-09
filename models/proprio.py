@@ -70,10 +70,13 @@ class ProprioceptiveEmbedding(nn.Module):
         return x
 
 class MiniGridProprioceptiveEmbedding(nn.Module):
-    def __init__(self, world_size=17, emb_dim=16):
+    def __init__(self, in_chans=None, world_size=17, emb_dim=16):
         super().__init__()
         self.world_size = world_size
         self.emb_dim = emb_dim
+        self.in_chans = in_chans # dummy to match interface
+
+        assert emb_dim % 4 == 0, f"emb_dim {emb_dim} must be divisible by 4"
         
         # Grid embedding for coordinates
         self.grid_embedding = nn.Embedding(world_size * world_size, emb_dim // 2)

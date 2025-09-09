@@ -16,11 +16,13 @@ class MiniGridInMemoryDataset(Dataset):
         transform: Optional[Callable] = None,
         normalize_action: bool = False,
         action_scale: float = 1.0,
+        proprio_available: bool = False,
     ):
         self.data_path = Path(data_path)
         self.transform = transform
         self.normalize_action = normalize_action
         self.action_scale = action_scale
+        self.proprio_available = proprio_available
 
         # Load index
         with open(self.data_path / 'index.json', 'r') as f:
@@ -304,13 +306,17 @@ class MiniGridMemmapDataset(Dataset):
         cid, local_idx = self._episode_map[global_idx]
         observations = self._get_mmap("observations", cid)
         actions = self._get_mmap("actions", cid)
+        if self.proprio_available:
+            proprio = self._get_mmap("proprio", cid)
+        else:
+            proprio = None
         obs = observations[local_idx]        # shape [T, H, W, C]
         act = actions[local_idx]             # shape [T, A] or [T]
-        return obs, act
+        return obs, act, proprio
 
     def _init_shapes_and_norms(self):
         # Peek the first episode to infer dims
-        img_np, act_np = self._peek_episode(0)
+        img_np, act_np, proprio_np = self._peek_episode(0)
 
         # image dims
         if img_np.ndim == 3:
@@ -331,11 +337,20 @@ class MiniGridMemmapDataset(Dataset):
         else:
             raise ValueError(f"Unexpected action shape: {act_np.shape}")
 
+        # proprio dim
+        if self.proprio_available and proprio_np is not None:
+            proprio_dim = proprio_np.shape[-1]
+            state_dim = 2 # ASSUMES STATE IS [X, Y] COORDINATES
+        else:
+            proprio_dim = action_dim
+            state_dim = action_dim
+
+
         self.obs_shape = (H, W, C)
         self.obs_dim = C
         self.action_dim = action_dim
-        self.proprio_dim = action_dim
-        self.state_dim = action_dim
+        self.proprio_dim = proprio_dim
+        self.state_dim = state_dim
 
         # Default "no normalization"
         self._init_default_normalization()
@@ -347,10 +362,10 @@ class MiniGridMemmapDataset(Dataset):
         self.obs_std = torch.ones(self.obs_dim)
         self.action_mean = torch.zeros(self.action_dim)
         self.action_std = torch.ones(self.action_dim)
-        self.proprio_mean = torch.zeros(self.action_dim)
-        self.proprio_std = torch.ones(self.action_dim)
-        self.state_mean = torch.zeros(self.action_dim)
-        self.state_std = torch.ones(self.action_dim)
+        self.proprio_mean = torch.zeros(self.proprio_dim)
+        self.proprio_std = torch.ones(self.proprio_dim)
+        self.state_mean = torch.zeros(self.state_dim)
+        self.state_std = torch.ones(self.state_dim)
 
     def __len__(self):
         return self.n_rollout
@@ -466,6 +481,7 @@ def load_minigrid_slice_train_val(
     full_sequence=False,
     in_memory=True,
     total_episodes=None,
+    proprio_available=False,
 ):
     """Load and split MiniGrid dataset following the same pattern as point_maze_dset.py."""
     
@@ -475,6 +491,7 @@ def load_minigrid_slice_train_val(
             transform=transform,
             data_path=data_path,
             normalize_action=normalize_action,
+            proprio_available=proprio_available,
         )
     else:
         dset = MiniGridMemmapDataset(
@@ -483,6 +500,7 @@ def load_minigrid_slice_train_val(
             data_path=data_path,
             normalize_action=normalize_action,
             total_episodes=total_episodes,
+            proprio_available=proprio_available,
         )
     
     if full_sequence:

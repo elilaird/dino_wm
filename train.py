@@ -344,7 +344,6 @@ class Trainer:
         )
         proprio_emb_dim = self.proprio_encoder.emb_dim
         print(f"Proprio encoder type: {type(self.proprio_encoder)}")
-        # self.proprio_encoder = self.accelerator.prepare(self.proprio_encoder)
 
         self.action_encoder = hydra.utils.instantiate(
             self.cfg.action_encoder,
@@ -354,7 +353,6 @@ class Trainer:
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
 
-        # self.action_encoder = self.accelerator.prepare(self.action_encoder)
 
         # initialize predictor
         if self.encoder.latent_ndim == 1:  # if feature is 1D
