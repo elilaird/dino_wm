@@ -1,6 +1,7 @@
 # Adapted from https://github.com/facebookresearch/ijepa/blob/main/src/models/vision_transformer.py 
 import numpy as np
 import torch.nn as nn
+import torch
 
 
 def get_1d_sincos_pos_embed(emb_dim, grid_size, cls_token=False):
@@ -67,3 +68,33 @@ class ProprioceptiveEmbedding(nn.Module):
         x = self.patch_embed(x)
         x = x.permute(0, 2, 1)
         return x
+
+class MiniGridProprioceptiveEmbedding(nn.Module):
+    def __init__(self, world_size=17, emb_dim=16):
+        super().__init__()
+        self.world_size = world_size
+        self.emb_dim = emb_dim
+        
+        # Grid embedding for coordinates
+        self.grid_embedding = nn.Embedding(world_size * world_size, emb_dim // 2)
+        
+        # Direction embedding (discrete: 0, 1, 2)
+        self.dir_embedding = nn.Embedding(3, emb_dim // 4)
+        
+    def forward(self, x):
+        # x: [B, T, 4] where [x, y, x_dir, y_dir]
+        coords = x[..., :2].long()  # [B, T, 2]
+        dirs = x[..., 2:].long()    # [B, T, 2]
+        
+        # Grid coordinates
+        grid_indices = coords[..., 0] * self.world_size + coords[..., 1]
+        coord_emb = self.grid_embedding(grid_indices)  # [B, T, emb_dim//2]
+        
+        # Directions (treat each direction separately)
+        x_dir_emb = self.dir_embedding(dirs[..., 0])  # [B, T, emb_dim//4]
+        y_dir_emb = self.dir_embedding(dirs[..., 1])  # [B, T, emb_dim//4]
+        
+        # Combine
+        dir_emb = torch.cat([x_dir_emb, y_dir_emb], dim=-1)  # [B, T, emb_dim//2]
+        
+        return torch.cat([coord_emb, dir_emb], dim=-1)  # [B, T, emb_dim]

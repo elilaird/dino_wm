@@ -1,4 +1,4 @@
-name: four_rooms
+name: four_rooms_explore
 args: []
 kwargs: {}
 
@@ -6,8 +6,8 @@ dataset:
   _target_: "datasets.minigrid_dataset.load_minigrid_slice_train_val"
   n_rollout: null
   normalize_action: ${normalize_action}
-  data_path: ${oc.env:DATASET_DIR}/four_rooms/four_rooms_explore
-  split_ratio: 0.8
+  data_path: ${oc.env:DATASET_DIR}/four_rooms/explore_w_proprio
+  split_ratio: 0.9
   full_sequence: False
   transform:
     _target_: "datasets.img_transforms.default_transform"

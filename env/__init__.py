@@ -37,7 +37,35 @@ register(
 )
 
 register(
-    id="four_rooms",
+    id="four_rooms_random",
+    entry_point="env.minigrid.minigrid_env:FourRoomsMemoryEnv",
+    max_episode_steps=500,
+    reward_threshold=1.0,
+    disable_env_checker=True,
+    kwargs={
+        'world_size': 17,
+        'obs_mode': "top_down",
+        'tile_size': 14,
+        'agent_view_size': 7,
+    }
+)
+
+register(
+    id="four_rooms_explore",
+    entry_point="env.minigrid.minigrid_env:FourRoomsMemoryEnv",
+    max_episode_steps=500,
+    reward_threshold=1.0,
+    disable_env_checker=True,
+    kwargs={
+        'world_size': 17,
+        'obs_mode': "top_down",
+        'tile_size': 14,
+        'agent_view_size': 7,
+    }
+)
+
+register(
+    id="four_rooms_bfs",
     entry_point="env.minigrid.minigrid_env:FourRoomsMemoryEnv",
     max_episode_steps=500,
     reward_threshold=1.0,
