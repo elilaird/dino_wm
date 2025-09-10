@@ -11,6 +11,7 @@ import itertools
 import numpy as np
 from tqdm import tqdm
 
+
 import multiprocessing as mp
 
 if mp.get_start_method(allow_none=True) != "spawn":
@@ -25,6 +26,7 @@ from pathlib import Path
 from collections import OrderedDict, defaultdict
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
+from schedulers import CosineAnnealingWarmRestartsDecay
 
 CTX = mp.get_context("spawn")
 
@@ -133,8 +135,6 @@ class Trainer:
             f"global_rank={global_rank} "
             f"is_main={self.accelerator.is_main_process}"
         )
-
-        # log.info(f"local_rank: {self.accelerator.local_process_index}, global_rank: {self.accelerator.process_index}")
 
         log.info(
             f"rank: {self.accelerator.local_process_index}  model_name: {model_name}"
@@ -463,6 +463,7 @@ class Trainer:
         if self.accelerator.is_main_process:
             log.info(f"Scaling learning rates by {lr_scale} for {self.accelerator.num_processes} processes")
             log.info(f"Encoder LR: {self.cfg.training.encoder_lr} -> {self.cfg.training.encoder_lr * lr_scale}")
+
         if self.cfg.has_predictor:
             self.predictor_optimizer = torch.optim.AdamW(
                 self.predictor.parameters(),
@@ -496,6 +497,69 @@ class Trainer:
             )
             if self.accelerator.is_main_process:
                 log.info(f"Decoder LR: {self.cfg.training.decoder_lr} -> {self.cfg.training.decoder_lr * lr_scale}")
+
+        # Initialize learning rate schedulers
+        self.schedulers = {}
+        if self.cfg.training.use_scheduler:
+            T_0 = self.cfg.training.T_0
+            T_mult = self.cfg.training.T_mult
+            eta_min_ratio = self.cfg.training.eta_min_ratio
+            decay_factor = self.cfg.training.decay_factor
+            
+            # Calculate steps per epoch for step-based scheduling
+            steps_per_epoch = len(self.dataloaders["train"])
+            warmup_steps = int(self.cfg.training.warmup_percent * steps_per_epoch)
+            T_0_steps = T_0 * steps_per_epoch  # Convert epochs to steps
+            if self.accelerator.is_main_process:
+                log.info(f"Lr scheduler: {steps_per_epoch} steps per epoch, T_0={T_0_steps} steps, warmup={warmup_steps} steps")
+           
+            
+            # Encoder scheduler
+            self.schedulers['encoder'] = CosineAnnealingWarmRestartsDecay(
+                self.encoder_optimizer,
+                T_0=T_0_steps,
+                T_mult=T_mult,
+                eta_min=self.cfg.training.encoder_lr * lr_scale * eta_min_ratio,
+                decay_factor=decay_factor,
+                warmup_epochs=warmup_steps
+            )
+            
+            if self.cfg.has_predictor:
+                # Predictor scheduler
+                self.schedulers['predictor'] = CosineAnnealingWarmRestartsDecay(
+                    self.predictor_optimizer,
+                    T_0=T_0_steps,
+                    T_mult=T_mult,
+                    eta_min=self.cfg.training.predictor_lr * lr_scale * eta_min_ratio,
+                    decay_factor=decay_factor,
+                    warmup_epochs=warmup_steps
+                )
+
+                # Action encoder scheduler                
+                self.schedulers['action_encoder'] = CosineAnnealingWarmRestartsDecay(
+                    self.action_encoder_optimizer,
+                    T_0=T_0_steps,
+                    T_mult=T_mult,
+                    eta_min=self.cfg.training.action_encoder_lr * lr_scale * eta_min_ratio,
+                    decay_factor=decay_factor,
+                    warmup_epochs=warmup_steps
+                )
+   
+            if self.cfg.has_decoder:
+                # Decoder scheduler
+                self.schedulers['decoder'] = CosineAnnealingWarmRestartsDecay(
+                    self.decoder_optimizer,
+                    T_0=T_0_steps,
+                    T_mult=T_mult,
+                    eta_min=self.cfg.training.decoder_lr * lr_scale * eta_min_ratio,
+                    decay_factor=decay_factor,
+                    warmup_epochs=warmup_steps
+                )
+               
+            
+            if self.accelerator.is_main_process:
+                log.info(f"Initialized step-based cosine LR schedulers: T_0={T_0_steps} steps, T_mult={T_mult}, eta_min_ratio={eta_min_ratio}, decay_factor={decay_factor}, warmup_steps={warmup_steps}")
+                
 
     def run(self):
 
@@ -666,6 +730,11 @@ class Trainer:
         if self.cfg.has_predictor and self.model.train_predictor:
             self.predictor_optimizer.step()
             self.action_encoder_optimizer.step()
+
+        # Step learning rate schedulers per batch if step-based scheduling is enabled
+        if self.cfg.training.use_scheduler:
+            for scheduler in self.schedulers.values():
+                scheduler.step()
 
         loss = self.accelerator.gather_for_metrics(loss).mean()
 
@@ -1037,14 +1106,30 @@ class Trainer:
             epoch_log[key] = to_log
         epoch_log["epoch"] = step
 
+        # Add learning rates to logs
+        if self.cfg.training.use_scheduler:
+            epoch_log["lr_encoder"] = self.encoder_optimizer.param_groups[0]['lr']
+            if self.cfg.has_predictor:
+                epoch_log["lr_predictor"] = self.predictor_optimizer.param_groups[0]['lr']
+                epoch_log["lr_action_encoder"] = self.action_encoder_optimizer.param_groups[0]['lr']
+            if self.cfg.has_decoder:
+                epoch_log["lr_decoder"] = self.decoder_optimizer.param_groups[0]['lr']
+
         # Add epoch time to the log message if available
         epoch_time_msg = ""
         if "epoch_time" in epoch_log:
             epoch_time_msg = f"  Epoch time: {epoch_log['epoch_time']:.2f}s"
 
+        # Add learning rates to log message
+        lr_msg = ""
+        if self.cfg.training.use_scheduler:
+            lr_msg = f"  Encoder LR: {epoch_log.get('lr_encoder', 0):.2e}"
+            if self.cfg.has_predictor:
+                lr_msg += f"  Predictor LR: {epoch_log.get('lr_predictor', 0):.2e}"
+
         log.info(
             f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
-                Validation loss: {epoch_log['val_loss']:.4f}{epoch_time_msg}"
+                Validation loss: {epoch_log['val_loss']:.4f}{epoch_time_msg}{lr_msg}"
         )
 
         if self.accelerator.is_main_process:
