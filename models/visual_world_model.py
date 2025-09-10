@@ -38,7 +38,13 @@ class VWorldModel(nn.Module):
         self.num_proprio_repeat = num_proprio_repeat
         self.proprio_dim = proprio_dim * num_proprio_repeat 
         self.action_dim = action_dim * num_action_repeat 
-        self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
+
+        if hasattr(self.encoder, "module"):
+            self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
+            encoder_patch_size = self.encoder.module.patch_size
+        else:
+            self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
+            encoder_patch_size = self.encoder.patch_size
 
         print(f"num_action_repeat: {self.num_action_repeat}")
         print(f"num_proprio_repeat: {self.num_proprio_repeat}")
@@ -52,16 +58,16 @@ class VWorldModel(nn.Module):
         assert concat_dim == 0 or concat_dim == 1, f"concat_dim {concat_dim} not supported."
         print("Model emb_dim: ", self.emb_dim)
 
-        if "dino" in self.encoder.name:
-            decoder_scale = 16  # from vqvae
-            num_side_patches = image_size // decoder_scale
-            self.encoder_image_size = num_side_patches * encoder.patch_size
-            self.encoder_transform = transforms.Compose(
-                [transforms.Resize(self.encoder_image_size)]
-            )
-        else:
-            # set self.encoder_transform to identity transform
-            self.encoder_transform = lambda x: x
+        # if "dino" in self.encoder.name:
+        decoder_scale = 16  # from vqvae
+        num_side_patches = image_size // decoder_scale
+        self.encoder_image_size = num_side_patches * encoder_patch_size
+        self.encoder_transform = transforms.Compose(
+            [transforms.Resize(self.encoder_image_size)]
+        )
+        # else:
+        #     # set self.encoder_transform to identity transform
+        #     self.encoder_transform = lambda x: x
 
         self.decoder_criterion = nn.MSELoss()
         self.decoder_latent_loss_weight = 0.25

@@ -10,6 +10,7 @@ import threading
 import itertools
 import numpy as np
 from tqdm import tqdm
+import socket
 
 
 import multiprocessing as mp
@@ -21,6 +22,7 @@ if mp.get_start_method(allow_none=True) != "spawn":
 from omegaconf import OmegaConf, open_dict
 from einops import rearrange
 from accelerate import Accelerator
+from accelerate import DistributedDataParallelKwargs
 from torchvision import utils
 from pathlib import Path
 from collections import OrderedDict, defaultdict
@@ -116,9 +118,12 @@ class Trainer:
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
-        self.accelerator = Accelerator(log_with="wandb")
+        if self.cfg.model.train_encoder:
+            ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        else:
+            ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
 
-        import socket
+        self.accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs])
 
         global_rank = self.accelerator.process_index               # global rank
         local_rank  = self.accelerator.local_process_index         # rank within the node
@@ -381,6 +386,7 @@ class Trainer:
             if not self.train_predictor:
                 for param in self.predictor.parameters():
                     param.requires_grad = False
+
             if self.accelerator.is_main_process:
                 self.wandb_run.watch(self.predictor)
 
