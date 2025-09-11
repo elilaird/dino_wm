@@ -3,7 +3,7 @@ defaults:
   - env: memory_maze_3x7
   - encoder: dino 
   - action_encoder: discrete
-  - proprio_encoder: discrete
+  - proprio_encoder: memmaze
   - decoder: vqvae
   - predictor: vit
   - model: base

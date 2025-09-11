@@ -75,29 +75,45 @@ class MiniGridProprioceptiveEmbedding(nn.Module):
         self.world_size = world_size
         self.emb_dim = emb_dim
         self.in_chans = in_chans # dummy to match interface
-
-        assert emb_dim % 4 == 0, f"emb_dim {emb_dim} must be divisible by 4"
         
         # Grid embedding for coordinates
         self.grid_embedding = nn.Embedding(world_size * world_size, emb_dim // 2)
         
-        # Direction embedding (discrete: 0, 1, 2)
-        self.dir_embedding = nn.Embedding(3, emb_dim // 4)
+        # Direction embedding (discrete: 0, 1, 2, 3)
+        self.dir_embedding = nn.Embedding(4, emb_dim // 2)
         
     def forward(self, x):
-        # x: [B, T, 4] where [x, y, x_dir, y_dir]
+        # x: [B, T, 3] where [x, y, dir]
         coords = x[..., :2].long()  # [B, T, 2]
-        dirs = x[..., 2:].long()    # [B, T, 2]
+        dirs = x[..., -1].long()    # [B, T, 1]
         
         # Grid coordinates
         grid_indices = coords[..., 0] * self.world_size + coords[..., 1]
         coord_emb = self.grid_embedding(grid_indices)  # [B, T, emb_dim//2]
         
         # Directions (treat each direction separately)
-        x_dir_emb = self.dir_embedding(dirs[..., 0])  # [B, T, emb_dim//4]
-        y_dir_emb = self.dir_embedding(dirs[..., 1])  # [B, T, emb_dim//4]
+        dir_emb = self.dir_embedding(dirs)  # [B, T, emb_dim//2]
         
-        # Combine
-        dir_emb = torch.cat([x_dir_emb, y_dir_emb], dim=-1)  # [B, T, emb_dim//2]
+        return torch.cat([coord_emb, dir_emb], dim=-1)  # [B, T, emb_dim]
+
+class MemoryMazeProprioceptiveEmbedding(nn.Module):
+    def __init__(self, in_chans, emb_dim=16):
+        super().__init__()
+        self.emb_dim = emb_dim
+        self.in_chans = in_chans
+        
+        self.pos_linear = nn.Linear(2, emb_dim // 2)
+        self.dir_linear = nn.Linear(in_chans - 2, emb_dim // 2)
+
+    def forward(self, x):
+        # x: [B, T, 4] where [x, y, dir_x, dir_y]
+        coords = x[..., :2]  # [B, T, 2]
+        dirs = x[..., 2:]    # [B, T, in_chans - 2]
+        
+        # Grid coordinates
+        coord_emb = self.pos_linear(coords)  # [B, T, emb_dim//2]
+        
+        # Directions (treat each direction separately)
+        dir_emb = self.dir_linear(dirs)  # [B, T, emb_dim//2]
         
         return torch.cat([coord_emb, dir_emb], dim=-1)  # [B, T, emb_dim]

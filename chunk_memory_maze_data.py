@@ -27,12 +27,13 @@ def get_episode_files(input_dir: Path) -> List[Path]:
     return [Path(f) for f in files]
 
 
-def load_episode_data(episode_path: Path) -> Tuple[np.ndarray, np.ndarray]:
+def load_episode_data(episode_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load image and action data from a single episode npz file."""
     with np.load(episode_path) as data:
         images = data['image']  # Shape: (501, 64, 64, 3)
+        proprios = data['proprio']  # Shape: (501, 4)
         actions = data['action']  # Shape: (501, 6)
-    return images, actions
+    return images, proprios, actions
 
 
 def chunk_episodes(
@@ -78,17 +79,19 @@ def chunk_episodes(
         print(f"Processing chunk {chunk_idx}: episodes {episode_idx}-{end_idx-1} ({actual_episodes_in_chunk} episodes)")
         
         # Load first episode to get shapes
-        first_images, first_actions = load_episode_data(chunk_episodes[0])
+        first_images, first_proprios, first_actions = load_episode_data(chunk_episodes[0])
         seq_len, height, width, channels = first_images.shape
         action_dim = first_actions.shape[1] if first_actions.ndim > 1 else 1
+        proprio_dim = first_proprios.shape[1] if first_proprios.ndim > 1 else 1
         
         # Initialize arrays for this chunk
         chunk_images = np.zeros((actual_episodes_in_chunk, seq_len, height, width, channels), dtype=np.uint8)
         chunk_actions = np.zeros((actual_episodes_in_chunk, seq_len, action_dim), dtype=np.float32)
-        
+        chunk_proprios = np.zeros((actual_episodes_in_chunk, seq_len, proprio_dim), dtype=np.float32)
+
         # Load all episodes in this chunk
         for i, episode_file in enumerate(chunk_episodes):
-            images, actions = load_episode_data(episode_file)
+            images, proprios, actions = load_episode_data(episode_file)
             
             # Ensure consistent shapes
             if images.shape != (seq_len, height, width, channels):
@@ -113,19 +116,33 @@ def chunk_episodes(
                     # Truncate
                     actions = actions[:seq_len]
             
+            if proprios.shape != (seq_len, proprio_dim):
+                print(f"Warning: Episode {episode_file.name} has unexpected proprio shape {proprios.shape}")
+                # Pad or truncate as needed
+                if proprios.shape[0] < seq_len:
+                    # Pad with zeros
+                    pad_shape = (seq_len - proprios.shape[0], proprio_dim)
+                    proprios = np.concatenate([proprios, np.zeros(pad_shape, dtype=proprios.dtype)], axis=0)
+                else:
+                    # Truncate
+                    proprios = proprios[:seq_len]
+            
             chunk_images[i] = images
             chunk_actions[i] = actions
+            chunk_proprios[i] = proprios
         
         # Save chunk files
         observations_path = output_dir / f"observations_{chunk_idx:04d}.npy"
         actions_path = output_dir / f"actions_{chunk_idx:04d}.npy"
+        proprios_path = output_dir / f"proprio_{chunk_idx:04d}.npy"
         
         print(f"Saving chunk {chunk_idx}: {observations_path.name}, {actions_path.name}")
         np.save(observations_path, chunk_images)
         np.save(actions_path, chunk_actions)
+        np.save(proprios_path, chunk_proprios)
         
         # Clear memory
-        del chunk_images, chunk_actions
+        del chunk_images, chunk_actions, chunk_proprios
         
         chunk_idx += 1
         episode_idx = end_idx
@@ -137,7 +154,8 @@ def chunk_episodes(
         "n_chunks": n_chunks,
         "max_steps": max_steps,
         "image_shape": [height, width, channels],
-        "action_dim": action_dim
+        "action_dim": action_dim,
+        "proprio_dim": proprio_dim
     }
     
     index_path = output_dir / "index.json"
@@ -151,6 +169,7 @@ def chunk_episodes(
     print(f"  - Max steps per episode: {max_steps}")
     print(f"  - Image shape: {height}x{width}x{channels}")
     print(f"  - Action dimension: {action_dim}")
+    print(f"  - Proprio dimension: {proprio_dim}")
     print(f"\nChunking complete! Output saved to: {output_dir}")
 
 

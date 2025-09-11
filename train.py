@@ -278,6 +278,12 @@ class Trainer:
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
 
+        # temporary fix until we figure out how to save the scheduler wrapped optimizers
+        if self.cfg.training.use_scheduler:
+            for key in self._keys_to_save:
+                if key in ["encoder_optimizer", "predictor_optimizer", "action_encoder_optimizer", "decoder_optimizer"]:
+                    self._keys_to_save.remove(key)
+
         self.init_models()
         self.init_optimizers()
 

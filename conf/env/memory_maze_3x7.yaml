@@ -6,7 +6,7 @@ dataset:
   _target_: "datasets.minigrid_dataset.load_minigrid_slice_train_val"
   n_rollout: null
   normalize_action: ${normalize_action}
-  data_path: ${oc.env:DATASET_DIR}/memory_maze/memory-maze-3x7-chunked
+  data_path: ${oc.env:DATASET_DIR}/memory_maze/memory-maze-3x7-chunked-w-proprio
   split_ratio: 0.9
   full_sequence: False
   transform:
@@ -14,6 +14,7 @@ dataset:
     img_size: ${img_size}
   in_memory: False
   total_episodes: 1000
+  proprio_available: True
 
 decoder_path: null
 num_workers: 16 

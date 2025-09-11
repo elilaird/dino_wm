@@ -8,7 +8,6 @@ import imageio
 import argparse
 from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional, Dict, Any
-
 import numpy as np
 from tqdm import tqdm
 
@@ -18,7 +17,19 @@ from minigrid.minigrid_env import MiniGridEnv
 from minigrid.core.world_object import Wall, Door, Key, Goal, Ball
 from minigrid.core.grid import Grid
 from minigrid.core.mission import MissionSpace
-from utils import aggregate_dct
+
+
+def aggregate_dct(dcts):
+    full_dct = {}
+    for dct in dcts:
+        for key, value in dct.items():
+            if key not in full_dct:
+                full_dct[key] = []
+            full_dct[key].append(value)
+    for key, value in full_dct.items():
+        full_dct[key] = np.stack(value)
+    return full_dct
+
 
 # -------------------------
 # Utility: BFS over free grid
@@ -159,7 +170,8 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         )
         
         # Override action space to only include directional movement actions
-        self.action_space = spaces.Discrete(4)  # 0: up, 1: right, 2: down, 3: left
+        self.action_space = spaces.Discrete(3)  # 0: left, 1: right, 2: forward
+        # possible proprio directions: 0: right, 1: down, 2: left, 3: up
 
     def set_seed(self, seed=None):
         self.seed = seed
@@ -215,33 +227,38 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         else:
             self.grid.set(int(init_state[0]), int(init_state[1]), None)
             self.agent_pos = (np.int64(init_state[0]), np.int64(init_state[1]))
-            self.agent_dir = np.int64(1)
-        self._last_agent_pos = self.agent_pos
+            self.agent_dir = np.int64(0)
 
+    # def step(self, action):
+    #     # First, rotate the agent to face the desired direction
+    #     target_dir = action  # 0=up, 1=right, 2=down, 3=left
+        
+    #     # Calculate how many left turns needed to face target direction
+    #     current_dir = self.agent_dir
+    #     turns_needed = (target_dir - current_dir) % 4
+        
+    #     # Execute the turns
+    #     for _ in range(turns_needed):
+    #         super().step(self.actions.left)
+        
+    #     # set last agent pos to current agent pos
+    #     self._last_agent_pos = self.agent_pos
+        
+    #     # Now move forward in the desired direction
+    #     obs, reward, terminated, truncated, info = super().step(self.actions.forward)
+
+    #     info = {}
+    #     info['state'] = self.agent_pos
+
+    #     if isinstance(self.grid.get(*self.agent_pos), Goal):
+    #         reward = 1.0
+    #         terminated = True
+    #     return obs, reward, terminated, truncated, info
+    
     def step(self, action):
-        # First, rotate the agent to face the desired direction
-        target_dir = action  # 0=up, 1=right, 2=down, 3=left
-        
-        # Calculate how many left turns needed to face target direction
-        current_dir = self.agent_dir
-        turns_needed = (target_dir - current_dir) % 4
-        
-        # Execute the turns
-        for _ in range(turns_needed):
-            super().step(self.actions.left)
-        
-        # set last agent pos to current agent pos
-        self._last_agent_pos = self.agent_pos
-        
-        # Now move forward in the desired direction
-        obs, reward, terminated, truncated, info = super().step(self.actions.forward)
-
+        obs, reward, terminated, truncated, info = super().step(action)
         info = {}
         info['state'] = self.agent_pos
-
-        if isinstance(self.grid.get(*self.agent_pos), Goal):
-            reward = 1.0
-            terminated = True
         return obs, reward, terminated, truncated, info
 
     def step_multiple(self, actions):
@@ -293,10 +310,8 @@ class FourRoomsMemoryEnv(MiniGridEnv):
     
     def _get_proprio(self):
         x, y = int(self.agent_pos[0]), int(self.agent_pos[1])
-        dx, dy = int(self._last_agent_pos[0]), int(self._last_agent_pos[1])
-        dx = x - dx
-        dy = y - dy
-        return np.array([x, y, dx + 1, dy + 1])
+        dir = int(self.agent_dir)
+        return np.array([x, y, dir])
 
     def set_init_state(self, init_state):
         self.init_state = init_state
@@ -648,7 +663,7 @@ def run_explore_policy_four_rooms(env, max_T, step_and_record, act_random):
         visited_positions = set()
         
         # Define exploration pattern: try to cover the room with different movement patterns
-        exploration_actions = [0, 1, 2, 3] * 5  # repeat each direction 5 times
+        exploration_actions = list(range(env.action_space.n)) * 5  # repeat each direction 5 times
         random.shuffle(exploration_actions)
         
         for action in exploration_actions:
@@ -708,7 +723,7 @@ def run_explore_policy_four_rooms(env, max_T, step_and_record, act_random):
 def run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random):
     """BFS-based optimal navigation policy for FourRoomsMemoryEnv"""
     total_steps = 0
-    goal_pos = env.goal_pos
+    goal_pos = env.sample_random_pos()
     goal_reached = False
     current_target = goal_pos
     
@@ -720,15 +735,7 @@ def run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random):
             if not goal_reached and current_target == goal_pos:
                 goal_reached = True
             
-            # Select a new random target point on the grid
-            while True:
-                # Try to find a valid random position
-                rx = np.random.randint(1, env.width - 1)
-                ry = np.random.randint(1, env.height - 1)
-                obj = env.grid.get(rx, ry)
-                if obj is None:  # Empty cell
-                    current_target = (rx, ry)
-                    break
+            current_target = env.sample_random_pos()
         
         # Find shortest path to current target
         path = bfs_shortest_path(env.grid, current_pos, current_target)
