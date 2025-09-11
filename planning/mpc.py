@@ -26,6 +26,7 @@ class MPCPlanner(BasePlanner):
         wandb_run,
         logging_prefix="mpc",
         log_filename="logs.json",
+        is_discrete=False,
         **kwargs,
     ):
         super().__init__(
@@ -41,6 +42,7 @@ class MPCPlanner(BasePlanner):
         self.max_iter = np.inf if max_iter is None else max_iter
         self.n_taken_actions = n_taken_actions
         self.logging_prefix = logging_prefix
+        self.is_discrete = is_discrete
         sub_planner["_target_"] = sub_planner["target"]
         self.sub_planner = hydra.utils.instantiate(
             sub_planner,
@@ -51,6 +53,7 @@ class MPCPlanner(BasePlanner):
             evaluator=self.evaluator,  # evaluator is shared for mpc and sub_planner
             wandb_run=self.wandb_run,
             log_filename=None,
+            is_discrete=self.is_discrete,
         )
         self.is_success = None
         self.action_len = None  # keep track of the step each traj reaches success
@@ -64,7 +67,10 @@ class MPCPlanner(BasePlanner):
         masked_actions = rearrange(
             actions[mask], "... (f d) -> ... f d", f=self.evaluator.frameskip
         )
-        masked_actions = self.preprocessor.normalize_actions(masked_actions.cpu())
+        masked_actions = masked_actions.cpu()
+        if not self.is_discrete:
+            masked_actions = self.preprocessor.normalize_actions(masked_actions)
+
         masked_actions = rearrange(masked_actions, "... f d -> ... (f d)")
         actions[mask] = masked_actions.to(device)
         return actions
@@ -89,6 +95,7 @@ class MPCPlanner(BasePlanner):
                 obs_g=obs_g,
                 actions=memo_actions,
             )  # (b, t, act_dim)
+
             taken_actions = actions.detach()[:, : self.n_taken_actions]
             self._apply_success_mask(taken_actions)
             memo_actions = actions.detach()[:, self.n_taken_actions :]

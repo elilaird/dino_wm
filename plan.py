@@ -5,6 +5,7 @@ import hydra
 import random
 import torch
 import pickle
+from models.encoder.discrete_action_encoder import DiscreteActionEncoder
 import wandb
 import logging
 import warnings
@@ -103,6 +104,11 @@ class PlanWorkspace:
         self.action_dim = self.dset.action_dim * self.frameskip
         self.debug_dset_init = cfg_dict["debug_dset_init"]
 
+        self.is_discrete = isinstance(self.wm.action_encoder, DiscreteActionEncoder)
+        if self.is_discrete:
+            self.action_dim = self.wm.action_encoder.num_actions
+            print(f"PlanWorkspace: Using discrete actions with {self.action_dim} possible values")
+
         objective_fn = hydra.utils.call(
             cfg_dict["objective"],
         )
@@ -133,6 +139,7 @@ class PlanWorkspace:
             seed=self.eval_seed,
             preprocessor=self.data_preprocessor,
             n_plot_samples=self.cfg_dict["n_plot_samples"],
+            is_discrete=self.is_discrete,
         )
 
         if self.wandb_run is None or isinstance(
@@ -151,6 +158,7 @@ class PlanWorkspace:
             evaluator=self.evaluator,
             wandb_run=self.wandb_run,
             log_filename=self.log_filename,
+            is_discrete=self.is_discrete,
         )
 
         # optional: assume planning horizon equals to goal horizon

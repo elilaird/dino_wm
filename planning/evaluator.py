@@ -27,6 +27,7 @@ class PlanEvaluator:  # evaluator for planning
         seed,
         preprocessor,
         n_plot_samples,
+        is_discrete=False,
     ):
         self.obs_0 = obs_0
         self.obs_g = obs_g
@@ -39,7 +40,7 @@ class PlanEvaluator:  # evaluator for planning
         self.preprocessor = preprocessor
         self.n_plot_samples = n_plot_samples
         self.device = next(wm.parameters()).device
-
+        self.is_discrete = is_discrete
         self.plot_full = False  # plot all frames or frames after frameskip
 
     def assign_init_cond(self, obs_0, state_0):
@@ -111,10 +112,14 @@ class PlanEvaluator:  # evaluator for planning
         i_final_z_obs = self._get_trajdict_last(i_z_obses, action_len + 1)
 
         # rollout in env
-        exec_actions = rearrange(
-            actions.cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
-        )
-        exec_actions = self.preprocessor.denormalize_actions(exec_actions).numpy()
+        if not self.is_discrete:
+            exec_actions = rearrange(
+                actions.cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
+            )
+            exec_actions = self.preprocessor.denormalize_actions(exec_actions).numpy()
+        else:
+            exec_actions = actions.cpu().numpy()
+            
         e_obses, e_states = self.env.rollout(self.seed, self.state_0, exec_actions)
         e_visuals = e_obses["visual"]
         e_final_obs = self._get_trajdict_last(e_obses, action_len * self.frameskip + 1)

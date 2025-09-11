@@ -9,6 +9,7 @@ import argparse
 from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
+import torch
 from tqdm import tqdm
 
 import gymnasium as gym
@@ -273,6 +274,9 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         return obses, infos
 
     def rollout(self, seed, init_state, actions):
+        if isinstance(actions, torch.Tensor):
+            actions = actions.numpy()
+
         obs, state = self.prepare(seed, init_state)
         obses, infos = self.step_multiple(actions)
         for k in obses.keys():
