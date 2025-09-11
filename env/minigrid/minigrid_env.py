@@ -230,31 +230,6 @@ class FourRoomsMemoryEnv(MiniGridEnv):
             self.agent_pos = (np.int64(init_state[0]), np.int64(init_state[1]))
             self.agent_dir = np.int64(0)
 
-    # def step(self, action):
-    #     # First, rotate the agent to face the desired direction
-    #     target_dir = action  # 0=up, 1=right, 2=down, 3=left
-        
-    #     # Calculate how many left turns needed to face target direction
-    #     current_dir = self.agent_dir
-    #     turns_needed = (target_dir - current_dir) % 4
-        
-    #     # Execute the turns
-    #     for _ in range(turns_needed):
-    #         super().step(self.actions.left)
-        
-    #     # set last agent pos to current agent pos
-    #     self._last_agent_pos = self.agent_pos
-        
-    #     # Now move forward in the desired direction
-    #     obs, reward, terminated, truncated, info = super().step(self.actions.forward)
-
-    #     info = {}
-    #     info['state'] = self.agent_pos
-
-    #     if isinstance(self.grid.get(*self.agent_pos), Goal):
-    #         reward = 1.0
-    #         terminated = True
-    #     return obs, reward, terminated, truncated, info
     
     def step(self, action):
         obs, reward, terminated, truncated, info = super().step(action)
@@ -322,11 +297,12 @@ class FourRoomsMemoryEnv(MiniGridEnv):
 
     def prepare(self, seed, init_state):
         self.set_init_state(init_state)
-        obs, state = self.reset(seed)
+        obs, state = self.reset(seed) # calls _gen_grid under the hood
         return obs, state
 
 
     def reset(self, seed=None, options=None):
+        self.set_seed(seed)
         obs, _ = super().reset(seed=self.seed if seed is None else seed)
         return obs, self.agent_pos
 
