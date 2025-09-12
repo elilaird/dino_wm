@@ -80,17 +80,6 @@ echo $CONDA_PREFIX
 
 echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TYPE=${TYPE} TIME=${TIME} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
 
-# If InfiniBand:
-# export NCCL_SOCKET_IFNAME=ib0
-# export GLOO_SOCKET_IFNAME=ib0
-# Or, if Ethernet:
-# export NCCL_SOCKET_IFNAME=eth0
-# export GLOO_SOCKET_IFNAME=eth0
-
-# export NCCL_ASYNC_ERROR_HANDLING=1
-# export TORCH_NCCL_BLOCKING_WAIT=1
-# export NCCL_DEBUG=INFO
-
 export DATA_DIR=${DATA_DIR}
 export LD_LIBRARY_PATH=/users/ejlaird/.mujoco/mujoco210/bin:$LD_LIBRARY_PATH
 srun --ntasks=${NODES} --distribution=block  bash -c \"${COMMAND}\"

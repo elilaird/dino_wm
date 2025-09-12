@@ -310,9 +310,41 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         self.set_seed(seed)
         ax, ay = self.sample_random_pos()
 
-        # sample random goal state for goal
         gx, gy = self.sample_random_pos()
         return (ax, ay), (gx, gy)
+
+    def _move_steps_from_position(self, start_x, start_y, steps):
+        """
+        Move exactly 'steps' in a random direction from start position.
+        If we hit an obstruction, we stop there.
+        """
+        directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]  # right, left, down, up
+        direction = directions[np.random.randint(0, len(directions))]
+        dx, dy = direction
+        
+        x, y = start_x, start_y
+        steps_taken = 0
+        
+        while steps_taken < steps:
+            nx, ny = x + dx, y + dy
+            
+            # Check bounds
+            if nx < 0 or ny < 0 or nx >= self.width or ny >= self.height:
+                break
+                
+            # Check for obstructions
+            obj = self.grid.get(nx, ny)
+            if obj is not None:
+                if isinstance(obj, Wall):
+                    break
+                if isinstance(obj, Door) and not obj.is_open:
+                    break
+            
+            # Move to next position
+            x, y = nx, ny
+            steps_taken += 1
+        
+        return (x, y)
 
     def update_env(self, env_info):
         pass 
