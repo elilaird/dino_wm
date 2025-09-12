@@ -77,3 +77,15 @@ register(
         'agent_view_size': 7,
     }
 )
+
+register(
+    id="memory_maze_3x7",
+    entry_point="env.memmaze.memmaze_wrapper:MemMazeWrapper",
+    max_episode_steps=1000,
+    reward_threshold=1.0,
+    disable_env_checker=True,
+    kwargs={
+        'global_observables': True,
+        'top_camera': False,
+    }
+)

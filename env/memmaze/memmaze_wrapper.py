@@ -3,6 +3,7 @@ from memory_maze.gymnasium_wrapper import GymnasiumWrapper
 import numpy as np
 
 from absl import logging as absl_logging
+import torch
 absl_logging.set_verbosity(absl_logging.ERROR)
 
 def aggregate_dct(dcts):
@@ -115,6 +116,8 @@ class MemMazeWrapper(GymnasiumWrapper):
         pass
 
     def step(self, action):
+        if isinstance(action, np.ndarray) or isinstance(action, torch.Tensor):
+            action = int(action.item())
         obs, reward, terminated, truncated, info = super().step(action)
         info = {}
         info['state'] = obs["agent_pos"]
@@ -122,7 +125,7 @@ class MemMazeWrapper(GymnasiumWrapper):
 
         obs = {
             "visual": obs["image"],
-            "proprio": proprio
+            "proprio": proprio.astype(np.float32)
         }
         return obs, reward, terminated, truncated, info
     
@@ -131,7 +134,7 @@ class MemMazeWrapper(GymnasiumWrapper):
         info['state'] = obs["agent_pos"]
         obs = {
             "visual": obs["image"],
-            "proprio": np.concatenate([obs["agent_pos"], obs["agent_dir"]])
+            "proprio": np.concatenate([obs["agent_pos"], obs["agent_dir"]]).astype(np.float32)
         }
         return obs, info
 
