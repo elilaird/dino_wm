@@ -1,0 +1,25 @@
+# Memory Evaluation Suite Configuration
+# This configuration runs a comprehensive evaluation of world model memory capabilities
+
+defaults:
+  - _self_
+
+# Model configuration
+ckpt_base_path: ""  # Base path to model checkpoints (must be set)
+model_name: ""      # Name of the trained model (must be set)
+model_epoch: final  # Epoch to load (or "final" for latest)
+
+# Memory test configuration
+memory_test_modes: [object_recall, color_memory, sequential_memory, navigation]
+n_memory_objects_list: [3, 4, 5]
+goal_H_list: [5, 10, 15]
+
+# Evaluation configuration
+n_evals: 10         # Number of evaluation episodes per configuration
+seed: 42
+
+# Logging configuration
+wandb_logging: true
+
+# Saved folder (will be set automatically)
+saved_folder: ""

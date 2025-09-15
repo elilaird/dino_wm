@@ -15,7 +15,7 @@ from tqdm import tqdm
 import gymnasium as gym
 from gymnasium import spaces
 from minigrid.minigrid_env import MiniGridEnv
-from minigrid.core.world_object import Wall, Door, Key, Goal, Ball
+from minigrid.core.world_object import Wall, Door, Key, Goal, Ball, Box
 from minigrid.core.grid import Grid
 from minigrid.core.mission import MissionSpace
 
@@ -135,8 +135,16 @@ KEY_COLORS = DOOR_COLORS
 # -------------------------
 class FourRoomsMemoryEnv(MiniGridEnv):
     """
-    Classic Four Rooms layout. The 'memory' aspect comes from long navigation & partial observability (agent view).
-    Success is reaching the Goal.
+    Classic Four Rooms layout with memory testing capabilities. The 'memory' aspect comes from:
+    1. Long navigation & partial observability (agent view)
+    2. Object placement and recall tasks
+    3. Spatial memory challenges
+    
+    Memory test modes:
+    - 'navigation': Basic navigation to goal
+    - 'object_recall': Remember object locations after exploration
+    - 'color_memory': Remember object colors and locations
+    - 'sequential_memory': Remember sequence of object placements
     """
 
     def __init__(
@@ -149,16 +157,33 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         obs_mode: str = "top_down", # "top_down" or "pov"
         tile_size: int = 14, 
         seed: Optional[int] = None,
-        
+        memory_test_mode: str = "navigation",  # "navigation", "object_recall", "color_memory", "sequential_memory"
+        n_memory_objects: int = 3,  # Number of objects to place for memory tests
+        memory_object_types: List[str] = None,  # Types of objects to place
     ):
         assert world_size % 2 == 1 and world_size >= 7, f"Size must be an odd number >= 7, got {world_size}"
         self.obs_mode = obs_mode
         self.world_size = world_size
+        self.memory_test_mode = memory_test_mode
+        self.n_memory_objects = n_memory_objects
+        self.memory_object_types = memory_object_types or ["ball", "box", "key"]
         self.set_seed(seed)
         self.init_state = None
-        mission_space = MissionSpace(
-            mission_func=lambda: "Reach the green goal"
-        )
+        
+        # Memory test state
+        self.memory_objects = []  # List of (object, position, color) tuples
+        self.memory_questions = []  # Questions about object locations/colors
+        self.memory_phase = "exploration"  # "exploration", "question", "navigation"
+        self.current_question_idx = 0
+        
+        # Define mission based on memory test mode
+        mission_funcs = {
+            "navigation": lambda: "Reach the green goal",
+            "object_recall": lambda: "Remember object locations and answer questions",
+            "color_memory": lambda: "Remember object colors and locations",
+            "sequential_memory": lambda: "Remember the sequence of object placements"
+        }
+        mission_space = MissionSpace(mission_func=mission_funcs.get(memory_test_mode, mission_funcs["navigation"]))
         super().__init__(
             mission_space=mission_space,
             width=world_size,
@@ -205,10 +230,15 @@ class FourRoomsMemoryEnv(MiniGridEnv):
             else:
                 self.grid.set(x, pos, None)
 
-        # # goal in a random quadrant
-        # gx, gy = self.sample_random_pos()
-        # self.put_obj(Goal(), gx, gy)
-        # self.goal_pos = (gx, gy)
+        # Place memory objects based on test mode
+        if self.memory_test_mode != "navigation":
+            self._place_memory_objects()
+        
+        # Place goal for navigation tasks
+        if self.memory_test_mode == "navigation":
+            gx, gy = self.sample_random_pos()
+            self.put_obj(Goal(), gx, gy)
+            self.goal_pos = (gx, gy)
 
         # agent spawn
         self.place_agent(init_state=self.init_state)  
@@ -221,6 +251,103 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         gx = np.random.randint(1, mid_w - 1) + (quadrant % 2) * mid_w 
         gy = np.random.randint(1, mid_h - 1) + (quadrant // 2) * mid_h
         return (np.int64(gx), np.int64(gy))
+
+    def _place_memory_objects(self):
+        """Place memory objects in different rooms for testing"""
+        self.memory_objects = []
+        colors = ["red", "green", "blue", "yellow", "purple"]
+        
+        # Ensure objects are placed in different rooms
+        room_positions = []
+        for room in range(4):
+            room_positions.append(self._get_room_positions(room))
+        
+        # Place objects in different rooms
+        for i in range(min(self.n_memory_objects, 4)):
+            room_idx = i % 4
+            available_positions = room_positions[room_idx]
+            if available_positions:
+                pos = available_positions[np.random.randint(0, len(available_positions))]
+                obj_type = self.memory_object_types[i % len(self.memory_object_types)]
+                color = colors[i % len(colors)]
+                
+                # Create object based on type
+                if obj_type == "ball":
+                    obj = Ball(color)
+                elif obj_type == "box":
+                    obj = Box(color)
+                elif obj_type == "key":
+                    obj = Key(color)
+                else:
+                    obj = Ball(color)  # Default
+                
+                self.put_obj(obj, pos[0], pos[1])
+                self.memory_objects.append((obj, pos, color, obj_type))
+        
+        # Generate memory questions
+        self._generate_memory_questions()
+
+    def _get_room_positions(self, room_idx):
+        """Get available positions in a specific room"""
+        mid_w = self.width // 2
+        mid_h = self.height // 2
+        positions = []
+        
+        # Define room boundaries
+        if room_idx == 0:  # top-left
+            x_range = (1, mid_w - 1)
+            y_range = (1, mid_h - 1)
+        elif room_idx == 1:  # top-right
+            x_range = (mid_w + 1, self.width - 2)
+            y_range = (1, mid_h - 1)
+        elif room_idx == 2:  # bottom-left
+            x_range = (1, mid_w - 1)
+            y_range = (mid_h + 1, self.height - 2)
+        else:  # bottom-right
+            x_range = (mid_w + 1, self.width - 2)
+            y_range = (mid_h + 1, self.height - 2)
+        
+        # Find empty positions in the room
+        for x in range(x_range[0], x_range[1] + 1):
+            for y in range(y_range[0], y_range[1] + 1):
+                if self.grid.get(x, y) is None:
+                    positions.append((x, y))
+        
+        return positions
+
+    def _generate_memory_questions(self):
+        """Generate questions about the placed memory objects"""
+        self.memory_questions = []
+        
+        if self.memory_test_mode == "object_recall":
+            # Questions about object locations
+            for i, (obj, pos, color, obj_type) in enumerate(self.memory_objects):
+                self.memory_questions.append({
+                    "type": "location",
+                    "question": f"Where is the {color} {obj_type}?",
+                    "correct_answer": pos,
+                    "object_idx": i
+                })
+        
+        elif self.memory_test_mode == "color_memory":
+            # Questions about object colors
+            for i, (obj, pos, color, obj_type) in enumerate(self.memory_objects):
+                self.memory_questions.append({
+                    "type": "color",
+                    "question": f"What color is the {obj_type} at position {pos}?",
+                    "correct_answer": color,
+                    "object_idx": i
+                })
+        
+        elif self.memory_test_mode == "sequential_memory":
+            # Questions about placement sequence
+            for i, (obj, pos, color, obj_type) in enumerate(self.memory_objects):
+                self.memory_questions.append({
+                    "type": "sequence",
+                    "question": f"What was the {i+1}th object placed?",
+                    "correct_answer": (obj_type, color, pos),
+                    "object_idx": i
+                })
 
     def place_agent(self, init_state=None):
         if init_state is None:
@@ -235,7 +362,72 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         obs, reward, terminated, truncated, info = super().step(action)
         info = {}
         info['state'] = self.agent_pos
+        info['memory_phase'] = self.memory_phase
+        
+        # Handle memory testing phases
+        if self.memory_test_mode != "navigation":
+            info.update(self._handle_memory_phase(action))
+        
         return obs, reward, terminated, truncated, info
+
+    def _handle_memory_phase(self, action):
+        """Handle different phases of memory testing"""
+        info = {}
+        
+        if self.memory_phase == "exploration":
+            # During exploration, track which objects the agent has seen
+            info['visible_objects'] = self._get_visible_objects()
+            info['exploration_progress'] = len(self.memory_objects) - len([obj for obj in self.memory_objects if obj not in info['visible_objects']])
+            
+            # Check if exploration phase should end (all objects seen or max steps reached)
+            if len(info['visible_objects']) >= len(self.memory_objects) or self.step_count >= self.max_steps // 2:
+                self.memory_phase = "question"
+                info['phase_transition'] = "exploration_to_question"
+        
+        elif self.memory_phase == "question":
+            # During question phase, evaluate memory responses
+            if self.current_question_idx < len(self.memory_questions):
+                question = self.memory_questions[self.current_question_idx]
+                info['current_question'] = question
+                info['question_idx'] = self.current_question_idx
+                
+                # For now, we'll evaluate memory in the eval_state method
+                # In a real implementation, you might want to handle answers here
+                
+                if self.current_question_idx >= len(self.memory_questions) - 1:
+                    self.memory_phase = "navigation"
+                    info['phase_transition'] = "question_to_navigation"
+        
+        elif self.memory_phase == "navigation":
+            # During navigation phase, test if agent can navigate to remembered objects
+            info['navigation_target'] = self._get_navigation_target()
+        
+        return info
+
+    def _get_visible_objects(self):
+        """Get objects currently visible to the agent"""
+        visible = []
+        for obj, pos, color, obj_type in self.memory_objects:
+            # Check if object is in agent's field of view
+            if self._is_object_visible(pos):
+                visible.append((obj, pos, color, obj_type))
+        return visible
+
+    def _is_object_visible(self, pos):
+        """Check if an object at given position is visible to the agent"""
+        # Simple visibility check - in a more sophisticated implementation,
+        # you might want to check line of sight, distance, etc.
+        agent_pos = self.agent_pos
+        distance = abs(pos[0] - agent_pos[0]) + abs(pos[1] - agent_pos[1])
+        return distance <= self.agent_view_size
+
+    def _get_navigation_target(self):
+        """Get the current navigation target for memory testing"""
+        if self.memory_questions and self.current_question_idx < len(self.memory_questions):
+            question = self.memory_questions[self.current_question_idx]
+            if question['type'] == 'location':
+                return question['correct_answer']
+        return None
 
     def step_multiple(self, actions):
         obses = []
@@ -354,9 +546,57 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         cx, cy = int(cur_state[0]), int(cur_state[1])
         success = (gx == cx) and (gy == cy)
         state_dist = abs(gx - cx) + abs(gy - cy)
-        return {
+        
+        result = {
             'success': success,
             'state_dist': state_dist,
+        }
+        
+        # Add memory-specific evaluation
+        if self.memory_test_mode != "navigation":
+            result.update(self._eval_memory_performance())
+        
+        return result
+
+    def _eval_memory_performance(self):
+        """Evaluate memory performance based on current test mode"""
+        memory_metrics = {}
+        
+        if self.memory_phase == "question":
+            # Evaluate memory recall accuracy
+            if self.current_question_idx < len(self.memory_questions):
+                question = self.memory_questions[self.current_question_idx]
+                memory_metrics['current_question_type'] = question['type']
+                memory_metrics['question_idx'] = self.current_question_idx
+                memory_metrics['total_questions'] = len(self.memory_questions)
+        
+        # Calculate exploration efficiency
+        visible_objects = self._get_visible_objects()
+        memory_metrics['objects_discovered'] = len(visible_objects)
+        memory_metrics['total_objects'] = len(self.memory_objects)
+        memory_metrics['exploration_efficiency'] = len(visible_objects) / max(len(self.memory_objects), 1)
+        
+        # Calculate memory retention (how many objects agent can still "see" after exploration)
+        memory_metrics['memory_retention'] = self._calculate_memory_retention()
+        
+        return memory_metrics
+
+    def _calculate_memory_retention(self):
+        """Calculate how well the agent retains memory of objects"""
+        # This is a simplified metric - in practice, you'd want to test actual recall
+        # For now, we'll use the number of objects the agent has seen as a proxy
+        visible_objects = self._get_visible_objects()
+        return len(visible_objects) / max(len(self.memory_objects), 1)
+
+    def get_memory_test_info(self):
+        """Get comprehensive information about the current memory test"""
+        return {
+            'test_mode': self.memory_test_mode,
+            'memory_phase': self.memory_phase,
+            'memory_objects': [(pos, color, obj_type) for _, pos, color, obj_type in self.memory_objects],
+            'memory_questions': self.memory_questions,
+            'current_question_idx': self.current_question_idx,
+            'visible_objects': self._get_visible_objects(),
         }
 
 
@@ -636,6 +876,18 @@ class Trajectory:
     observations: np.ndarray  # [T, H, W, 3]
     actions: np.ndarray  # [T]
     proprio: np.ndarray  # [T, 4]
+
+
+@dataclass
+class MemoryTrajectory:
+    observations: np.ndarray  # [T, H, W, 3]
+    actions: np.ndarray  # [T]
+    proprio: np.ndarray  # [T, 3]
+    memory_objects: List[Tuple]  # List of (pos, color, obj_type) tuples
+    memory_questions: List[Dict]  # List of memory questions
+    memory_phases: List[str]  # Memory phase at each timestep
+    exploration_metrics: Dict  # Exploration efficiency metrics
+    recall_metrics: Dict  # Memory recall metrics
 
 
 def get_room_quadrant(pos, width, height):
@@ -960,6 +1212,101 @@ def run_random_policy(env, max_T, step_and_record, act_random):
         step_and_record(act_random())
 
 
+def run_memory_episode(
+    env: MiniGridEnv,
+    max_steps: Optional[int] = None,
+    goal_img: Optional[np.ndarray] = None,
+    seed: Optional[int] = None,
+    policy: str = "random",
+) -> MemoryTrajectory:
+    """Run a memory testing episode and return comprehensive memory trajectory"""
+    obs_list, act_list, proprio_list, phase_list = [], [], [], []
+    rng_seed = seed
+
+    obs, _ = env.reset(seed=seed)
+    obs_list.append(obs['visual'])
+    proprio_list.append(obs['proprio'])
+    act_list.append(0)
+    phase_list.append(env.memory_phase if hasattr(env, 'memory_phase') else 'unknown')
+    max_T = max_steps or env.max_steps
+
+    def step_and_record(action):
+        """Helper to step environment and record trajectory data"""
+        obs, _, _, _, info = env.step(action)
+        obs_list.append(obs['visual'])
+        proprio_list.append(obs['proprio'])
+        act_list.append(action)
+        phase_list.append(info.get('memory_phase', 'unknown'))
+
+    def act_random():
+        """Random action fallback"""
+        return env.action_space.sample()
+
+    # Run episode with appropriate policy
+    if policy == "explore" and isinstance(env, FourRoomsMemoryEnv):
+        run_explore_policy_four_rooms(env, max_T, step_and_record, act_random)
+    elif policy == "bfs":
+        if isinstance(env, FourRoomsMemoryEnv):
+            run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random)
+        elif isinstance(env, TenRoomsMemoryEnv):
+            run_bfs_policy_ten_rooms(env, max_T, step_and_record, act_random)
+        elif isinstance(env, MultiDoorsKeysEnv):
+            run_bfs_policy_multi_doors_keys(env, max_T, step_and_record, act_random)
+        else:
+            run_random_policy(env, max_T, step_and_record, act_random)
+    else:
+        run_random_policy(env, max_T, step_and_record, act_random)
+    
+    # Cap the length of the trajectory to max_T
+    obs_list = obs_list[:max_T]
+    act_list = act_list[:max_T]
+    proprio_list = proprio_list[:max_T]
+    phase_list = phase_list[:max_T]
+
+    obs_list = np.stack(obs_list, axis=0) # [max_T, H, W, 3]
+    act_list = np.array(act_list)
+    proprio_list = np.stack(proprio_list, axis=0) # [max_T, 3]
+
+    # Extract memory information
+    memory_objects = []
+    memory_questions = []
+    if hasattr(env, 'memory_objects'):
+        memory_objects = [(pos, color, obj_type) for _, pos, color, obj_type in env.memory_objects]
+    if hasattr(env, 'memory_questions'):
+        memory_questions = env.memory_questions
+
+    # Calculate exploration metrics
+    exploration_metrics = {}
+    if hasattr(env, 'memory_objects'):
+        visible_objects = env._get_visible_objects() if hasattr(env, '_get_visible_objects') else []
+        exploration_metrics = {
+            'efficiency': len(visible_objects) / max(len(env.memory_objects), 1),
+            'retention': env._calculate_memory_retention() if hasattr(env, '_calculate_memory_retention') else 0.0,
+            'objects_discovered': len(visible_objects),
+            'total_objects': len(env.memory_objects)
+        }
+
+    # Calculate recall metrics
+    recall_metrics = {
+        'accuracy': 0.0,  # Would need actual recall testing
+        'questions_answered': 0,  # Would need actual question answering
+        'navigation_efficiency': 0.0,  # Would need navigation to remembered objects
+        'phase_transition_success': 1.0 if 'question' in phase_list else 0.0
+    }
+
+    traj = MemoryTrajectory(
+        observations=obs_list,
+        actions=act_list,
+        proprio=proprio_list,
+        memory_objects=memory_objects,
+        memory_questions=memory_questions,
+        memory_phases=phase_list,
+        exploration_metrics=exploration_metrics,
+        recall_metrics=recall_metrics,
+    )
+    return traj
+
+
 def run_episode(
     env: MiniGridEnv,
     max_steps: Optional[int] = None,
@@ -1054,8 +1401,64 @@ def save_trajectories_npy(trajectories: List[Trajectory], out_dir: str, chunk_id
     return obs_path, act_path, proprio_path
 
 
+def save_memory_trajectories_npy(trajectories: List[MemoryTrajectory], out_dir: str, chunk_idx: int):
+    """Save a single chunk of memory trajectories to separate NPY files."""
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+    
+    # Stack trajectories into single arrays
+    observations = np.stack([t.observations for t in trajectories])  # (N, T, H, W, 3)
+    actions = np.stack([t.actions for t in trajectories])           # (N, T)
+    proprio = np.stack([t.proprio for t in trajectories])           # (N, T, 3)
+    
+    # Save memory-specific data
+    memory_objects = [t.memory_objects for t in trajectories]
+    memory_questions = [t.memory_questions for t in trajectories]
+    memory_phases = [t.memory_phases for t in trajectories]
+    exploration_metrics = [t.exploration_metrics for t in trajectories]
+    recall_metrics = [t.recall_metrics for t in trajectories]
+    
+    # Save as separate NPY files
+    obs_path = os.path.join(out_dir, f"observations_{chunk_idx:04d}.npy")
+    act_path = os.path.join(out_dir, f"actions_{chunk_idx:04d}.npy")
+    proprio_path = os.path.join(out_dir, f"proprio_{chunk_idx:04d}.npy")
+    memory_objects_path = os.path.join(out_dir, f"memory_objects_{chunk_idx:04d}.npy")
+    memory_questions_path = os.path.join(out_dir, f"memory_questions_{chunk_idx:04d}.npy")
+    memory_phases_path = os.path.join(out_dir, f"memory_phases_{chunk_idx:04d}.npy")
+    exploration_metrics_path = os.path.join(out_dir, f"exploration_metrics_{chunk_idx:04d}.npy")
+    recall_metrics_path = os.path.join(out_dir, f"recall_metrics_{chunk_idx:04d}.npy")
+    
+    np.save(obs_path, observations)
+    np.save(act_path, actions)
+    np.save(proprio_path, proprio)
+    np.save(memory_objects_path, memory_objects, allow_pickle=True)
+    np.save(memory_questions_path, memory_questions, allow_pickle=True)
+    np.save(memory_phases_path, memory_phases, allow_pickle=True)
+    np.save(exploration_metrics_path, exploration_metrics, allow_pickle=True)
+    np.save(recall_metrics_path, recall_metrics, allow_pickle=True)
+    
+    return (obs_path, act_path, proprio_path, memory_objects_path, 
+            memory_questions_path, memory_phases_path, exploration_metrics_path, recall_metrics_path)
 
 
+
+
+
+# -------------------------
+# Memory Evaluation Metrics
+# -------------------------
+@dataclass
+class MemoryEvalStats:
+    n_episodes: int
+    test_mode: str
+    exploration_efficiency: float  # How efficiently agent explores and finds objects
+    memory_retention: float  # How well agent retains memory of objects
+    recall_accuracy: float  # Accuracy of memory recall tasks
+    navigation_efficiency: float  # How efficiently agent navigates to remembered objects
+    avg_objects_discovered: float  # Average number of objects discovered
+    avg_questions_answered: float  # Average number of questions answered correctly
+    phase_transition_success: float  # Success rate of phase transitions
+    notes: str = ""
 
 # -------------------------
 # Evaluation
@@ -1068,6 +1471,53 @@ class EvalStats:
     avg_length: float
     horizon_75th: float  # 75th percentile of episode length
     notes: str = ""
+
+
+def evaluate_memory_env(
+    env_ctor, n_episodes: int = 100, max_steps: int = 100, seed: Optional[int] = None, policy: str = "random"
+) -> MemoryEvalStats:
+    """Evaluate memory environment with comprehensive memory metrics"""
+    exploration_efficiencies = []
+    memory_retentions = []
+    recall_accuracies = []
+    navigation_efficiencies = []
+    objects_discovered = []
+    questions_answered = []
+    phase_transition_successes = []
+    
+    for _ in tqdm(range(n_episodes), desc=f"Memory Eval {env_ctor.__name__}"):
+        env = env_ctor()
+        traj = run_memory_episode(env, max_steps=max_steps, seed=seed, policy=policy)
+        
+        # Extract memory metrics from trajectory
+        if hasattr(traj, 'exploration_metrics'):
+            exploration_efficiencies.append(traj.exploration_metrics.get('efficiency', 0.0))
+            memory_retentions.append(traj.exploration_metrics.get('retention', 0.0))
+            objects_discovered.append(traj.exploration_metrics.get('objects_discovered', 0))
+        
+        if hasattr(traj, 'recall_metrics'):
+            recall_accuracies.append(traj.recall_metrics.get('accuracy', 0.0))
+            questions_answered.append(traj.recall_metrics.get('questions_answered', 0))
+            navigation_efficiencies.append(traj.recall_metrics.get('navigation_efficiency', 0.0))
+            phase_transition_successes.append(traj.recall_metrics.get('phase_transition_success', 0.0))
+        
+        env.close()
+    
+    # Calculate averages
+    test_mode = env_ctor().memory_test_mode if hasattr(env_ctor(), 'memory_test_mode') else "unknown"
+    
+    return MemoryEvalStats(
+        n_episodes=n_episodes,
+        test_mode=test_mode,
+        exploration_efficiency=float(np.mean(exploration_efficiencies)) if exploration_efficiencies else 0.0,
+        memory_retention=float(np.mean(memory_retentions)) if memory_retentions else 0.0,
+        recall_accuracy=float(np.mean(recall_accuracies)) if recall_accuracies else 0.0,
+        navigation_efficiency=float(np.mean(navigation_efficiencies)) if navigation_efficiencies else 0.0,
+        avg_objects_discovered=float(np.mean(objects_discovered)) if objects_discovered else 0.0,
+        avg_questions_answered=float(np.mean(questions_answered)) if questions_answered else 0.0,
+        phase_transition_success=float(np.mean(phase_transition_successes)) if phase_transition_successes else 0.0,
+        notes=f"Memory evaluation for {test_mode} mode"
+    )
 
 
 def evaluate_env(
@@ -1111,12 +1561,16 @@ def evaluate_env(
 # -------------------------
 # Environment factory wrappers
 # -------------------------
-def make_four_rooms(world_size=17, obs_mode="top_down", tile_size=14, agent_view_size=7):
+def make_four_rooms(world_size=17, obs_mode="top_down", tile_size=14, agent_view_size=7, 
+                   memory_test_mode="navigation", n_memory_objects=3, memory_object_types=None):
     return FourRoomsMemoryEnv(
         world_size=world_size, 
         obs_mode=obs_mode, 
         tile_size=tile_size, 
-        agent_view_size=agent_view_size
+        agent_view_size=agent_view_size,
+        memory_test_mode=memory_test_mode,
+        n_memory_objects=n_memory_objects,
+        memory_object_types=memory_object_types
     )
 
 
@@ -1161,6 +1615,13 @@ def main():
     g.add_argument("--seed", type=int, default=42)
     g.add_argument("--max-steps", type=int, default=100)
     g.add_argument("--episodes-per-chunk", type=int, default=100)
+    # Memory testing parameters
+    g.add_argument("--memory-test-mode", choices=["navigation", "object_recall", "color_memory", "sequential_memory"], 
+                   default="navigation", help="Memory test mode for four_rooms environment")
+    g.add_argument("--n-memory-objects", type=int, default=3, help="Number of memory objects to place")
+    g.add_argument("--memory-object-types", nargs="+", default=["ball", "box", "key"], 
+                   help="Types of memory objects to place")
+    
     # evaluate
     e = sub.add_parser("eval", help="Evaluate scripted policies")
     e.add_argument(
@@ -1168,72 +1629,163 @@ def main():
     )
     e.add_argument("--episodes", type=int, default=200)
     e.add_argument("--policy", choices=["random", "bfs", "explore"], default="random")
+    # Memory evaluation parameters
+    e.add_argument("--memory-test-mode", choices=["navigation", "object_recall", "color_memory", "sequential_memory"], 
+                   default="navigation", help="Memory test mode for four_rooms environment")
+    e.add_argument("--n-memory-objects", type=int, default=3, help="Number of memory objects to place")
+    e.add_argument("--memory-object-types", nargs="+", default=["ball", "box", "key"], 
+                   help="Types of memory objects to place")
+    
+    # memory evaluation
+    m = sub.add_parser("memory-eval", help="Evaluate memory capabilities")
+    m.add_argument("--env", choices=["four_rooms"], required=True)
+    m.add_argument("--episodes", type=int, default=100)
+    m.add_argument("--policy", choices=["random", "bfs", "explore"], default="random")
+    m.add_argument("--memory-test-mode", choices=["object_recall", "color_memory", "sequential_memory"], 
+                   required=True, help="Memory test mode")
+    m.add_argument("--n-memory-objects", type=int, default=3, help="Number of memory objects to place")
+    m.add_argument("--memory-object-types", nargs="+", default=["ball", "box", "key"], 
+                   help="Types of memory objects to place")
+    m.add_argument("--max-steps", type=int, default=200, help="Maximum steps per episode")
 
     args = parser.parse_args()
 
     if args.seed is not None:
         np.random.seed(args.seed)
 
-    if args.env == "four_rooms":
-        ctor = lambda: make_four_rooms()
-    elif args.env == "ten_rooms":
-        ctor = lambda: make_ten_rooms()
-    else:  # mdk
-        ctor = lambda: make_multi_doors_keys()
-
-    dataset_dir = os.environ["DATASET_DIR"]
-    assert dataset_dir is not None, "DATASET_DIR must be set"
-    output_path = os.path.join(dataset_dir, args.output_dir, f"{args.env}_{args.policy}")
-    
-    # Create output directory
-    os.makedirs(output_path, exist_ok=True)
-    
-    # Initialize chunking variables
-    current_chunk = []
-    chunk_idx = 0
-    total_episodes = 0
-    
-    for episode_idx in tqdm(range(args.episodes), desc="Generating"):
-        env = ctor()
-        traj = run_episode(env, max_steps=args.max_steps, seed=args.seed, policy=args.policy)
-        current_chunk.append(traj)
-        env.close()
-        total_episodes += 1
+    # Handle different commands
+    if args.cmd == "memory-eval":
+        # Memory evaluation
+        if args.env == "four_rooms":
+            ctor = lambda: make_four_rooms(
+                memory_test_mode=args.memory_test_mode,
+                n_memory_objects=args.n_memory_objects,
+                memory_object_types=args.memory_object_types
+            )
+        else:
+            raise ValueError(f"Memory evaluation only supported for four_rooms, got {args.env}")
         
-        # Save chunk when it reaches the target size
-        if len(current_chunk) >= args.episodes_per_chunk:
-            obs_path, act_path, proprio_path = save_trajectories_npy(current_chunk, output_path, chunk_idx)
-      
-            print(f"Saved chunk {chunk_idx} with {len(current_chunk)} episodes")
-            current_chunk = []
-            chunk_idx += 1
-    
-    # Save final partial chunk if it has any episodes
-    if current_chunk:
-        obs_path, act_path, proprio_path = save_trajectories_npy(current_chunk, output_path, chunk_idx)
+        # Run memory evaluation
+        stats = evaluate_memory_env(ctor, n_episodes=args.episodes, max_steps=args.max_steps, 
+                                   seed=args.seed, policy=args.policy)
+        
+        print(f"\nMemory Evaluation Results:")
+        print(f"Test Mode: {stats.test_mode}")
+        print(f"Episodes: {stats.n_episodes}")
+        print(f"Exploration Efficiency: {stats.exploration_efficiency:.3f}")
+        print(f"Memory Retention: {stats.memory_retention:.3f}")
+        print(f"Recall Accuracy: {stats.recall_accuracy:.3f}")
+        print(f"Navigation Efficiency: {stats.navigation_efficiency:.3f}")
+        print(f"Avg Objects Discovered: {stats.avg_objects_discovered:.1f}")
+        print(f"Avg Questions Answered: {stats.avg_questions_answered:.1f}")
+        print(f"Phase Transition Success: {stats.phase_transition_success:.3f}")
+        print(f"Notes: {stats.notes}")
+        
+    else:
+        # Regular dataset generation or evaluation
+        if args.env == "four_rooms":
+            ctor = lambda: make_four_rooms(
+                memory_test_mode=getattr(args, 'memory_test_mode', 'navigation'),
+                n_memory_objects=getattr(args, 'n_memory_objects', 3),
+                memory_object_types=getattr(args, 'memory_object_types', ["ball", "box", "key"])
+            )
+        elif args.env == "ten_rooms":
+            ctor = lambda: make_ten_rooms()
+        else:  # mdk
+            ctor = lambda: make_multi_doors_keys()
 
-        print(f"Saved final chunk {chunk_idx} with {len(current_chunk)} episodes")
-        chunk_idx += 1
-    
-    # Create index file
-    index = {
-        'total_episodes': total_episodes,
-        'episodes_per_chunk': args.episodes_per_chunk,
-        'n_chunks': chunk_idx,
-        'seed': args.seed,
-        'policy': args.policy,
-        'max_steps': args.max_steps,
-        'episodes_per_chunk': args.episodes_per_chunk,
-        'episodes': args.episodes,
-        'output_dir': args.output_dir,
-        'env': args.env,
-    }
-    
-    index_path = os.path.join(output_path, 'index.json')
-    with open(index_path, 'w') as f:
-        json.dump(index, f, indent=2)
-    
-    print(f"Saved {total_episodes} episodes in {chunk_idx} chunks to {output_path}")
+        if args.cmd == "eval":
+            # Regular evaluation
+            stats = evaluate_env(ctor, n_episodes=args.episodes, max_steps=args.max_steps, 
+                                seed=args.seed, policy=args.policy)
+            print(f"\nEvaluation Results:")
+            print(f"Success Rate: {stats.success_rate:.3f}")
+            print(f"Avg Return: {stats.avg_return:.3f}")
+            print(f"Avg Length: {stats.avg_length:.1f}")
+            print(f"Horizon 75th: {stats.horizon_75th:.1f}")
+            print(f"Notes: {stats.notes}")
+            
+        else:  # generate
+            dataset_dir = os.environ["DATASET_DIR"]
+            assert dataset_dir is not None, "DATASET_DIR must be set"
+            
+            # Include memory test mode in output path
+            memory_suffix = f"_{getattr(args, 'memory_test_mode', 'navigation')}" if args.env == "four_rooms" else ""
+            output_path = os.path.join(dataset_dir, args.output_dir, f"{args.env}_{args.policy}{memory_suffix}")
+            
+            # Create output directory
+            os.makedirs(output_path, exist_ok=True)
+            
+            # Initialize chunking variables
+            current_chunk = []
+            chunk_idx = 0
+            total_episodes = 0
+            
+            # Determine if we're generating memory trajectories
+            is_memory_test = (args.env == "four_rooms" and 
+                            getattr(args, 'memory_test_mode', 'navigation') != 'navigation')
+            
+            for episode_idx in tqdm(range(args.episodes), desc="Generating"):
+                env = ctor()
+                
+                if is_memory_test:
+                    traj = run_memory_episode(env, max_steps=args.max_steps, seed=args.seed, policy=args.policy)
+                else:
+                    traj = run_episode(env, max_steps=args.max_steps, seed=args.seed, policy=args.policy)
+                
+                current_chunk.append(traj)
+                env.close()
+                total_episodes += 1
+                
+                # Save chunk when it reaches the target size
+                if len(current_chunk) >= args.episodes_per_chunk:
+                    if is_memory_test:
+                        paths = save_memory_trajectories_npy(current_chunk, output_path, chunk_idx)
+                    else:
+                        paths = save_trajectories_npy(current_chunk, output_path, chunk_idx)
+              
+                    print(f"Saved chunk {chunk_idx} with {len(current_chunk)} episodes")
+                    current_chunk = []
+                    chunk_idx += 1
+            
+            # Save final partial chunk if it has any episodes
+            if current_chunk:
+                if is_memory_test:
+                    paths = save_memory_trajectories_npy(current_chunk, output_path, chunk_idx)
+                else:
+                    paths = save_trajectories_npy(current_chunk, output_path, chunk_idx)
+
+                print(f"Saved final chunk {chunk_idx} with {len(current_chunk)} episodes")
+                chunk_idx += 1
+            
+            # Create index file
+            index = {
+                'total_episodes': total_episodes,
+                'episodes_per_chunk': args.episodes_per_chunk,
+                'n_chunks': chunk_idx,
+                'seed': args.seed,
+                'policy': args.policy,
+                'max_steps': args.max_steps,
+                'episodes_per_chunk': args.episodes_per_chunk,
+                'episodes': args.episodes,
+                'output_dir': args.output_dir,
+                'env': args.env,
+            }
+            
+            # Add memory-specific metadata
+            if is_memory_test:
+                index.update({
+                    'memory_test_mode': getattr(args, 'memory_test_mode', 'navigation'),
+                    'n_memory_objects': getattr(args, 'n_memory_objects', 3),
+                    'memory_object_types': getattr(args, 'memory_object_types', ["ball", "box", "key"]),
+                    'is_memory_dataset': True
+                })
+            
+            index_path = os.path.join(output_path, 'index.json')
+            with open(index_path, 'w') as f:
+                json.dump(index, f, indent=2)
+            
+            print(f"Saved {total_episodes} episodes in {chunk_idx} chunks to {output_path}")
 
 
 if __name__ == "__main__":

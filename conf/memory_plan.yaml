@@ -1,0 +1,37 @@
+# Memory Planning Configuration
+# This configuration is used for evaluating world model memory capabilities
+
+defaults:
+  - _self_
+
+# Memory test configuration
+memory_test_mode: object_recall  # object_recall, color_memory, sequential_memory, navigation
+n_memory_objects: 3
+memory_object_types: [ball, box, key]
+
+# Model configuration
+ckpt_base_path: ""  # Base path to model checkpoints
+model_name: ""      # Name of the trained model
+model_epoch: final  # Epoch to load (or "final" for latest)
+
+# Evaluation configuration
+n_evals: 10         # Number of evaluation episodes
+goal_H: 10          # Planning horizon
+goal_source: memory_exploration  # memory_exploration, random_action, dset
+debug_dset_init: false
+
+# Objective configuration
+objective:
+  _target_: planning.objectives.memory_objective.MemoryObjective
+  alpha: 0.1
+
+# Plotting configuration
+n_plot_samples: 2
+save_videos: true
+
+# Logging configuration
+wandb_logging: true
+seed: 42
+
+# Saved folder (will be set automatically)
+saved_folder: ""
