@@ -160,12 +160,13 @@ class Trainer:
             f"Batch_size: {cfg.training.batch_size} num_processes: {self.accelerator.num_processes}."
         )
 
-        OmegaConf.set_struct(cfg, False)
-        cfg.effective_batch_size = cfg.training.batch_size
-        cfg.gpu_batch_size = (
-            cfg.training.batch_size // self.accelerator.num_processes
-        )
-        OmegaConf.set_struct(cfg, True)
+        # OmegaConf.set_struct(cfg, False)
+        with open_dict(cfg):
+            cfg.effective_batch_size = cfg.training.batch_size
+            cfg.gpu_batch_size = (
+                cfg.training.batch_size // self.accelerator.num_processes
+            )
+        # OmegaConf.set_struct(cfg, True)
 
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
@@ -279,10 +280,10 @@ class Trainer:
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
 
         # temporary fix until we figure out how to save the scheduler wrapped optimizers
-        if self.cfg.training.use_scheduler:
-            for key in self._keys_to_save:
-                if key in ["encoder_optimizer", "predictor_optimizer", "action_encoder_optimizer", "decoder_optimizer"]:
-                    self._keys_to_save.remove(key)
+        # if self.cfg.training.use_scheduler:
+        #     for key in self._keys_to_save:
+        #         if key in ["encoder_optimizer", "predictor_optimizer", "action_encoder_optimizer", "decoder_optimizer"]:
+        #             self._keys_to_save.remove(key)
 
         self.init_models()
         self.init_optimizers()
@@ -313,24 +314,103 @@ class Trainer:
         model_epoch = self.epoch
         return ckpt_path, model_name, model_epoch
 
+    def save_ckpt_state_dict(self):
+        """Save checkpoint using state dicts instead of full modules for safer DDP saving."""
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            if not os.path.exists("checkpoints"):
+                os.makedirs("checkpoints")
+            
+            ckpt = {}
+            for k in self._keys_to_save:
+                if k == "epoch":
+                    ckpt[k] = self.__dict__[k]
+                elif k.endswith("_optimizer"):
+                    # Save optimizer state dict
+                    if hasattr(self.__dict__[k], "state_dict"):
+                        ckpt[k] = self.__dict__[k].state_dict()
+                    else:
+                        log.warning(f"Optimizer {k} does not have state_dict method")
+                else:
+                    # Save model state dict
+                    if hasattr(self.__dict__[k], "state_dict"):
+                        if hasattr(self.__dict__[k], "module"):
+                            # DDP wrapped model
+                            ckpt[k] = self.accelerator.unwrap_model(self.__dict__[k]).state_dict()
+                        else:
+                            ckpt[k] = self.__dict__[k].state_dict()
+                    else:
+                        log.warning(f"Model {k} does not have state_dict method")
+
+            # Save training config for reconstruction
+            ckpt["train_cfg"] = self.cfg
+            
+            torch.save(ckpt, "checkpoints/model_latest.pth")
+            torch.save(ckpt, f"checkpoints/model_{self.epoch}.pth")
+            log.info("Saved model state dicts to {}".format(os.getcwd()))
+            ckpt_path = os.path.join(
+                os.getcwd(), f"checkpoints/model_{self.epoch}.pth"
+            )
+        else:
+            ckpt_path = None
+        model_name = self.cfg["saved_folder"].split("outputs/")[-1]
+        model_epoch = self.epoch
+        return ckpt_path, model_name, model_epoch
+
     def load_ckpt(self, filename="model_latest.pth"):
+        """Load checkpoint, handling both legacy full modules and new state dict format."""
         ckpt = torch.load(filename)
-        for k, v in ckpt.items():
-            self.__dict__[k] = v
-        not_in_ckpt = set(self._keys_to_save) - set(ckpt.keys())
+        
+        # Check if this is a state dict format checkpoint
+        if "train_cfg" in ckpt and any(k in ckpt for k in ["encoder", "predictor", "proprio_encoder", "action_encoder", "decoder"]):
+            # This is a state dict format checkpoint
+            log.info("Loading state dict format checkpoint")
+            self._load_ckpt_state_dict(ckpt)
+        else:
+            # Legacy format - load full modules
+            log.info("Loading legacy format checkpoint")
+            for k, v in ckpt.items():
+                self.__dict__[k] = v
+            not_in_ckpt = set(self._keys_to_save) - set(ckpt.keys())
+            if len(not_in_ckpt):
+                log.warning("Keys not found in ckpt: %s", not_in_ckpt)
+
+    def _load_ckpt_state_dict(self, ckpt):
+        """Load checkpoint from state dict format."""
+        # Load epoch
+        if "epoch" in ckpt:
+            self.epoch = ckpt["epoch"]
+        
+        # Load model state dicts
+        for k in self._keys_to_save:
+            if k == "epoch":
+                continue
+            elif k.endswith("_optimizer"):
+                # Load optimizer state dict
+                if k in ckpt and hasattr(self.__dict__[k], "load_state_dict"):
+                    self.__dict__[k].load_state_dict(ckpt[k])
+                    log.info(f"Loaded optimizer {k} from state dict")
+                else:
+                    log.warning(f"Optimizer {k} not found in checkpoint or no load_state_dict method")
+            else:
+                # Load model state dict
+                if k in ckpt and hasattr(self.__dict__[k], "load_state_dict"):
+                    # Handle DDP wrapped models
+                    if hasattr(self.__dict__[k], "module"):
+                        self.accelerator.unwrap_model(self.__dict__[k]).load_state_dict(ckpt[k])
+                    else:
+                        self.__dict__[k].load_state_dict(ckpt[k])
+                    log.info(f"Loaded model {k} from state dict")
+                else:
+                    log.warning(f"Model {k} not found in checkpoint or no load_state_dict method")
+        
+        # Check for missing keys
+        model_keys = [k for k in self._keys_to_save if not k.endswith("_optimizer") and k != "epoch"]
+        not_in_ckpt = set(model_keys) - set(ckpt.keys())
         if len(not_in_ckpt):
-            log.warning("Keys not found in ckpt: %s", not_in_ckpt)
+            log.warning("Model keys not found in state dict ckpt: %s", not_in_ckpt)
 
     def init_models(self):
-
-        with self.accelerator.main_process_first():
-            model_ckpt = (
-                Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
-            )
-            if model_ckpt.exists():
-                self.load_ckpt(model_ckpt)
-                log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
-        self.accelerator.wait_for_everyone()
 
         # initialize encoder
         with self.accelerator.main_process_first():
@@ -355,6 +435,11 @@ class Trainer:
         )
         proprio_emb_dim = self.proprio_encoder.emb_dim
         print(f"Proprio encoder type: {type(self.proprio_encoder)}")
+        # update cfg for saving
+        with open_dict(self.cfg):
+            self.cfg.proprio_encoder.emb_dim = self.proprio_encoder.emb_dim
+            self.cfg.proprio_encoder.in_chans = self.datasets["train"].proprio_dim
+
 
         self.action_encoder = hydra.utils.instantiate(
             self.cfg.action_encoder,
@@ -363,6 +448,10 @@ class Trainer:
         )
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
+        # update cfg for saving
+        with open_dict(self.cfg):
+            self.cfg.action_encoder.emb_dim = self.action_encoder.emb_dim
+            self.cfg.action_encoder.in_chans = self.datasets["train"].action_dim
 
 
         # initialize predictor
@@ -378,17 +467,20 @@ class Trainer:
 
         if self.cfg.has_predictor:
             if self.predictor is None:
+                dim = self.encoder.emb_dim + (proprio_emb_dim * self.cfg.num_proprio_repeat + action_emb_dim * self.cfg.num_action_repeat) * (self.cfg.concat_dim)
                 self.predictor = hydra.utils.instantiate(
                     self.cfg.predictor,
                     num_patches=num_patches,
                     num_frames=self.cfg.num_hist,
-                    dim=self.encoder.emb_dim
-                    + (
-                        proprio_emb_dim * self.cfg.num_proprio_repeat
-                        + action_emb_dim * self.cfg.num_action_repeat
-                    )
-                    * (self.cfg.concat_dim),
+                    dim=dim,
                 )
+                # update cfg for saving
+                with open_dict(self.cfg):
+                    self.cfg.predictor.dim = dim
+                    self.cfg.predictor.num_patches = num_patches
+                    self.cfg.predictor.num_frames = self.cfg.num_hist
+                    
+
             if not self.train_predictor:
                 for param in self.predictor.parameters():
                     param.requires_grad = False
@@ -414,6 +506,9 @@ class Trainer:
                         self.cfg.decoder,
                         emb_dim=self.encoder.emb_dim,  # 384
                     )
+                    # update cfg for saving
+                    with open_dict(self.cfg):
+                        self.cfg.decoder.emb_dim = self.encoder.emb_dim
             if not self.train_decoder:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
@@ -460,6 +555,16 @@ class Trainer:
         if self.accelerator.is_main_process:
             print(f"Model type: {type(self.model)}")
             print(self.model)
+
+        # Load checkpoint after all models are instantiated
+        with self.accelerator.main_process_first():
+            model_ckpt = (
+                Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
+            )
+            if model_ckpt.exists():
+                self.load_ckpt(model_ckpt)
+                log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+        self.accelerator.wait_for_everyone()
 
     def init_optimizers(self):
         # Scale learning rates by number of processes for proper multi-GPU training
@@ -590,8 +695,7 @@ class Trainer:
             self.val()
             self.accelerator.wait_for_everyone()
 
-            if self.cfg.dry_run:
-                return
+            
 
             # Calculate epoch execution time
             epoch_time = time.time() - epoch_start_time
@@ -607,7 +711,11 @@ class Trainer:
 
             self.logs_flash(step=self.epoch)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
-                ckpt_path, model_name, model_epoch = self.save_ckpt()
+                # ckpt_path, model_name, model_epoch = self.save_ckpt()
+                ckpt_path, model_name, model_epoch = self.save_ckpt_state_dict()
+            
+            if self.cfg.dry_run:
+                return
                 
 
     def err_eval_single(self, z_pred, z_tgt):

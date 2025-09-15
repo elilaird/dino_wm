@@ -343,6 +343,33 @@ def load_ckpt(snapshot_path, device):
     return result
 
 
+def load_ckpt_state_dict(snapshot_path, device):
+    """Load checkpoint with state dicts and return both state dicts and training config."""
+    with snapshot_path.open("rb") as f:
+        payload = torch.load(f, map_location=device)
+    
+    loaded_keys = []
+    state_dicts = {}
+    train_cfg = None
+    
+    for k, v in payload.items():
+        if k in ALL_MODEL_KEYS:
+            loaded_keys.append(k)
+            state_dicts[k] = v
+        elif k == "train_cfg":
+            train_cfg = v
+        elif k == "epoch":
+            pass  # epoch is handled separately
+    
+    result = {
+        "state_dicts": state_dicts,
+        "train_cfg": train_cfg,
+        "epoch": payload.get("epoch", 0),
+        "loaded_keys": loaded_keys
+    }
+    return result
+
+
 def load_model(model_ckpt, train_cfg, num_action_repeat, device):
     result = {}
     if model_ckpt.exists():
@@ -380,6 +407,107 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
         action_encoder=result["action_encoder"],
         predictor=result["predictor"],
         decoder=result["decoder"],
+        proprio_dim=train_cfg.proprio_emb_dim,
+        action_dim=train_cfg.action_emb_dim,
+        concat_dim=train_cfg.concat_dim,
+        num_action_repeat=num_action_repeat,
+        num_proprio_repeat=train_cfg.num_proprio_repeat,
+    )
+    model.to(device)
+    return model
+
+
+def load_model_state_dict(model_ckpt, train_cfg, num_action_repeat, device):
+    """Load model using state dicts for safer DDP loading."""
+    # First try to load with state dicts
+    if model_ckpt.exists():
+        try:
+            ckpt_data = load_ckpt_state_dict(model_ckpt, device)
+            state_dicts = ckpt_data["state_dicts"]
+            epoch = ckpt_data["epoch"]
+            print(f"Loading from state dict checkpoint epoch {epoch}: {model_ckpt}")
+            
+            # Use training config from checkpoint if available, otherwise use provided config
+            if ckpt_data["train_cfg"] is not None:
+                train_cfg = ckpt_data["train_cfg"]
+                print("Using training config from checkpoint")
+        except Exception as e:
+            print(f"Failed to load state dict checkpoint: {e}")
+            print("Falling back to legacy checkpoint loading")
+            return load_model(model_ckpt, train_cfg, num_action_repeat, device)
+    else:
+        state_dicts = {}
+        epoch = 0
+
+    # Instantiate models using hydra config
+    models = {}
+    
+    if "encoder" in state_dicts:
+        models["encoder"] = hydra.utils.instantiate(train_cfg.encoder)
+        models["encoder"].load_state_dict(state_dicts["encoder"])
+        print(f"Loaded encoder from state dict checkpoint")
+    else:
+        models["encoder"] = hydra.utils.instantiate(train_cfg.encoder)
+        print(f"Loaded untrained encoder from config")
+    
+    if "predictor" in state_dicts:
+        models["predictor"] = hydra.utils.instantiate(train_cfg.predictor)
+        models["predictor"].load_state_dict(state_dicts["predictor"])
+        print(f"Loaded predictor from state dict checkpoint")
+    else:
+        if not hasattr(train_cfg, 'predictor'):
+            raise ValueError("Predictor config not found in training config")
+        models["predictor"] = hydra.utils.instantiate(train_cfg.predictor)
+        print(f"Loaded untrained predictor from config")
+    
+    if "proprio_encoder" in state_dicts:
+        models["proprio_encoder"] = hydra.utils.instantiate(train_cfg.proprio_encoder)
+        models["proprio_encoder"].load_state_dict(state_dicts["proprio_encoder"])
+        print(f"Loaded proprio encoder from state dict checkpoint")
+    else:
+        print(f"Loaded untrained proprio encoder from config")
+        models["proprio_encoder"] = hydra.utils.instantiate(train_cfg.proprio_encoder)
+    
+    if "action_encoder" in state_dicts:
+        models["action_encoder"] = hydra.utils.instantiate(train_cfg.action_encoder)
+        models["action_encoder"].load_state_dict(state_dicts["action_encoder"])
+        print(f"Loaded action encoder from state dict checkpoint")
+    else:
+        print(f"Loaded untrained action encoder from config")
+        models["action_encoder"] = hydra.utils.instantiate(train_cfg.action_encoder)
+    
+    # Handle decoder
+    if train_cfg.has_decoder:
+        if "decoder" in state_dicts:
+            models["decoder"] = hydra.utils.instantiate(train_cfg.decoder)
+            models["decoder"].load_state_dict(state_dicts["decoder"])
+            print(f"Loaded decoder from state dict checkpoint")
+        else:
+            # Try to load from separate decoder path
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            print(f"Loaded untrained decoder from config")
+            if train_cfg.env.decoder_path is not None:
+                decoder_path = os.path.join(base_path, train_cfg.env.decoder_path)
+                ckpt = torch.load(decoder_path)
+                if isinstance(ckpt, dict):
+                    models["decoder"] = ckpt["decoder"]
+                else:
+                    models["decoder"] = torch.load(decoder_path)
+            else:
+                raise ValueError(
+                    "Decoder path not found in model checkpoint and is not provided in config"
+                )
+    else:
+        models["decoder"] = None
+
+    # Instantiate the full model
+    model = hydra.utils.instantiate(
+        train_cfg.model,
+        encoder=models["encoder"],
+        proprio_encoder=models["proprio_encoder"],
+        action_encoder=models["action_encoder"],
+        predictor=models["predictor"],
+        decoder=models["decoder"],
         proprio_dim=train_cfg.proprio_emb_dim,
         action_dim=train_cfg.action_emb_dim,
         concat_dim=train_cfg.concat_dim,
@@ -436,7 +564,7 @@ def planning_main(cfg_dict):
     model_ckpt = (
         Path(model_path) / "checkpoints" / f"model_{cfg_dict['model_epoch']}.pth"
     )
-    model = load_model(model_ckpt, model_cfg, num_action_repeat, device=device)
+    model = load_model_state_dict(model_ckpt, model_cfg, num_action_repeat, device=device)
 
     # use dummy vector env for wall and deformable envs
     if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
