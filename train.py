@@ -850,10 +850,10 @@ class Trainer:
             self.predictor_optimizer.step()
             self.action_encoder_optimizer.step()
 
-        # Step learning rate schedulers per batch if step-based scheduling is enabled
-        if self.cfg.training.use_scheduler:
-            for scheduler in self.schedulers.values():
-                scheduler.step()
+        # # Step learning rate schedulers per batch if step-based scheduling is enabled
+        # if self.cfg.training.use_scheduler:
+        #     for scheduler in self.schedulers.values():
+        #         scheduler.step()
 
         loss = self.accelerator.gather_for_metrics(loss).mean()
 
@@ -913,6 +913,11 @@ class Trainer:
             compute_end.record()
             torch.cuda.synchronize(self.accelerator.device)
             compute_ms = compute_start.elapsed_time(compute_end)
+
+            # Step learning rate schedulers per batch if step-based scheduling is enabled
+            if self.cfg.training.use_scheduler:
+                for scheduler in self.schedulers.values():
+                    scheduler.step()
 
             if i < 5 or i % 100 == 0:
                 time_logs = {

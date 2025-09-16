@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - env: four_rooms_explore
+  - env: four_rooms_bfs
   - encoder: dino 
   - action_encoder: discrete
   - proprio_encoder: grid_dir
@@ -36,7 +36,7 @@ training:
   use_scheduler: True
   T_0: 2  # Number of epochs for the first restart
   T_mult: 2  # A factor increases T_i after a restart
-  eta_min_ratio: 0.1  # minimum LR as ratio of initial LR
+  eta_min_ratio: 0.5  # minimum LR as ratio of initial LR
   decay_factor: 0.9  # Factor to decay peak LR at each restart
   warmup_percent: 0.05 # warmup percentage of total steps
 
