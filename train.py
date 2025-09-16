@@ -111,6 +111,10 @@ class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
         self.window_size = self.cfg.num_hist + self.cfg.num_pred
+        self.overlap_size = getattr(self.cfg, 'overlap_size', 0) 
+        self.step_size = self.window_size - self.overlap_size  
+        print(f"Overlap size: {self.overlap_size}")
+        print(f"Step size: {self.step_size}")
         with open_dict(cfg):
             cfg["saved_folder"] = os.getcwd()
             log.info(f"Model saved dir: {cfg['saved_folder']}")
@@ -278,12 +282,6 @@ class Trainer:
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
-
-        # temporary fix until we figure out how to save the scheduler wrapped optimizers
-        # if self.cfg.training.use_scheduler:
-        #     for key in self._keys_to_save:
-        #         if key in ["encoder_optimizer", "predictor_optimizer", "action_encoder_optimizer", "decoder_optimizer"]:
-        #             self._keys_to_save.remove(key)
 
         self.init_models()
         self.init_optimizers()
@@ -550,6 +548,7 @@ class Trainer:
             concat_dim=self.cfg.concat_dim,
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
+            decoder_loss_type=getattr(self.cfg.training, 'decoder_loss_type', 'mse'),
         )
 
         if self.accelerator.is_main_process:
@@ -891,15 +890,16 @@ class Trainer:
             data_time = time.perf_counter() - prev_time
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
-            num_windows = N // self.window_size
+            num_windows = max(1, (N - self.overlap_size) // self.step_size)
 
             plot = i == 0
             self.model.train()
             compute_start.record()
 
             for window_idx in range(num_windows):
-                start_idx = window_idx * self.window_size
-                end_idx = start_idx + self.window_size
+                start_idx = window_idx * self.step_size
+                end_idx = min(start_idx + self.window_size, N)
+                
                 obs_window = {
                     k: v[:, start_idx:end_idx, ...] for k, v in obs.items()
                 }
@@ -977,7 +977,7 @@ class Trainer:
             batch_loss_components = defaultdict(float)
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
-            num_windows = N // self.window_size
+            num_windows = max(1, (N - self.overlap_size) // self.step_size)
 
             if hasattr(self.model.predictor, "reset_memory"):
                 self.model.predictor.reset_memory()
@@ -985,8 +985,8 @@ class Trainer:
                 self.model.predictor.module.reset_memory()
 
             for window_idx in range(num_windows):
-                start_idx = window_idx * self.window_size
-                end_idx = start_idx + self.window_size
+                start_idx = window_idx * self.step_size
+                end_idx = min(start_idx + self.window_size, N)
                 obs_window = {
                     k: v[:, start_idx:end_idx, ...] for k, v in obs.items()
                 }

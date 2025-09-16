@@ -24,7 +24,7 @@ hydra:
 training:
   seed: 0
   epochs: 100
-  batch_size: 2048 # gpu_batch_size
+  batch_size: 512 # gpu_batch_size
   save_every_x_epoch: 10 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
@@ -41,6 +41,8 @@ training:
   decay_factor: 0.9  # Factor to decay peak LR at each restart
   warmup_percent: 0.05 # warmup percentage of total steps
 
+decoder_loss_type: smooth_l1
+
 full_sequence: False
 img_size: 64 
 frameskip: 1
@@ -56,6 +58,7 @@ normalize_action: False
 proprio_emb_dim: 12 
 num_proprio_repeat: 1
 
+overlap_size: 0
 num_frames: 100
 num_hist: 9
 num_pred: 1 
