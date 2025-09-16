@@ -572,6 +572,7 @@ class Trainer:
         self.encoder_optimizer = torch.optim.Adam(
             self.encoder.parameters(),
             lr=self.cfg.training.encoder_lr * lr_scale,
+            weight_decay=self.cfg.training.encoder_weight_decay,
         )
         self.encoder_optimizer = self.accelerator.prepare(
             self.encoder_optimizer
@@ -584,6 +585,7 @@ class Trainer:
             self.predictor_optimizer = torch.optim.AdamW(
                 self.predictor.parameters(),
                 lr=self.cfg.training.predictor_lr * lr_scale,
+                weight_decay=self.cfg.training.predictor_weight_decay,
             )
             self.predictor_optimizer = self.accelerator.prepare(
                 self.predictor_optimizer
@@ -597,6 +599,7 @@ class Trainer:
                     self.proprio_encoder.parameters(),
                 ),
                 lr=self.cfg.training.action_encoder_lr * lr_scale,
+                weight_decay=self.cfg.training.action_encoder_weight_decay,
             )
             self.action_encoder_optimizer = self.accelerator.prepare(
                 self.action_encoder_optimizer
@@ -606,7 +609,9 @@ class Trainer:
 
         if self.cfg.has_decoder:
             self.decoder_optimizer = torch.optim.Adam(
-                self.decoder.parameters(), lr=self.cfg.training.decoder_lr * lr_scale
+                self.decoder.parameters(), 
+                lr=self.cfg.training.decoder_lr * lr_scale,
+                weight_decay=self.cfg.training.decoder_weight_decay
             )
             self.decoder_optimizer = self.accelerator.prepare(
                 self.decoder_optimizer
