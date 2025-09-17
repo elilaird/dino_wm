@@ -572,7 +572,6 @@ class Trainer:
         self.encoder_optimizer = torch.optim.Adam(
             self.encoder.parameters(),
             lr=self.cfg.training.encoder_lr * lr_scale,
-            weight_decay=self.cfg.training.encoder_weight_decay,
         )
         self.encoder_optimizer = self.accelerator.prepare(
             self.encoder_optimizer
@@ -611,7 +610,6 @@ class Trainer:
             self.decoder_optimizer = torch.optim.Adam(
                 self.decoder.parameters(), 
                 lr=self.cfg.training.decoder_lr * lr_scale,
-                weight_decay=self.cfg.training.decoder_weight_decay
             )
             self.decoder_optimizer = self.accelerator.prepare(
                 self.decoder_optimizer
@@ -856,9 +854,9 @@ class Trainer:
             self.action_encoder_optimizer.step()
 
         # # Step learning rate schedulers per batch if step-based scheduling is enabled
-        # if self.cfg.training.use_scheduler:
-        #     for scheduler in self.schedulers.values():
-        #         scheduler.step()
+        if self.cfg.training.use_scheduler:
+            for scheduler in self.schedulers.values():
+                scheduler.step()
 
         loss = self.accelerator.gather_for_metrics(loss).mean()
 
@@ -919,10 +917,7 @@ class Trainer:
             torch.cuda.synchronize(self.accelerator.device)
             compute_ms = compute_start.elapsed_time(compute_end)
 
-            # Step learning rate schedulers per batch if step-based scheduling is enabled
-            if self.cfg.training.use_scheduler:
-                for scheduler in self.schedulers.values():
-                    scheduler.step()
+            
 
             if i < 5 or i % 100 == 0:
                 time_logs = {
