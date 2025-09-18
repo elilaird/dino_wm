@@ -810,6 +810,26 @@ class Trainer:
             if self.cfg.dry_run:
                 return
 
+    def horizon_treatment_eval(self, z_pred, z_tgt, obs, visuals):
+        logs = {}
+
+        for k in z_pred.keys():
+            # mse
+            logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
+
+            # l2
+            logs[f"{k}_horizon_l2"] = torch.norm(z_pred[k] - z_tgt[k], p=2)
+
+            #TODO: frechet (decoded visuals vs obs target) 
+
+            # cycle consistency (decode > encode > measure)
+            z_cycle = self.model.encode_obs(visuals)
+            logs[f"{k}_horizon_cycle_mse"] = torch.nn.functional.mse_loss(z_cycle[k], z_tgt[k])
+            logs[f"{k}_horizon_cycle_l2"] = torch.norm(z_cycle[k] - z_tgt[k], p=2)
+
+            
+        return logs
+
     def err_eval_single(self, z_pred, z_tgt):
         logs = {}
         for k in z_pred.keys():
@@ -1349,6 +1369,23 @@ class Trainer:
                             obs["visual"].shape[0],
                             f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}_h{horizon}.png",
                         )
+                
+                if horizon_treatment is not None:
+                    # compute rollout error progression
+                    obs_tgt = obs.to(self.device)
+                    z_tgts = self.model.encode_obs(obs_tgt)
+                    
+                    for t in range(1, horizon):
+                        z_pred_t = slice_trajdict_with_t(
+                            z_obses, start_idx=t, end_idx=t+1
+                        )
+                        z_t = slice_trajdict_with_t(
+                            z_tgts, start_idx=t, end_idx=t+1
+                        )   
+                        # div_loss = self.err_eval_single(z_obs_t, z_g)
+                        div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt, visuals)
+                        for k in div_loss.keys():
+                            logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
 
 
         logs = {

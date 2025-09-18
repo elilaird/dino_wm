@@ -73,7 +73,7 @@ def cfg_to_dict(cfg):
     cfg_dict = OmegaConf.to_container(cfg)
     for key in cfg_dict:
         if isinstance(cfg_dict[key], list):
-            cfg_dict[key] = ",".join(cfg_dict[key])
+            cfg_dict[key] = ",".join(str(item) for item in cfg_dict[key])
     return cfg_dict
 
 def reduce_dict(f: Callable, d: Dict):
