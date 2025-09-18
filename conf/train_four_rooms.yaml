@@ -32,6 +32,8 @@ training:
   decoder_lr: 3e-4
   predictor_lr: 5e-4
   action_encoder_lr: 5e-4
+  decoder_weight_decay: null
+  encoder_weight_decay: null
   predictor_weight_decay: 0.01
   action_encoder_weight_decay: 0.01
   max_grad_norm: 0.5

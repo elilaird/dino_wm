@@ -569,10 +569,17 @@ class Trainer:
         # Scale learning rates by number of processes for proper multi-GPU training
         lr_scale = 1
         
-        self.encoder_optimizer = torch.optim.Adam(
-            self.encoder.parameters(),
-            lr=self.cfg.training.encoder_lr * lr_scale,
-        )
+        if self.cfg.training.encoder_weight_decay is None:
+            self.encoder_optimizer = torch.optim.Adam(
+                self.encoder.parameters(),
+                lr=self.cfg.training.encoder_lr * lr_scale,
+            )
+        else:
+            self.encoder_optimizer = torch.optim.AdamW(
+                self.encoder.parameters(),
+                lr=self.cfg.training.encoder_lr * lr_scale,
+                weight_decay=self.cfg.training.encoder_weight_decay,
+            )
         self.encoder_optimizer = self.accelerator.prepare(
             self.encoder_optimizer
         )
@@ -607,10 +614,18 @@ class Trainer:
                 log.info(f"Action Encoder LR: {self.cfg.training.action_encoder_lr} -> {self.cfg.training.action_encoder_lr * lr_scale}")
 
         if self.cfg.has_decoder:
-            self.decoder_optimizer = torch.optim.Adam(
-                self.decoder.parameters(), 
-                lr=self.cfg.training.decoder_lr * lr_scale,
-            )
+            if self.cfg.training.decoder_weight_decay is None:
+                self.decoder_optimizer = torch.optim.Adam(
+                    self.decoder.parameters(), 
+                    lr=self.cfg.training.decoder_lr * lr_scale,
+                )
+            else:
+                self.decoder_optimizer = torch.optim.AdamW(
+                    self.decoder.parameters(), 
+                    lr=self.cfg.training.decoder_lr * lr_scale,
+                    weight_decay=self.cfg.training.decoder_weight_decay,
+                )
+            
             self.decoder_optimizer = self.accelerator.prepare(
                 self.decoder_optimizer
             )
