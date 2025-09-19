@@ -1371,7 +1371,7 @@ class Trainer:
                 
                 if horizon_treatment is not None:
                     # compute rollout error progression
-                    obs_tgt = obs.to(self.device)
+                    obs_tgt = {k: v.to(self.device) for k, v in obs.items()}
                     z_tgts = self.model.encode_obs(obs_tgt)
                     
                     for t in range(1, horizon):
