@@ -83,8 +83,7 @@ echo $CONDA_PREFIX
 cd ${WORK_DIR}
 mkdir -p dino_wm_\${SLURM_JOB_ID}
 cd dino_wm_\${SLURM_JOB_ID}
-git clone https://github.com/elilaird/dino_wm.git .
-cd dino_wm
+git clone git@github.com:elilaird/dino_wm.git .
 git checkout main  # Use your production branch
 
 echo "WORK_DIR: $(pwd)"
