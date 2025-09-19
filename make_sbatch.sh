@@ -31,6 +31,8 @@ if [ "${TYPE}" = "jupyter" ]; then
     WORK_DIR=${HOME_DIR}/Projects/dino_wm
 fi
 
+echo "WORK_DIR: ${WORK_DIR}"
+
 if [ "${TYPE}" = "minigrid" ]; then
     PY_FILE="env/minigrid/minigrid_env.py generate"
 elif [ "${TYPE}" = "plan" ]; then
@@ -81,21 +83,20 @@ module load git-lfs
 conda activate ${ENV_DIR}/${CONDA_ENV}
 
 which python
-echo $CONDA_PREFIX
 
-# Clone repo for this job
 cd ${WORK_DIR}
 
 if [ \"${TYPE}\" = \"jupyter\" ]; then
     echo Skipping clone for jupyter
 else
-    mkdir -p dino_wm_${SLURM_JOB_ID}
-    cd dino_wm_${SLURM_JOB_ID}
+    mkdir -p dino_wm_\${SLURM_JOB_ID}
+    cd dino_wm_\${SLURM_JOB_ID}
+    echo "Current working directory: dino_wm_\${SLURM_JOB_ID}"
     git clone git@github.com:elilaird/dino_wm.git .
     git checkout main  # Use your production branch
 fi
 
-echo "WORK_DIR: $(pwd)"
+echo "WORK_DIR: \$\(pwd\)"
 echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TYPE=${TYPE} TIME=${TIME} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
 
 export DATA_DIR=${DATA_DIR}
