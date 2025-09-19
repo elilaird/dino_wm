@@ -1369,21 +1369,25 @@ class Trainer:
                             f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}_h{horizon}.png",
                         )
                 
-                if horizon_treatment is not None:
-                    # compute rollout error progression
-                    obs_tgt = {k: v.to(self.device) for k, v in obs.items()}
-                    z_tgts = self.model.encode_obs(obs_tgt)
-                    
-                    for t in range(1, horizon):
-                        z_pred_t = slice_trajdict_with_t(
-                            z_obses, start_idx=t, end_idx=t+1
-                        )
-                        z_t = slice_trajdict_with_t(
-                            z_tgts, start_idx=t, end_idx=t+1
-                        )   
-                        div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt, visuals)
-                        for k in div_loss.keys():
-                            logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
+                try:
+                    if horizon_treatment is not None:
+                        # compute rollout error progression
+                        obs_tgt = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
+                        z_tgts = self.model.encode_obs(obs_tgt)
+                        
+                        for t in range(1, horizon):
+                            z_pred_t = slice_trajdict_with_t(
+                                z_obses, start_idx=t, end_idx=t+1
+                            )
+                            z_t = slice_trajdict_with_t(
+                                z_tgts, start_idx=t, end_idx=t+1
+                            )   
+                            div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt, visuals)
+                            for k in div_loss.keys():
+                                logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
+                except Exception as e:
+                    print(f"Failed to compute horizon treatment error for rollout {idx}{postfix}_h{horizon}")
+                    print(e)
 
 
         logs = {
