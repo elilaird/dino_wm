@@ -27,6 +27,10 @@ WORK_DIR=${WORK_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird
 DATA_DIR=${DATA_DIR:-"/lustre/smuexa01/client/users/ejlaird/dino_wm_data"}
 MUJOCO_DIR=/users/ejlaird/.mujoco/mujoco210/bin
 
+if [ "${TYPE}" = "jupyter" ]; then
+    WORK_DIR=${HOME_DIR}/Projects/dino_wm
+fi
+
 if [ "${TYPE}" = "minigrid" ]; then
     PY_FILE="env/minigrid/minigrid_env.py generate"
 elif [ "${TYPE}" = "plan" ]; then
@@ -81,10 +85,15 @@ echo $CONDA_PREFIX
 
 # Clone repo for this job
 cd ${WORK_DIR}
-mkdir -p dino_wm_\${SLURM_JOB_ID}
-cd dino_wm_\${SLURM_JOB_ID}
-git clone git@github.com:elilaird/dino_wm.git .
-git checkout main  # Use your production branch
+
+if [ \"${TYPE}\" = \"jupyter\" ]; then
+    echo Skipping clone for jupyter
+else
+    mkdir -p dino_wm_${SLURM_JOB_ID}
+    cd dino_wm_${SLURM_JOB_ID}
+    git clone git@github.com:elilaird/dino_wm.git .
+    git checkout main  # Use your production branch
+fi
 
 echo "WORK_DIR: $(pwd)"
 echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TYPE=${TYPE} TIME=${TIME} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
