@@ -369,6 +369,7 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         """Place memory objects in different rooms for testing"""
         self.memory_objects = []
         colors = ["red", "green", "blue", "yellow", "purple"]
+        used_positions = set()  # Track used positions to avoid overlaps
 
         # Ensure objects are placed in different rooms
         room_positions = []
@@ -379,10 +380,16 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         for i in range(self.n_memory_objects):
             room_idx = i % 4
             available_positions = room_positions[room_idx]
+            
+            # Filter out already used positions
+            available_positions = [pos for pos in available_positions if pos not in used_positions]
+            
             if available_positions:
                 pos = available_positions[
                     np.random.randint(0, len(available_positions))
                 ]
+                used_positions.add(pos)  # Mark position as used
+                
                 obj_type = self.memory_object_types[
                     i % len(self.memory_object_types)
                 ]
@@ -596,41 +603,38 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         return info
 
     def _get_visible_objects(self):
-        """Get visible memory objects using MiniGrid's visibility system"""
+        """Get visible memory objects using MiniGrid's built-in visibility system"""
         visible = []
-        
-        # Get the observation grid and visibility mask
-        grid, vis_mask = self.gen_obs_grid()
-        
-        # Get view extents
-        topX, topY, botX, botY = self.get_view_exts()
-        
-        # Check each memory object
+
+        # Check each memory object using built-in visibility methods
         for obj, pos, color, obj_type in self.memory_objects:
             obj_x, obj_y = pos
-            
-            # Check if object is within view bounds
-            if not (topX <= obj_x <= botX and topY <= obj_y <= botY):
-                continue
-                
-            # Convert to local view coordinates
-            local_x = obj_x - topX
-            local_y = obj_y - topY
-            
-            # Apply rotation based on agent direction
-            # The grid in gen_obs_grid is already rotated, so we need to account for this
-            for _ in range(self.agent_dir + 1):
-                new_x = self.agent_view_size - 1 - local_y
-                new_y = local_x
-                local_x, local_y = new_x, new_y
-            
-            # Check if position is visible
-            if (0 <= local_x < self.agent_view_size and 
-                0 <= local_y < self.agent_view_size and 
-                vis_mask[local_x, local_y]):
+
+            # Use built-in method to check if object is visible to agent
+            if self._agent_sees(obj_x, obj_y):
                 visible.append((obj, pos, color, obj_type))
-        
+
         return visible
+
+    def _agent_sees(self, x, y):
+        """
+        Check if a non-empty grid position is visible to the agent
+        """
+
+        coordinates = self.relative_coords(x, y)
+        if coordinates is None:
+            return False
+        vx, vy = coordinates
+
+        obs = super().gen_obs()
+
+        obs_grid, _ = Grid.decode(obs["image"])
+        obs_cell = obs_grid.get(vx, vy)
+        world_cell = self.grid.get(x, y)
+
+        assert world_cell is not None
+
+        return obs_cell is not None and obs_cell.type == world_cell.type
 
     def _get_navigation_target(self):
         """Get the current navigation target for memory testing"""
@@ -641,13 +645,13 @@ class FourRoomsMemoryEnv(MiniGridEnv):
             if question["type"] == "location":
                 return question["correct_answer"]
         return None
-    
+
     def _get_inward_direction(self, pos):
         """Determine the best direction for agent to face inward (away from walls)"""
         x, y = pos
         mid_w = self.width // 2
         mid_h = self.height // 2
-        
+
         # For Four Rooms, face toward the center of the room
         if x < mid_w and y < mid_h:  # top-left room
             return 0  # face right (toward center)
