@@ -6,7 +6,6 @@ import torch
 import wandb
 import logging
 import warnings
-import threading
 import itertools
 import numpy as np
 from tqdm import tqdm
@@ -111,6 +110,10 @@ class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
         self.window_size = self.cfg.num_hist + self.cfg.num_pred
+        self.overlap_size = getattr(self.cfg, "overlap_size", 0)
+        self.step_size = self.window_size - self.overlap_size
+        print(f"Overlap size: {self.overlap_size}")
+        print(f"Step size: {self.step_size}")
         with open_dict(cfg):
             cfg["saved_folder"] = os.getcwd()
             log.info(f"Model saved dir: {cfg['saved_folder']}")
@@ -119,17 +122,28 @@ class Trainer:
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
         if self.cfg.model.train_encoder:
-            ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+            ddp_kwargs = DistributedDataParallelKwargs(
+                find_unused_parameters=True
+            )
         else:
-            ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+            ddp_kwargs = DistributedDataParallelKwargs(
+                find_unused_parameters=False
+            )
 
-        self.accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs])
+        self.accelerator = Accelerator(
+            log_with="wandb", kwargs_handlers=[ddp_kwargs]
+        )
 
-        global_rank = self.accelerator.process_index               # global rank
-        local_rank  = self.accelerator.local_process_index         # rank within the node
-        world_size  = self.accelerator.num_processes               # total processes
-        num_machines = int(os.environ.get("ACCELERATE_NUM_MACHINES",
-                            os.environ.get("SLURM_NNODES", "1")))
+        global_rank = self.accelerator.process_index  # global rank
+        local_rank = (
+            self.accelerator.local_process_index
+        )  # rank within the node
+        world_size = self.accelerator.num_processes  # total processes
+        num_machines = int(
+            os.environ.get(
+                "ACCELERATE_NUM_MACHINES", os.environ.get("SLURM_NNODES", "1")
+            )
+        )
         procs_per_machine = max(1, world_size // num_machines)
         machine_rank = global_rank // procs_per_machine
         self.accelerator.print(
@@ -190,7 +204,7 @@ class Trainer:
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
-                    name=run_name
+                    name=run_name,
                 )
             else:
                 self.wandb_run = wandb.init(
@@ -198,7 +212,7 @@ class Trainer:
                     config=wandb_dict,
                     id=wandb_run_id,
                     resume="allow",
-                    name=run_name
+                    name=run_name,
                 )
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
@@ -279,12 +293,6 @@ class Trainer:
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
 
-        # temporary fix until we figure out how to save the scheduler wrapped optimizers
-        # if self.cfg.training.use_scheduler:
-        #     for key in self._keys_to_save:
-        #         if key in ["encoder_optimizer", "predictor_optimizer", "action_encoder_optimizer", "decoder_optimizer"]:
-        #             self._keys_to_save.remove(key)
-
         self.init_models()
         self.init_optimizers()
 
@@ -320,7 +328,7 @@ class Trainer:
         if self.accelerator.is_main_process:
             if not os.path.exists("checkpoints"):
                 os.makedirs("checkpoints")
-            
+
             ckpt = {}
             for k in self._keys_to_save:
                 if k == "epoch":
@@ -330,21 +338,27 @@ class Trainer:
                     if hasattr(self.__dict__[k], "state_dict"):
                         ckpt[k] = self.__dict__[k].state_dict()
                     else:
-                        log.warning(f"Optimizer {k} does not have state_dict method")
+                        log.warning(
+                            f"Optimizer {k} does not have state_dict method"
+                        )
                 else:
                     # Save model state dict
                     if hasattr(self.__dict__[k], "state_dict"):
                         if hasattr(self.__dict__[k], "module"):
                             # DDP wrapped model
-                            ckpt[k] = self.accelerator.unwrap_model(self.__dict__[k]).state_dict()
+                            ckpt[k] = self.accelerator.unwrap_model(
+                                self.__dict__[k]
+                            ).state_dict()
                         else:
                             ckpt[k] = self.__dict__[k].state_dict()
                     else:
-                        log.warning(f"Model {k} does not have state_dict method")
+                        log.warning(
+                            f"Model {k} does not have state_dict method"
+                        )
 
             # Save training config for reconstruction
             ckpt["train_cfg"] = self.cfg
-            
+
             torch.save(ckpt, "checkpoints/model_latest.pth")
             torch.save(ckpt, f"checkpoints/model_{self.epoch}.pth")
             log.info("Saved model state dicts to {}".format(os.getcwd()))
@@ -360,9 +374,18 @@ class Trainer:
     def load_ckpt(self, filename="model_latest.pth"):
         """Load checkpoint, handling both legacy full modules and new state dict format."""
         ckpt = torch.load(filename)
-        
+
         # Check if this is a state dict format checkpoint
-        if "train_cfg" in ckpt and any(k in ckpt for k in ["encoder", "predictor", "proprio_encoder", "action_encoder", "decoder"]):
+        if "train_cfg" in ckpt and any(
+            k in ckpt
+            for k in [
+                "encoder",
+                "predictor",
+                "proprio_encoder",
+                "action_encoder",
+                "decoder",
+            ]
+        ):
             # This is a state dict format checkpoint
             log.info("Loading state dict format checkpoint")
             self._load_ckpt_state_dict(ckpt)
@@ -380,7 +403,7 @@ class Trainer:
         # Load epoch
         if "epoch" in ckpt:
             self.epoch = ckpt["epoch"]
-        
+
         # Load model state dicts
         for k in self._keys_to_save:
             if k == "epoch":
@@ -391,24 +414,36 @@ class Trainer:
                     self.__dict__[k].load_state_dict(ckpt[k])
                     log.info(f"Loaded optimizer {k} from state dict")
                 else:
-                    log.warning(f"Optimizer {k} not found in checkpoint or no load_state_dict method")
+                    log.warning(
+                        f"Optimizer {k} not found in checkpoint or no load_state_dict method"
+                    )
             else:
                 # Load model state dict
                 if k in ckpt and hasattr(self.__dict__[k], "load_state_dict"):
                     # Handle DDP wrapped models
                     if hasattr(self.__dict__[k], "module"):
-                        self.accelerator.unwrap_model(self.__dict__[k]).load_state_dict(ckpt[k])
+                        self.accelerator.unwrap_model(
+                            self.__dict__[k]
+                        ).load_state_dict(ckpt[k])
                     else:
                         self.__dict__[k].load_state_dict(ckpt[k])
                     log.info(f"Loaded model {k} from state dict")
                 else:
-                    log.warning(f"Model {k} not found in checkpoint or no load_state_dict method")
-        
+                    log.warning(
+                        f"Model {k} not found in checkpoint or no load_state_dict method"
+                    )
+
         # Check for missing keys
-        model_keys = [k for k in self._keys_to_save if not k.endswith("_optimizer") and k != "epoch"]
+        model_keys = [
+            k
+            for k in self._keys_to_save
+            if not k.endswith("_optimizer") and k != "epoch"
+        ]
         not_in_ckpt = set(model_keys) - set(ckpt.keys())
         if len(not_in_ckpt):
-            log.warning("Model keys not found in state dict ckpt: %s", not_in_ckpt)
+            log.warning(
+                "Model keys not found in state dict ckpt: %s", not_in_ckpt
+            )
 
     def init_models(self):
 
@@ -422,7 +457,9 @@ class Trainer:
 
         # Sanity: make sure everyone actually built it and it has params
         n_params = sum(p.numel() for p in self.encoder.parameters())
-        assert n_params > 0, "Encoder has zero parameters on this rank BEFORE DDP."
+        assert (
+            n_params > 0
+        ), "Encoder has zero parameters on this rank BEFORE DDP."
 
         if not self.train_encoder:
             for param in self.encoder.parameters():
@@ -438,8 +475,9 @@ class Trainer:
         # update cfg for saving
         with open_dict(self.cfg):
             self.cfg.proprio_encoder.emb_dim = self.proprio_encoder.emb_dim
-            self.cfg.proprio_encoder.in_chans = self.datasets["train"].proprio_dim
-
+            self.cfg.proprio_encoder.in_chans = self.datasets[
+                "train"
+            ].proprio_dim
 
         self.action_encoder = hydra.utils.instantiate(
             self.cfg.action_encoder,
@@ -451,8 +489,9 @@ class Trainer:
         # update cfg for saving
         with open_dict(self.cfg):
             self.cfg.action_encoder.emb_dim = self.action_encoder.emb_dim
-            self.cfg.action_encoder.in_chans = self.datasets["train"].action_dim
-
+            self.cfg.action_encoder.in_chans = self.datasets[
+                "train"
+            ].action_dim
 
         # initialize predictor
         if self.encoder.latent_ndim == 1:  # if feature is 1D
@@ -467,7 +506,10 @@ class Trainer:
 
         if self.cfg.has_predictor:
             if self.predictor is None:
-                dim = self.encoder.emb_dim + (proprio_emb_dim * self.cfg.num_proprio_repeat + action_emb_dim * self.cfg.num_action_repeat) * (self.cfg.concat_dim)
+                dim = self.encoder.emb_dim + (
+                    proprio_emb_dim * self.cfg.num_proprio_repeat
+                    + action_emb_dim * self.cfg.num_action_repeat
+                ) * (self.cfg.concat_dim)
                 self.predictor = hydra.utils.instantiate(
                     self.cfg.predictor,
                     num_patches=num_patches,
@@ -479,7 +521,6 @@ class Trainer:
                     self.cfg.predictor.dim = dim
                     self.cfg.predictor.num_patches = num_patches
                     self.cfg.predictor.num_frames = self.cfg.num_hist
-                    
 
             if not self.train_predictor:
                 for param in self.predictor.parameters():
@@ -513,9 +554,13 @@ class Trainer:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
 
-        for name, mod in dict(encoder=self.encoder, predictor=self.predictor,
-                          decoder=self.decoder, proprio=self.proprio_encoder,
-                          action=self.action_encoder).items():
+        for name, mod in dict(
+            encoder=self.encoder,
+            predictor=self.predictor,
+            decoder=self.decoder,
+            proprio=self.proprio_encoder,
+            action=self.action_encoder,
+        ).items():
             if mod is not None:
                 n = sum(p.numel() for p in mod.parameters())
                 assert n >= 0, f"{name} has negative param count?"
@@ -550,6 +595,9 @@ class Trainer:
             concat_dim=self.cfg.concat_dim,
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
+            decoder_loss_type=getattr(
+                self.cfg.training, "decoder_loss_type", "mse"
+            ),
         )
 
         if self.accelerator.is_main_process:
@@ -559,7 +607,9 @@ class Trainer:
         # Load checkpoint after all models are instantiated
         with self.accelerator.main_process_first():
             model_ckpt = (
-                Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
+                Path(self.cfg.saved_folder)
+                / "checkpoints"
+                / "model_latest.pth"
             )
             if model_ckpt.exists():
                 self.load_ckpt(model_ckpt)
@@ -569,28 +619,42 @@ class Trainer:
     def init_optimizers(self):
         # Scale learning rates by number of processes for proper multi-GPU training
         lr_scale = 1
-        
-        self.encoder_optimizer = torch.optim.Adam(
-            self.encoder.parameters(),
-            lr=self.cfg.training.encoder_lr * lr_scale,
-        )
+
+        if self.cfg.training.encoder_weight_decay is None:
+            self.encoder_optimizer = torch.optim.Adam(
+                self.encoder.parameters(),
+                lr=self.cfg.training.encoder_lr * lr_scale,
+            )
+        else:
+            self.encoder_optimizer = torch.optim.AdamW(
+                self.encoder.parameters(),
+                lr=self.cfg.training.encoder_lr * lr_scale,
+                weight_decay=self.cfg.training.encoder_weight_decay,
+            )
         self.encoder_optimizer = self.accelerator.prepare(
             self.encoder_optimizer
         )
         if self.accelerator.is_main_process:
-            log.info(f"Scaling learning rates by {lr_scale} for {self.accelerator.num_processes} processes")
-            log.info(f"Encoder LR: {self.cfg.training.encoder_lr} -> {self.cfg.training.encoder_lr * lr_scale}")
+            log.info(
+                f"Scaling learning rates by {lr_scale} for {self.accelerator.num_processes} processes"
+            )
+            log.info(
+                f"Encoder LR: {self.cfg.training.encoder_lr} -> {self.cfg.training.encoder_lr * lr_scale}"
+            )
 
         if self.cfg.has_predictor:
             self.predictor_optimizer = torch.optim.AdamW(
                 self.predictor.parameters(),
                 lr=self.cfg.training.predictor_lr * lr_scale,
+                weight_decay=self.cfg.training.predictor_weight_decay,
             )
             self.predictor_optimizer = self.accelerator.prepare(
                 self.predictor_optimizer
             )
             if self.accelerator.is_main_process:
-                log.info(f"Predictor LR: {self.cfg.training.predictor_lr} -> {self.cfg.training.predictor_lr * lr_scale}")
+                log.info(
+                    f"Predictor LR: {self.cfg.training.predictor_lr} -> {self.cfg.training.predictor_lr * lr_scale}"
+                )
 
             self.action_encoder_optimizer = torch.optim.AdamW(
                 itertools.chain(
@@ -598,22 +662,36 @@ class Trainer:
                     self.proprio_encoder.parameters(),
                 ),
                 lr=self.cfg.training.action_encoder_lr * lr_scale,
+                weight_decay=self.cfg.training.action_encoder_weight_decay,
             )
             self.action_encoder_optimizer = self.accelerator.prepare(
                 self.action_encoder_optimizer
             )
             if self.accelerator.is_main_process:
-                log.info(f"Action Encoder LR: {self.cfg.training.action_encoder_lr} -> {self.cfg.training.action_encoder_lr * lr_scale}")
+                log.info(
+                    f"Action Encoder LR: {self.cfg.training.action_encoder_lr} -> {self.cfg.training.action_encoder_lr * lr_scale}"
+                )
 
         if self.cfg.has_decoder:
-            self.decoder_optimizer = torch.optim.Adam(
-                self.decoder.parameters(), lr=self.cfg.training.decoder_lr * lr_scale
-            )
+            if self.cfg.training.decoder_weight_decay is None:
+                self.decoder_optimizer = torch.optim.Adam(
+                    self.decoder.parameters(),
+                    lr=self.cfg.training.decoder_lr * lr_scale,
+                )
+            else:
+                self.decoder_optimizer = torch.optim.AdamW(
+                    self.decoder.parameters(),
+                    lr=self.cfg.training.decoder_lr * lr_scale,
+                    weight_decay=self.cfg.training.decoder_weight_decay,
+                )
+
             self.decoder_optimizer = self.accelerator.prepare(
                 self.decoder_optimizer
             )
             if self.accelerator.is_main_process:
-                log.info(f"Decoder LR: {self.cfg.training.decoder_lr} -> {self.cfg.training.decoder_lr * lr_scale}")
+                log.info(
+                    f"Decoder LR: {self.cfg.training.decoder_lr} -> {self.cfg.training.decoder_lr * lr_scale}"
+                )
 
         # Initialize learning rate schedulers
         self.schedulers = {}
@@ -622,61 +700,76 @@ class Trainer:
             T_mult = self.cfg.training.T_mult
             eta_min_ratio = self.cfg.training.eta_min_ratio
             decay_factor = self.cfg.training.decay_factor
-            
+
             # Calculate steps per epoch for step-based scheduling
             steps_per_epoch = len(self.dataloaders["train"])
-            warmup_steps = int(self.cfg.training.warmup_percent * steps_per_epoch)
+            warmup_steps = int(
+                self.cfg.training.warmup_percent * steps_per_epoch
+            )
             T_0_steps = T_0 * steps_per_epoch  # Convert epochs to steps
             if self.accelerator.is_main_process:
-                log.info(f"Lr scheduler: {steps_per_epoch} steps per epoch, T_0={T_0_steps} steps, warmup={warmup_steps} steps")
-           
-            
+                log.info(
+                    f"Lr scheduler: {steps_per_epoch} steps per epoch, T_0={T_0_steps} steps, warmup={warmup_steps} steps"
+                )
+
             # Encoder scheduler
-            self.schedulers['encoder'] = CosineAnnealingWarmRestartsDecay(
+            self.schedulers["encoder"] = CosineAnnealingWarmRestartsDecay(
                 self.encoder_optimizer,
                 T_0=T_0_steps,
                 T_mult=T_mult,
-                eta_min=self.cfg.training.encoder_lr * lr_scale * eta_min_ratio,
+                eta_min=self.cfg.training.encoder_lr
+                * lr_scale
+                * eta_min_ratio,
                 decay_factor=decay_factor,
-                warmup_epochs=warmup_steps
+                warmup_epochs=warmup_steps,
             )
-            
+
             if self.cfg.has_predictor:
                 # Predictor scheduler
-                self.schedulers['predictor'] = CosineAnnealingWarmRestartsDecay(
-                    self.predictor_optimizer,
-                    T_0=T_0_steps,
-                    T_mult=T_mult,
-                    eta_min=self.cfg.training.predictor_lr * lr_scale * eta_min_ratio,
-                    decay_factor=decay_factor,
-                    warmup_epochs=warmup_steps
+                self.schedulers["predictor"] = (
+                    CosineAnnealingWarmRestartsDecay(
+                        self.predictor_optimizer,
+                        T_0=T_0_steps,
+                        T_mult=T_mult,
+                        eta_min=self.cfg.training.predictor_lr
+                        * lr_scale
+                        * eta_min_ratio,
+                        decay_factor=decay_factor,
+                        warmup_epochs=warmup_steps,
+                    )
                 )
 
-                # Action encoder scheduler                
-                self.schedulers['action_encoder'] = CosineAnnealingWarmRestartsDecay(
-                    self.action_encoder_optimizer,
-                    T_0=T_0_steps,
-                    T_mult=T_mult,
-                    eta_min=self.cfg.training.action_encoder_lr * lr_scale * eta_min_ratio,
-                    decay_factor=decay_factor,
-                    warmup_epochs=warmup_steps
+                # Action encoder scheduler
+                self.schedulers["action_encoder"] = (
+                    CosineAnnealingWarmRestartsDecay(
+                        self.action_encoder_optimizer,
+                        T_0=T_0_steps,
+                        T_mult=T_mult,
+                        eta_min=self.cfg.training.action_encoder_lr
+                        * lr_scale
+                        * eta_min_ratio,
+                        decay_factor=decay_factor,
+                        warmup_epochs=warmup_steps,
+                    )
                 )
-   
+
             if self.cfg.has_decoder:
                 # Decoder scheduler
-                self.schedulers['decoder'] = CosineAnnealingWarmRestartsDecay(
+                self.schedulers["decoder"] = CosineAnnealingWarmRestartsDecay(
                     self.decoder_optimizer,
                     T_0=T_0_steps,
                     T_mult=T_mult,
-                    eta_min=self.cfg.training.decoder_lr * lr_scale * eta_min_ratio,
+                    eta_min=self.cfg.training.decoder_lr
+                    * lr_scale
+                    * eta_min_ratio,
                     decay_factor=decay_factor,
-                    warmup_epochs=warmup_steps
+                    warmup_epochs=warmup_steps,
                 )
-               
-            
+
             if self.accelerator.is_main_process:
-                log.info(f"Initialized step-based cosine LR schedulers: T_0={T_0_steps} steps, T_mult={T_mult}, eta_min_ratio={eta_min_ratio}, decay_factor={decay_factor}, warmup_steps={warmup_steps}")
-                
+                log.info(
+                    f"Initialized step-based cosine LR schedulers: T_0={T_0_steps} steps, T_mult={T_mult}, eta_min_ratio={eta_min_ratio}, decay_factor={decay_factor}, warmup_steps={warmup_steps}"
+                )
 
     def run(self):
 
@@ -695,8 +788,6 @@ class Trainer:
             self.val()
             self.accelerator.wait_for_everyone()
 
-            
-
             # Calculate epoch execution time
             epoch_time = time.time() - epoch_start_time
 
@@ -712,11 +803,31 @@ class Trainer:
             self.logs_flash(step=self.epoch)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
                 # ckpt_path, model_name, model_epoch = self.save_ckpt()
-                ckpt_path, model_name, model_epoch = self.save_ckpt_state_dict()
-            
+                ckpt_path, model_name, model_epoch = (
+                    self.save_ckpt_state_dict()
+                )
+
             if self.cfg.dry_run:
                 return
-                
+
+    def horizon_treatment_eval(self, z_pred, z_tgt, obs, visuals):
+        logs = {}
+
+        for k in z_pred.keys():
+            # mse
+            logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
+
+            # l2
+            logs[f"{k}_horizon_l2"] = torch.norm(z_pred[k] - z_tgt[k], p=2)
+
+            #TODO: frechet (decoded visuals vs obs target) 
+
+            # cycle consistency (decode > encode > measure)
+            z_cycle = self.model.encode_obs(visuals)
+            logs[f"{k}_horizon_cycle_mse"] = torch.nn.functional.mse_loss(z_cycle[k], z_tgt[k])
+            logs[f"{k}_horizon_cycle_l2"] = torch.norm(z_cycle[k] - z_tgt[k], p=2)
+            
+        return logs
 
     def err_eval_single(self, z_pred, z_tgt):
         logs = {}
@@ -831,13 +942,29 @@ class Trainer:
         # Gradient norm clipping
         grad_norms = {}
         if self.model.train_encoder:
-            grad_norms['encoder_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.cfg.training.max_grad_norm).item()
+            grad_norms["encoder_grad_norm"] = torch.nn.utils.clip_grad_norm_(
+                self.encoder.parameters(), self.cfg.training.max_grad_norm
+            ).item()
         if self.cfg.has_predictor and self.model.train_predictor:
-            grad_norms['predictor_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.predictor.parameters(), self.cfg.training.max_grad_norm).item()
-            grad_norms['action_encoder_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.action_encoder.parameters(), self.cfg.training.max_grad_norm).item()
-            grad_norms['proprio_encoder_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.proprio_encoder.parameters(), self.cfg.training.max_grad_norm).item()
+            grad_norms["predictor_grad_norm"] = torch.nn.utils.clip_grad_norm_(
+                self.predictor.parameters(), self.cfg.training.max_grad_norm
+            ).item()
+            grad_norms["action_encoder_grad_norm"] = (
+                torch.nn.utils.clip_grad_norm_(
+                    self.action_encoder.parameters(),
+                    self.cfg.training.max_grad_norm,
+                ).item()
+            )
+            grad_norms["proprio_encoder_grad_norm"] = (
+                torch.nn.utils.clip_grad_norm_(
+                    self.proprio_encoder.parameters(),
+                    self.cfg.training.max_grad_norm,
+                ).item()
+            )
         if self.cfg.has_decoder and self.model.train_decoder:
-            grad_norms['decoder_grad_norm'] = torch.nn.utils.clip_grad_norm_(self.decoder.parameters(), self.cfg.training.max_grad_norm).item()
+            grad_norms["decoder_grad_norm"] = torch.nn.utils.clip_grad_norm_(
+                self.decoder.parameters(), self.cfg.training.max_grad_norm
+            ).item()
 
         if self.accelerator.is_main_process:
             for name, norm in grad_norms.items():
@@ -851,7 +978,7 @@ class Trainer:
             self.predictor_optimizer.step()
             self.action_encoder_optimizer.step()
 
-        # Step learning rate schedulers per batch if step-based scheduling is enabled
+        # # Step learning rate schedulers per batch if step-based scheduling is enabled
         if self.cfg.training.use_scheduler:
             for scheduler in self.schedulers.values():
                 scheduler.step()
@@ -883,7 +1010,9 @@ class Trainer:
 
             if hasattr(self.model.predictor, "reset_memory"):
                 self.model.predictor.reset_memory()
-            elif hasattr(self.model.predictor, "module") and hasattr(self.model.predictor.module, "reset_memory"):
+            elif hasattr(self.model.predictor, "module") and hasattr(
+                self.model.predictor.module, "reset_memory"
+            ):
                 self.model.predictor.module.reset_memory()
 
             batch_loss_components = defaultdict(float)
@@ -891,15 +1020,16 @@ class Trainer:
             data_time = time.perf_counter() - prev_time
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
-            num_windows = N // self.window_size
+            num_windows = max(1, (N - self.overlap_size) // self.step_size)
 
             plot = i == 0
             self.model.train()
             compute_start.record()
 
             for window_idx in range(num_windows):
-                start_idx = window_idx * self.window_size
-                end_idx = start_idx + self.window_size
+                start_idx = window_idx * self.step_size
+                end_idx = min(start_idx + self.window_size, N)
+
                 obs_window = {
                     k: v[:, start_idx:end_idx, ...] for k, v in obs.items()
                 }
@@ -951,10 +1081,13 @@ class Trainer:
     def val(self):
         self.model.eval()
         if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
-            rand_start_end = False if self.cfg.env == "deformable_env" else True
+            rand_start_end = (
+                False if self.cfg.env == "deformable_env" else True
+            )
             with torch.no_grad():
                 train_rollout_logs = self.openloop_rollout(
-                    self.train_traj_dset, mode="train",
+                    self.train_traj_dset,
+                    mode="train",
                     rand_start_end=rand_start_end,
                 )
                 train_rollout_logs = {
@@ -962,13 +1095,38 @@ class Trainer:
                 }
                 self.logs_update(train_rollout_logs)
                 val_rollout_logs = self.openloop_rollout(
-                    self.val_traj_dset, mode="val",
+                    self.val_traj_dset,
+                    mode="val",
                     rand_start_end=rand_start_end,
                 )
                 val_rollout_logs = {
                     f"val_{k}": [v] for k, v in val_rollout_logs.items()
                 }
                 self.logs_update(val_rollout_logs)
+
+                # long horizon treatments
+                if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
+                    train_long_horizon_logs = self.openloop_rollout(
+                        self.train_traj_dset,
+                        mode="train",
+                        rand_start_end=False,
+                        horizon_treatment=self.cfg.horizon_treatment,
+                    )
+                    train_long_horizon_logs = {
+                        f"train_{k}": [v] for k, v in train_long_horizon_logs.items()
+                    }
+                    self.logs_update(train_long_horizon_logs)
+
+                    val_long_horizon_logs = self.openloop_rollout(
+                        self.val_traj_dset,
+                        mode="val",
+                        rand_start_end=False,
+                        horizon_treatment=self.cfg.horizon_treatment,
+                    )
+                    val_long_horizon_logs = {
+                        f"val_{k}": [v] for k, v in val_long_horizon_logs.items()
+                    }
+                    self.logs_update(val_long_horizon_logs)
 
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
@@ -977,16 +1135,18 @@ class Trainer:
             batch_loss_components = defaultdict(float)
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
-            num_windows = N // self.window_size
+            num_windows = max(1, (N - self.overlap_size) // self.step_size)
 
             if hasattr(self.model.predictor, "reset_memory"):
                 self.model.predictor.reset_memory()
-            elif hasattr(self.model.predictor, "module") and hasattr(self.model.predictor.module, "reset_memory"):
+            elif hasattr(self.model.predictor, "module") and hasattr(
+                self.model.predictor.module, "reset_memory"
+            ):
                 self.model.predictor.module.reset_memory()
 
             for window_idx in range(num_windows):
-                start_idx = window_idx * self.window_size
-                end_idx = start_idx + self.window_size
+                start_idx = window_idx * self.step_size
+                end_idx = min(start_idx + self.window_size, N)
                 obs_window = {
                     k: v[:, start_idx:end_idx, ...] for k, v in obs.items()
                 }
@@ -1099,21 +1259,28 @@ class Trainer:
         rand_start_end=True,
         min_horizon=2,
         mode="train",
+        horizon_treatment=None,
     ):
+        if horizon_treatment is not None:
+            T = dset[0][0]["visual"].shape[0] // self.cfg.frameskip
+            assert horizon_treatment < T, "horizon_treatment must be less than T"
+
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.num_hist
         plotting_dir = f"rollout_plots/e{self.epoch}_rollout"
         if self.accelerator.is_main_process:
             os.makedirs(plotting_dir, exist_ok=True)
         self.accelerator.wait_for_everyone()
-        logs = {}
+        logs = defaultdict(list)
 
         # rollout with both num_hist and 1 frame as context
         num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
 
         if hasattr(self.model.predictor, "reset_memory"):
             self.model.predictor.reset_memory()
-        elif hasattr(self.model.predictor, "module") and hasattr(self.model.predictor.module, "reset_memory"):
+        elif hasattr(self.model.predictor, "module") and hasattr(
+            self.model.predictor.module, "reset_memory"
+        ):
             self.model.predictor.module.reset_memory()
 
         # sample traj
@@ -1123,7 +1290,7 @@ class Trainer:
                 traj_idx = np.random.randint(0, len(dset))
                 obs, act, state, _ = dset[traj_idx]
                 act = act.to(self.device)
-                if rand_start_end:
+                if rand_start_end and horizon_treatment is None:
                     if (
                         obs["visual"].shape[0]
                         > min_horizon * self.cfg.frameskip + 1
@@ -1144,13 +1311,17 @@ class Trainer:
                         horizon = np.random.randint(
                             min_horizon, max_horizon + 1
                         )
+                elif horizon_treatment is not None:
+                    start = 0
+                    horizon = horizon_treatment
+                    valid_traj = True
                 else:
                     valid_traj = True
                     start = 0
                     horizon = (
                         obs["visual"].shape[0] - 1
                     ) // self.cfg.frameskip
-                
+
                 if self.cfg.dry_run:
                     return {}
 
@@ -1185,10 +1356,8 @@ class Trainer:
 
                 for k in div_loss.keys():
                     log_key = f"z_{k}_err_rollout{postfix}"
-                    if log_key in logs:
-                        logs[f"z_{k}_err_rollout{postfix}"].append(div_loss[k])
-                    else:
-                        logs[f"z_{k}_err_rollout{postfix}"] = [div_loss[k]]
+                    log_key += f"_h{horizon}" if horizon_treatment is not None else ""
+                    logs[log_key].append(div_loss[k])
 
                 if self.cfg.has_decoder:
                     visuals = self.model.decode_obs(z_obses)[0]["visual"]
@@ -1197,14 +1366,32 @@ class Trainer:
                         self.plot_imgs(
                             imgs,
                             obs["visual"].shape[0],
-                            f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}.png",
+                            f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}_h{horizon}.png",
                         )
-                    # self.accelerator.wait_for_everyone()
+                
+                if horizon_treatment is not None:
+                    # compute rollout error progression
+                    obs_tgt = obs.to(self.device)
+                    z_tgts = self.model.encode_obs(obs_tgt)
+                    
+                    for t in range(1, horizon):
+                        z_pred_t = slice_trajdict_with_t(
+                            z_obses, start_idx=t, end_idx=t+1
+                        )
+                        z_t = slice_trajdict_with_t(
+                            z_tgts, start_idx=t, end_idx=t+1
+                        )   
+                        div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt, visuals)
+                        for k in div_loss.keys():
+                            logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
+
+
         logs = {
             key: sum(values) / len(values)
             for key, values in logs.items()
             if values
         }
+
         return logs
 
     def logs_update(self, logs):
@@ -1228,12 +1415,20 @@ class Trainer:
 
         # Add learning rates to logs
         if self.cfg.training.use_scheduler:
-            epoch_log["lr_encoder"] = self.encoder_optimizer.param_groups[0]['lr']
+            epoch_log["lr_encoder"] = self.encoder_optimizer.param_groups[0][
+                "lr"
+            ]
             if self.cfg.has_predictor:
-                epoch_log["lr_predictor"] = self.predictor_optimizer.param_groups[0]['lr']
-                epoch_log["lr_action_encoder"] = self.action_encoder_optimizer.param_groups[0]['lr']
+                epoch_log["lr_predictor"] = (
+                    self.predictor_optimizer.param_groups[0]["lr"]
+                )
+                epoch_log["lr_action_encoder"] = (
+                    self.action_encoder_optimizer.param_groups[0]["lr"]
+                )
             if self.cfg.has_decoder:
-                epoch_log["lr_decoder"] = self.decoder_optimizer.param_groups[0]['lr']
+                epoch_log["lr_decoder"] = self.decoder_optimizer.param_groups[
+                    0
+                ]["lr"]
 
         # Add epoch time to the log message if available
         epoch_time_msg = ""
@@ -1245,7 +1440,9 @@ class Trainer:
         if self.cfg.training.use_scheduler:
             lr_msg = f"  Encoder LR: {epoch_log.get('lr_encoder', 0):.2e}"
             if self.cfg.has_predictor:
-                lr_msg += f"  Predictor LR: {epoch_log.get('lr_predictor', 0):.2e}"
+                lr_msg += (
+                    f"  Predictor LR: {epoch_log.get('lr_predictor', 0):.2e}"
+                )
 
         log.info(
             f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
@@ -1323,9 +1520,15 @@ class Trainer:
 
     def get_alpha_values(self):
         """Get current alpha values from the additive control transformer"""
-        if hasattr(self.predictor, "transformer") and hasattr(self.predictor.transformer, "alphas"):
+        if hasattr(self.predictor, "transformer") and hasattr(
+            self.predictor.transformer, "alphas"
+        ):
             module = self.predictor.transformer
-        elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "transformer") and hasattr(self.predictor.module.transformer, "alphas"):
+        elif (
+            hasattr(self.predictor, "module")
+            and hasattr(self.predictor.module, "transformer")
+            and hasattr(self.predictor.module.transformer, "alphas")
+        ):
             module = self.predictor.module.transformer
         else:
             return {}
@@ -1334,9 +1537,7 @@ class Trainer:
         for i, alpha in enumerate(module.alphas):
             alphas[f"alpha_layer_{i}"] = alpha.item()
             if alpha.grad is not None:
-                alphas[f"alpha_layer_{i}_grad_norm"] = (
-                    alpha.grad.norm().item()
-                )
+                alphas[f"alpha_layer_{i}_grad_norm"] = alpha.grad.norm().item()
             else:
                 alphas[f"alpha_layer_{i}_grad_norm"] = 0.0
         return alphas

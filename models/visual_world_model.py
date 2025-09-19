@@ -22,6 +22,7 @@ class VWorldModel(nn.Module):
         train_encoder=True,
         train_predictor=False,
         train_decoder=True,
+        decoder_loss_type='mse',
     ):
         super().__init__()
         self.num_hist = num_hist
@@ -37,7 +38,8 @@ class VWorldModel(nn.Module):
         self.num_action_repeat = num_action_repeat
         self.num_proprio_repeat = num_proprio_repeat
         self.proprio_dim = proprio_dim * num_proprio_repeat 
-        self.action_dim = action_dim * num_action_repeat 
+        self.action_dim = action_dim * num_action_repeat
+        self.decoder_loss_type = decoder_loss_type 
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -69,7 +71,14 @@ class VWorldModel(nn.Module):
         #     # set self.encoder_transform to identity transform
         #     self.encoder_transform = lambda x: x
 
-        self.decoder_criterion = nn.MSELoss()
+        # Initialize decoder criterion based on config
+        self.decoder_loss_type = getattr(self, 'decoder_loss_type', 'mse')
+        if self.decoder_loss_type == 'smooth_l1':
+            self.decoder_criterion = nn.SmoothL1Loss()
+        else:  # default to mse
+            self.decoder_criterion = nn.MSELoss()
+        print(f"Decoder loss type: {self.decoder_criterion}")
+        
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
 

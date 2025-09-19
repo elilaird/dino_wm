@@ -21,8 +21,9 @@ if [ "${PARTITION}" = "short" ]; then
     CPUS=16
 fi
 
+HOME_DIR=${HOME_DIR:-"/users/ejlaird/Projects/dino_wm"}
 ENV_DIR=${ENV_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/envs"}
-PROJECT_DIR=${PROJECT_DIR:-"${HOME}/Projects/dino_wm"}
+WORK_DIR=${WORK_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/workdirs"}
 DATA_DIR=${DATA_DIR:-"/lustre/smuexa01/client/users/ejlaird/dino_wm_data"}
 MUJOCO_DIR=/users/ejlaird/.mujoco/mujoco210/bin
 
@@ -60,7 +61,7 @@ echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TIME=${
 echo "#!/usr/bin/env zsh
 #SBATCH -J ${TYPE}
 #SBATCH -A coreyc_coreyc_mp_jepa_0001
-#SBATCH -o output/${TYPE}/${TYPE}_%j.out
+#SBATCH -o ${HOME_DIR}/output/${TYPE}/${TYPE}_%j.out
 #SBATCH --cpus-per-task=${CPUS} 
 #SBATCH --mem=${MEM}     
 #SBATCH --nodes=${NODES}
@@ -78,6 +79,14 @@ conda activate ${ENV_DIR}/${CONDA_ENV}
 which python
 echo $CONDA_PREFIX
 
+# Clone repo for this job
+cd ${WORK_DIR}
+mkdir -p dino_wm_\${SLURM_JOB_ID}
+cd dino_wm_\${SLURM_JOB_ID}
+git clone git@github.com:elilaird/dino_wm.git .
+git checkout main  # Use your production branch
+
+echo "WORK_DIR: $(pwd)"
 echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TYPE=${TYPE} TIME=${TIME} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
 
 export DATA_DIR=${DATA_DIR}

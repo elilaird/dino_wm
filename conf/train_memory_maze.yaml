@@ -24,7 +24,7 @@ hydra:
 training:
   seed: 0
   epochs: 100
-  batch_size: 2048 # gpu_batch_size
+  batch_size: 512 # gpu_batch_size
   save_every_x_epoch: 10 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
@@ -32,6 +32,10 @@ training:
   decoder_lr: 3e-4
   predictor_lr: 1e-4
   action_encoder_lr: 5e-4
+  encoder_weight_decay: 0.01
+  decoder_weight_decay: 0.01
+  predictor_weight_decay: 0.01
+  action_encoder_weight_decay: 0.01
   max_grad_norm: 0.5
   # Cosine LR scheduler with warm restarts, decay, and warmup
   use_scheduler: True
@@ -40,6 +44,10 @@ training:
   eta_min_ratio: 0.01  # minimum LR as ratio of initial LR
   decay_factor: 0.9  # Factor to decay peak LR at each restart
   warmup_percent: 0.05 # warmup percentage of total steps
+
+horizon_treatment: null
+
+decoder_loss_type: mse
 
 full_sequence: False
 img_size: 64 
@@ -56,6 +64,7 @@ normalize_action: False
 proprio_emb_dim: 12 
 num_proprio_repeat: 1
 
+overlap_size: 0
 num_frames: 100
 num_hist: 9
 num_pred: 1 
