@@ -826,7 +826,6 @@ class Trainer:
             z_cycle = self.model.encode_obs(visuals)
             logs[f"{k}_horizon_cycle_mse"] = torch.nn.functional.mse_loss(z_cycle[k], z_tgt[k])
             logs[f"{k}_horizon_cycle_l2"] = torch.norm(z_cycle[k] - z_tgt[k], p=2)
-
             
         return logs
 
@@ -1264,7 +1263,7 @@ class Trainer:
     ):
         if horizon_treatment is not None:
             T = dset[0][0]["visual"].shape[0] // self.cfg.frameskip
-            assert all(h < T for h in horizon_treatment), "All horizon_treatment values must be less than T"
+            assert horizon_treatment < T, "horizon_treatment must be less than T"
 
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.num_hist
@@ -1312,9 +1311,9 @@ class Trainer:
                         horizon = np.random.randint(
                             min_horizon, max_horizon + 1
                         )
-                elif horizon_treatment is not None and len(horizon_treatment) > 0:
+                elif horizon_treatment is not None:
                     start = 0
-                    horizon = horizon_treatment[0]
+                    horizon = horizon_treatment
                     valid_traj = True
                 else:
                     valid_traj = True
@@ -1382,7 +1381,6 @@ class Trainer:
                         z_t = slice_trajdict_with_t(
                             z_tgts, start_idx=t, end_idx=t+1
                         )   
-                        # div_loss = self.err_eval_single(z_obs_t, z_g)
                         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt, visuals)
                         for k in div_loss.keys():
                             logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
