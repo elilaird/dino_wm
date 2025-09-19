@@ -6,7 +6,7 @@ dataset:
   _target_: "datasets.minigrid_dataset.load_minigrid_slice_train_val"
   n_rollout: null
   normalize_action: ${normalize_action}
-  data_path: ${oc.env:DATASET_DIR}/four_rooms/four_rooms_bfs
+  data_path: ${oc.env:DATASET_DIR}/four_rooms/four_rooms_bfs_object_recall
   split_ratio: 0.8
   full_sequence: False
   transform:
