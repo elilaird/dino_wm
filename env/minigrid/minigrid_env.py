@@ -295,7 +295,7 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         return obs, self.agent_pos
 
     def sample_random_init_goal_states(self, seed):
-        self.set_seed(seed)
+        # self.set_seed(seed)
         ax, ay = self.sample_random_pos()
 
         gx, gy = self.sample_random_pos()
@@ -823,9 +823,8 @@ def run_episode(
     - 'bfs': BFS-based navigation (for all envs)
     """
     obs_list, act_list, proprio_list = [], [], []
-    rng_seed = seed
 
-    obs, _ = env.reset(seed=seed)
+    obs, _ = env.reset()
     obs_list.append(obs['visual'])
     proprio_list.append(obs['proprio'])
     act_list.append(0)
@@ -928,7 +927,6 @@ def main():
     g.add_argument("--episodes", type=int, default=1000)
     g.add_argument("--output-dir", type=str, default="minigrid_env")
     g.add_argument("--policy", choices=["random", "bfs", "explore"], default="random")
-    g.add_argument("--seed", type=int, default=42)
     g.add_argument("--max-steps", type=int, default=100)
     g.add_argument("--episodes-per-chunk", type=int, default=100)
     # Memory testing parameters
@@ -940,8 +938,8 @@ def main():
     
     args = parser.parse_args()
 
-    if args.seed is not None:
-        np.random.seed(args.seed)
+    # if args.seed is not None:
+    #     np.random.seed(args.seed)
 
     # Regular dataset generation or evaluation
     ctor = lambda: make_four_rooms(
@@ -972,7 +970,7 @@ def main():
     for episode_idx in tqdm(range(args.episodes), desc="Generating"):
         env = ctor()
         
-        traj = run_episode(env, max_steps=args.max_steps, seed=args.seed, policy=args.policy)
+        traj = run_episode(env, max_steps=args.max_steps, policy=args.policy)
         
         current_chunk.append(traj)
         env.close()

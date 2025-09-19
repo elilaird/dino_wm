@@ -28,7 +28,7 @@ DATA_DIR=${DATA_DIR:-"/lustre/smuexa01/client/users/ejlaird/dino_wm_data"}
 MUJOCO_DIR=/users/ejlaird/.mujoco/mujoco210/bin
 
 if [ "${TYPE}" = "jupyter" ]; then
-    WORK_DIR=${HOME_DIR}/Projects/dino_wm
+    WORK_DIR=${HOME_DIR}
 fi
 
 echo "WORK_DIR: ${WORK_DIR}"
