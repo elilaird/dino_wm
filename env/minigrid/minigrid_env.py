@@ -996,7 +996,6 @@ def main():
         'total_episodes': total_episodes,
         'episodes_per_chunk': args.episodes_per_chunk,
         'n_chunks': chunk_idx,
-        'seed': args.seed,
         'policy': args.policy,
         'max_steps': args.max_steps,
         'output_dir': args.output_dir,
