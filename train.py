@@ -1322,8 +1322,8 @@ class Trainer:
                         obs["visual"].shape[0] - 1
                     ) // self.cfg.frameskip
 
-                if self.cfg.dry_run:
-                    return {}
+                # if self.cfg.dry_run:
+                #     return {}
 
             for k in obs.keys():
                 obs[k] = obs[k][
@@ -1360,7 +1360,9 @@ class Trainer:
                     logs[log_key].append(div_loss[k])
 
                 if self.cfg.has_decoder:
-                    visuals = self.model.decode_obs(z_obses)[0]["visual"]
+                    decoded = self.model.decode_obs(z_obses)[0]
+                    visuals = decoded["visual"]
+                    proprios = decoded["proprio"]
                     imgs = torch.cat([obs["visual"], visuals[0].cpu()], dim=0)
                     if self.accelerator.is_main_process:
                         self.plot_imgs(
@@ -1382,7 +1384,7 @@ class Trainer:
                         z_t = slice_trajdict_with_t(
                             z_tgts, start_idx=t, end_idx=t+1
                         )   
-                        div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt, visuals)
+                        div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt, {"visual": visuals, "proprio": proprios})
                         for k in div_loss.keys():
                             logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
         
