@@ -816,19 +816,7 @@ class Trainer:
 
         for k in ['visual']:#z_pred.keys():
             # mse
-            # Check for NaN/inf values without triggering CUDA errors
-            try:
-                if torch.isnan(z_pred[k]).any() or torch.isinf(z_pred[k]).any():
-                    print(f"WARNING: z_pred[{k}] contains NaN/inf values")
-                if torch.isnan(z_tgt[k]).any() or torch.isinf(z_tgt[k]).any():
-                    print(f"WARNING: z_tgt[{k}] contains NaN/inf values")
-                if torch.isnan(visuals[k]).any() or torch.isinf(visuals[k]).any():
-                    print(f"WARNING: visuals[{k}] contains NaN/inf values")
-            except RuntimeError as e:
-                print(f"ERROR accessing z_pred[{k}] or z_tgt[{k}] or visuals[{k}]: {e}")
-                continue
-            
-            # logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
+            logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
 
             # l2
             # logs[f"{k}_horizon_l2"] = torch.norm(z_pred[k] - z_tgt[k], p=2)
@@ -1397,8 +1385,8 @@ class Trainer:
                         )   
                         visuals_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1)
                         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
-                    #     for k in div_loss.keys():
-                    #         logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
+                        for k in div_loss.keys():
+                            logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
 
         logs = {
             key: sum(values) / len(values)
