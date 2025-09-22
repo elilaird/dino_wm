@@ -1395,8 +1395,8 @@ class Trainer:
                         z_t = slice_trajdict_with_t(
                             z_tgts, start_idx=t, end_idx=t+1
                         )   
-                    #     visuals_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1)
-                    #     div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
+                        visuals_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1)
+                        div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
                     #     for k in div_loss.keys():
                     #         logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
 
