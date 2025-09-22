@@ -1,0 +1,20 @@
+name: two_rooms_bfs
+args: []
+kwargs: {}
+
+dataset:
+  _target_: "datasets.minigrid_dataset.load_minigrid_slice_train_val"
+  n_rollout: null
+  normalize_action: ${normalize_action}
+  data_path: ${oc.env:DATASET_DIR}/two_rooms/two_rooms_bfs_object_recall
+  split_ratio: 0.8
+  full_sequence: False
+  transform:
+    _target_: "datasets.img_transforms.default_transform"
+    img_size: ${img_size}
+  in_memory: False
+  proprio_available: True
+  total_episodes: 1000
+
+decoder_path: null
+num_workers: 16 

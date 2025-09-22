@@ -95,6 +95,16 @@ else
     echo "Current working directory: dino_wm_\${SLURM_JOB_ID}"
     git clone git@github.com:elilaird/dino_wm.git .
     git checkout ${BRANCH}  # Use your production branch
+
+    # Print git state information
+    echo "=== GIT STATE ==="
+    echo "Branch: \$(git branch --show-current)"
+    echo "Commit hash: \$(git rev-parse HEAD)"
+    echo "Commit short: \$(git rev-parse --short HEAD)"
+    echo "Commit message: \$(git log -1 --pretty=format:'%s')"
+    echo "Commit author: \$(git log -1 --pretty=format:'%an <%ae>')"
+    echo "Commit date: \$(git log -1 --pretty=format:'%ad' --date=iso)"
+    echo "================"
 fi
 
 echo "WORK_DIR: \$\(pwd\)"
