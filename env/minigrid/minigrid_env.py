@@ -1148,10 +1148,9 @@ def run_episode(
             run_bfs_policy_two_rooms(env, max_T, step_and_record, act_random)
         else:
             # Unknown environment, fall back to random
-            run_random_policy(env, max_T, step_and_record, act_random)
+            raise ValueError(f"Unknown environment: {type(env)}")
     else:
-        # Random policy (default)
-        run_random_policy(env, max_T, step_and_record, act_random)
+        raise ValueError(f"Unknown policy: {policy}")
     
     # cap the length of the trajectory to max_T
     obs_list = obs_list[:max_T]
@@ -1209,6 +1208,19 @@ def make_four_rooms(world_size=17, obs_mode="top_down", tile_size=14, agent_view
     )
 
 
+def make_two_rooms(world_size=9, obs_mode="pov", tile_size=14, agent_view_size=7, 
+                   memory_test_mode="object_recall", n_memory_objects=12, memory_object_types=["ball", "box", "key"]):
+    return TwoRoomsMemoryEnv(
+        world_size=world_size, 
+        obs_mode=obs_mode, 
+        tile_size=tile_size, 
+        agent_view_size=agent_view_size,
+        memory_test_mode=memory_test_mode,
+        n_memory_objects=n_memory_objects,
+        memory_object_types=memory_object_types
+    )
+
+
 # -------------------------
 # CLI
 # -------------------------
@@ -1221,7 +1233,7 @@ def main():
     # generate dataset
     g = sub.add_parser("generate", help="Generate offline datasets")
     g.add_argument(
-        "--env", choices=["four_rooms", "ten_rooms", "mdk"], required=True
+        "--env", choices=["four_rooms", "two_rooms"], required=True
     )
     g.add_argument("--episodes", type=int, default=1000)
     g.add_argument("--output-dir", type=str, default="minigrid_env")
@@ -1241,17 +1253,24 @@ def main():
     #     np.random.seed(args.seed)
 
     # Regular dataset generation or evaluation
-    ctor = lambda: make_four_rooms(
-        memory_test_mode=args.memory_test_mode,
-        n_memory_objects=args.n_memory_objects,
-        memory_object_types=args.memory_object_types
-    )
+    if env == "four_rooms":
+        ctor = lambda: make_four_rooms(
+            memory_test_mode=args.memory_test_mode,
+            n_memory_objects=args.n_memory_objects,
+            memory_object_types=args.memory_object_types
+        )
+    elif args.env == "two_rooms":
+        ctor = lambda: make_two_rooms(
+            memory_test_mode=args.memory_test_mode,
+            n_memory_objects=args.n_memory_objects,
+            memory_object_types=args.memory_object_types
+        )
     
     dataset_dir = os.environ["DATASET_DIR"]
     assert dataset_dir is not None, "DATASET_DIR must be set"
     
     # Include memory test mode in output path
-    memory_suffix = f"_{args.memory_test_mode}" if args.env == "four_rooms" else ""
+    memory_suffix = f"_{args.memory_test_mode}"
     output_path = os.path.join(dataset_dir, args.output_dir, f"{args.env}_{args.policy}{memory_suffix}")
     
     # Create output directory
@@ -1263,8 +1282,7 @@ def main():
     total_episodes = 0
     
     # Determine if we're generating memory trajectories
-    is_memory_test = (args.env == "four_rooms" and 
-                    args.memory_test_mode != 'navigation')
+    is_memory_test = args.memory_test_mode != 'navigation'
     
     for episode_idx in tqdm(range(args.episodes), desc="Generating"):
         env = ctor()
