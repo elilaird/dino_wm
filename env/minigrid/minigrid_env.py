@@ -948,15 +948,13 @@ def run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random):
             total_steps += 1
 
 
-def run_scripted_policy_two_rooms(env, max_T, step_and_record, act_random):
+def run_scripted_policy_two_rooms(env, max_T, step_and_record):
     """Scripted policy for TwoRoomsMemoryEnv that repeats the exploration sequence 5 times:
     1. Starts at random position in one room
-    2. Turns towards door
-    3. Turns left, then right (looks both directions)
-    4. Goes to door using BFS
-    5. Goes to middle of other room using BFS
-    6. Turns left, then right (looks both directions)
-    7. Returns to original room and original position/direction using BFS
+    2. Goes to middle of room using BFS
+    3. Goes to door using BFS
+    4. Goes to middle of other room using BFS
+    5. Returns to original room and original position/direction using BFS
     
     Repeats this sequence 5 times to test memory retention over multiple cycles.
     """
@@ -1011,48 +1009,33 @@ def run_scripted_policy_two_rooms(env, max_T, step_and_record, act_random):
         """Execute one complete exploration cycle"""
         nonlocal total_steps
         
-        # Phase 1: Turn towards door
-        face_actions = face_towards_door()
-        for action in face_actions:
+        # Phase 1: Navigate to middle of room
+        room_center = get_room_center(initial_room)
+        room_actions = navigate_to_position(room_center)
+        for action in room_actions:
             step_and_record(action)
             total_steps += 1
         
-        # Phase 2: Look left, then right
-        # Turn left
-        step_and_record(0)
-        total_steps += 1
-        # Turn right (back to original direction)
-        step_and_record(1)
-        total_steps += 1
-        
-        # Phase 3: Navigate to door
+        # Phase 2: Navigate to door
         door_actions = navigate_to_position(door_pos)
         for action in door_actions:
             step_and_record(action)
             total_steps += 1
         
-        # Phase 4: Navigate to middle of other room
+        # Phase 3: Navigate to middle of other room
         other_room_center = get_room_center(other_room)
         room_actions = navigate_to_position(other_room_center)
         for action in room_actions:
             step_and_record(action)
             total_steps += 1
         
-        # Phase 5: Look left, then right in other room
-        # Turn left
-        step_and_record(0)
-        total_steps += 1
-        # Turn right (back to original direction)
-        step_and_record(1)
-        total_steps += 1
-        
-        # Phase 6: Return to original room and position
+        # Phase 4: Return to original room and position
         return_actions = navigate_to_position(original_pos)
         for action in return_actions:
             step_and_record(action)
             total_steps += 1
         
-        # Phase 7: Face original direction
+        # Phase 5: Face original direction
         face_actions = face_direction(original_direction)
         for action in face_actions:
             step_and_record(action)
@@ -1273,7 +1256,7 @@ def run_episode(
             raise ValueError(f"Unknown environment: {type(env)}")
     elif policy == "scripted":
         if isinstance(env, TwoRoomsMemoryEnv):
-            run_scripted_policy_two_rooms(env, max_T, step_and_record, act_random)
+            run_scripted_policy_two_rooms(env, max_T, step_and_record)
         else:
             raise ValueError(f"Scripted policy only supported for TwoRoomsMemoryEnv, got {type(env)}")
     else:
