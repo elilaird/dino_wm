@@ -125,6 +125,35 @@ def plan_actions_from_path(
 DOOR_COLORS = ["red", "green", "blue", "yellow", "purple"]
 KEY_COLORS = DOOR_COLORS
 
+class OverlapBall(Ball):
+    def __init__(self, color="blue"):
+        super().__init__(color)
+    
+    def can_overlap(self):
+        return True
+    
+    def see_behind(self):
+        return True
+
+class OverlapKey(Key):
+    def __init__(self, color="blue"):
+        super().__init__(color)
+    
+    def can_overlap(self):
+        return True
+    
+    def see_behind(self):
+        return True
+
+class OverlapBox(Box):
+    def __init__(self, color="blue"):
+        super().__init__(color)
+    
+    def can_overlap(self):
+        return True
+    
+    def see_behind(self):
+        return True
 
 # -------------------------
 # Four Rooms Memory Env
@@ -397,13 +426,13 @@ class FourRoomsMemoryEnv(MiniGridEnv):
 
                 # Create object based on type
                 if obj_type == "ball":
-                    obj = Ball(color)
+                    obj = OverlapBall(color)
                 elif obj_type == "box":
-                    obj = Box(color)
+                    obj = OverlapBox(color)
                 elif obj_type == "key":
-                    obj = Key(color)
+                    obj = OverlapKey(color)
                 else:
-                    obj = Ball(color)  # Default
+                    obj = OverlapBall(color)  # Default
 
                 self.put_obj(obj, pos[0], pos[1])
                 self.memory_objects.append((obj, pos, color, obj_type))
