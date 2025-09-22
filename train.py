@@ -1127,6 +1127,23 @@ class Trainer:
                         f"val_{k}": [v] for k, v in val_long_horizon_logs.items()
                     }
                     self.logs_update(val_long_horizon_logs)
+                
+                # loop closure tests
+                if OmegaConf.select(self.cfg, "eval_loopclosure", default=None) is not None and self.cfg.env == "two_rooms_bfs":
+                    from datasets.minigrid_dataset import MiniGridMemmapDataset
+                    loop_dset = MiniGridMemmapDataset(
+                        n_rollout=None,
+                        transform=self.cfg.dataset.transform,
+                        data_path=self.cfg.eval_loopclosure.data_path,
+                        normalize_action=False,
+                        total_episodes=self.cfg.eval_loopclosure.total_episodes,
+                        proprio_available=True,
+                    )
+                    loop_rollout_logs = self.loopclosure_rollout(loop_dset)
+                    loop_rollout_logs = {
+                        f"val_{k}": [v] for k, v in loop_rollout_logs.items()
+                    }
+                    self.logs_update(loop_rollout_logs)
 
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
@@ -1387,6 +1404,63 @@ class Trainer:
                         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
                         for k in div_loss.keys():
                             logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
+
+        logs = {
+            key: sum(values) / len(values)
+            for key, values in logs.items()
+            if values
+        }
+
+        return logs
+
+    def loopclosure_rollout(self, dset):
+        plotting_dir = f"loopclosure_plots/e{self.epoch}_loopclosure"
+        if self.accelerator.is_main_process:
+            os.makedirs(plotting_dir, exist_ok=True)
+        self.accelerator.wait_for_everyone()
+        logs = defaultdict(list)
+
+        for idx in range(len(dset)):
+            obs, act, _, _ = dset[idx]
+            obs = {k:v.to(self.device) for k, v in obs.items()}
+            act = act.to(self.device)
+            actions = act.unsqueeze(0)
+
+            horizon = int(actions.shape[1])
+
+            obs_0 = {}
+            for k in obs.keys():
+                obs_0[k] = (
+                    obs[k][:self.cfg.num_hist].unsqueeze(0).to(self.device)
+                )  # unsqueeze for batch, (b, t, c, h, w)
+            z_obses, _ = self.model.rollout(obs_0, actions)
+            
+            if self.cfg.has_decoder:
+                decoded = self.model.decode_obs(z_obses)[0]
+                visuals = decoded["visual"]
+                imgs = torch.cat([obs["visual"], visuals[0].cpu()], dim=0)
+                if self.accelerator.is_main_process:
+                    self.plot_imgs(
+                        imgs,
+                        obs["visual"].shape[0],
+                        f"{plotting_dir}/e{self.epoch}_{idx}_h{horizon}.png",
+                    )
+            
+                # compute rollout error progression
+                obs_tgt = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
+                z_tgts = self.model.encode_obs(obs_tgt)
+                z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
+                for t in range(1, horizon):
+                    z_pred_t = slice_trajdict_with_t(
+                        z_obses, start_idx=t, end_idx=t+1
+                    )
+                    z_t = slice_trajdict_with_t(
+                        z_tgts, start_idx=t, end_idx=t+1
+                    )   
+                    visuals_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1)
+                    div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
+                    for k in div_loss.keys():
+                        logs[f"z_{k}_err_loopclosure_h{horizon}_t{t}"].append(div_loss[k])
 
         logs = {
             key: sum(values) / len(values)

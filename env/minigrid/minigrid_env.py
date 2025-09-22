@@ -133,7 +133,7 @@ class CustomDoor(Door):
         self.is_locked = False
 
     def see_behind(self):
-        return True
+        return False
 
     def can_overlap(self):
         return True
@@ -816,6 +816,7 @@ class Trajectory:
     observations: np.ndarray  # [T, H, W, 3]
     actions: np.ndarray  # [T]
     proprio: np.ndarray  # [T, 4]
+    extras: np.ndarray  = None
 
 def get_room_quadrant(pos, width, height):
     """Determine which quadrant/room a position is in"""
@@ -946,6 +947,123 @@ def run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random):
             # No path found, try random action
             step_and_record(act_random())
             total_steps += 1
+
+
+def run_scripted_policy_two_rooms(env, max_T, step_and_record):
+    """Scripted policy for TwoRoomsMemoryEnv that repeats the exploration sequence 5 times:
+    1. Starts at random position in one room
+    2. Goes to middle of room using BFS
+    3. Goes to door using BFS
+    4. Goes to middle of other room using BFS
+    5. Returns to original room and original position/direction using BFS
+    
+    Repeats this sequence 5 times to test memory retention over multiple cycles.
+    """
+    total_steps = 0
+    mid_w = env.width // 2  # 4 for 9x9 grid
+    mid_h = env.height // 2  # 4 for 9x9 grid
+    door_pos = (mid_w, mid_h)  # (4, 4)
+    
+    # Store original position and direction
+    original_pos = tuple(env.agent_pos)
+    original_direction = env.agent_dir
+    initial_room = env._get_room(original_pos)
+    other_room = 1 - initial_room
+    
+    def get_room_center(room_idx):
+        """Get center position of a room"""
+        if room_idx == 0:  # left room
+            return (mid_w // 2, mid_h)  # (2, 4)
+        else:  # right room
+            return (mid_w + mid_w // 2, mid_h)  # (6, 4)
+    
+    def navigate_to_position(target_pos):
+        """Navigate to a specific position using BFS"""
+        current_pos = tuple(env.agent_pos)
+        path = bfs_shortest_path(env.grid, current_pos, target_pos)
+        if path and len(path) > 1:
+            planned_actions = plan_actions_from_path(env.agent_dir, path)
+            return planned_actions
+        return []
+    
+    def face_direction(target_dir):
+        """Face a specific direction"""
+        current_dir = env.agent_dir
+        diff = (target_dir - current_dir) % 4
+        if diff == 1:
+            return [1]  # right
+        elif diff == 2:
+            return [1, 1]  # 180 turn
+        elif diff == 3:
+            return [0]  # left
+        return []  # already facing correct direction
+    
+    def face_towards_door():
+        """Turn to face towards the door"""
+        current_pos = tuple(env.agent_pos)
+        if current_pos[0] < mid_w:  # in left room, face right
+            return face_direction(0)
+        else:  # in right room, face left
+            return face_direction(2)
+    
+    def execute_exploration_cycle():
+        """Execute one complete exploration cycle"""
+        nonlocal total_steps
+        
+        # Phase 1: Navigate to middle of room
+        room_center = get_room_center(initial_room)
+        room_actions = navigate_to_position(room_center)
+        for action in room_actions:
+            step_and_record(action)
+            total_steps += 1
+
+        # Phase 2: face door
+        face_actions = face_towards_door()
+        for action in face_actions:
+            step_and_record(action)
+            total_steps += 1
+        
+        # Phase 3: Navigate to door
+        door_actions = navigate_to_position(door_pos)
+        for action in door_actions:
+            step_and_record(action)
+            total_steps += 1
+
+        # Phase 3: Navigate to middle of other room
+        other_room_center = get_room_center(other_room)
+        room_actions = navigate_to_position(other_room_center)
+        for action in room_actions:
+            step_and_record(action)
+            total_steps += 1
+
+        # navigate to door
+        door_actions = navigate_to_position(door_pos)
+        for action in door_actions:
+            step_and_record(action)
+            total_steps += 1
+
+        
+        # Phase 4: Return to original room and position
+        return_actions = navigate_to_position(original_pos)
+        for action in return_actions:
+            step_and_record(action)
+            total_steps += 1
+        
+        # Phase 5: Face original direction
+        face_actions = face_direction(original_direction)
+        for action in face_actions:
+            step_and_record(action)
+            total_steps += 1
+    
+    # Execute the exploration cycle 5 times
+    for cycle in range(5):
+        execute_exploration_cycle()
+    
+    # Fill remaining steps with no-op actions if needed
+    # while total_steps < max_T:
+    #     step_and_record(2)  # forward action (no-op if can't move)
+    #     total_steps += 1
+    
 
 
 def run_bfs_policy_two_rooms(env, max_T, step_and_record, act_random):
@@ -1118,13 +1236,15 @@ def run_episode(
     - 'random': Random actions
     - 'explore': Systematic exploration for FourRoomsMemoryEnv (covers all rooms and actions)
     - 'bfs': BFS-based navigation (for all envs)
+    - 'scripted': Scripted policy for TwoRoomsMemoryEnv (looks both directions, goes to door, explores other room, returns)
     """
     obs_list, act_list, proprio_list = [], [], []
-
+    extras_list = []
     obs, _ = env.reset()
     obs_list.append(obs['visual'])
     proprio_list.append(obs['proprio'])
     act_list.append(0)
+    extras_list.append(env.get_full_render(highlight=True, tile_size=14))
     max_T = max_steps or env.max_steps
 
     def step_and_record(action):
@@ -1133,6 +1253,7 @@ def run_episode(
         obs_list.append(obs['visual'])
         proprio_list.append(obs['proprio'])
         act_list.append(action)
+        extras_list.append(env.get_full_render(highlight=True, tile_size=14))
 
     def act_random():
         """Random action fallback"""
@@ -1149,6 +1270,11 @@ def run_episode(
         else:
             # Unknown environment, fall back to random
             raise ValueError(f"Unknown environment: {type(env)}")
+    elif policy == "scripted":
+        if isinstance(env, TwoRoomsMemoryEnv):
+            run_scripted_policy_two_rooms(env, max_T, step_and_record)
+        else:
+            raise ValueError(f"Scripted policy only supported for TwoRoomsMemoryEnv, got {type(env)}")
     else:
         raise ValueError(f"Unknown policy: {policy}")
     
@@ -1156,6 +1282,7 @@ def run_episode(
     obs_list = obs_list[:max_T]
     act_list = act_list[:max_T]
     proprio_list = proprio_list[:max_T]
+    extras_list = extras_list[:max_T]
 
     obs_list = np.stack(obs_list, axis=0) # [max_T, H, W, 3]
     # obs_list = {k: np.stack([o[k] for o in obs_list], axis=0) for k in obs_list[0].keys()}
@@ -1166,6 +1293,7 @@ def run_episode(
         observations=obs_list,
         actions=act_list,
         proprio=proprio_list,
+        extras=extras_list
     )
     return traj
 
@@ -1183,16 +1311,20 @@ def save_trajectories_npy(trajectories: List[Trajectory], out_dir: str, chunk_id
     # observations = {k: np.stack([t.observations[k] for t in trajectories], axis=0) for k in trajectories[0].observations.keys()}
     actions = np.stack([t.actions for t in trajectories])           # (N, T)
     proprio = np.stack([t.proprio for t in trajectories])           # (N, T, 4)
+    extras = np.stack([t.extras for t in trajectories if t.extras is not None])           # (N, T, H, W, 3)
     
     # Save as separate NPY files
     obs_path = os.path.join(out_dir, f"observations_{chunk_idx:04d}.npy")
     act_path = os.path.join(out_dir, f"actions_{chunk_idx:04d}.npy")
     proprio_path = os.path.join(out_dir, f"proprio_{chunk_idx:04d}.npy")
+    extras_path = os.path.join(out_dir, f"extras_{chunk_idx:04d}.npy")
     
     np.save(obs_path, observations)
     np.save(act_path, actions)
     np.save(proprio_path, proprio)
-    return obs_path, act_path, proprio_path
+    if trajectories[0].extras is not None:
+        np.save(extras_path, extras)
+    return obs_path, act_path, proprio_path, extras_path
 
 
 def make_four_rooms(world_size=17, obs_mode="top_down", tile_size=14, agent_view_size=None, 
@@ -1237,7 +1369,7 @@ def main():
     )
     g.add_argument("--episodes", type=int, default=1000)
     g.add_argument("--output-dir", type=str, default="minigrid_env")
-    g.add_argument("--policy", choices=["random", "bfs", "explore"], default="random")
+    g.add_argument("--policy", choices=["random", "bfs", "explore", "scripted"], default="random")
     g.add_argument("--max-steps", type=int, default=100)
     g.add_argument("--episodes-per-chunk", type=int, default=100)
     # Memory testing parameters
