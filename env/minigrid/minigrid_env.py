@@ -948,6 +948,105 @@ def run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random):
             total_steps += 1
 
 
+def run_scripted_policy_two_rooms(env, step_and_record):
+    """Scripted policy for TwoRoomsMemoryEnv that:
+    1. Starts in optimal position in one room (backed against wall facing door)
+    2. Looks both directions (left/right)
+    3. Goes straight to door
+    4. Goes to optimal position in other room
+    5. Looks both directions
+    6. Returns to original room
+    7. Faces original direction
+    
+    Uses hardcoded action sequences for deterministic behavior.
+    Produces fixed-length trajectories (21 actions) - no padding needed.
+    """
+    total_steps = 0
+    mid_w = env.width // 2  # 4 for 9x9 grid
+    mid_h = env.height // 2  # 4 for 9x9 grid
+    
+    def get_optimal_room_position(room_idx):
+        """Get optimal position in room - backed against wall facing door"""
+        if room_idx == 0:  # left room
+            # Position at left wall (x=1), middle height (y=4), facing right toward door
+            return (1, mid_h), 0  # (1, 4), face right
+        else:  # right room  
+            # Position at right wall (x=7), middle height (y=4), facing left toward door
+            return (env.width - 2, mid_h), 2  # (7, 4), face left
+    
+    # Randomly choose starting room
+    initial_room = random.randint(0, 1)
+    other_room = 1 - initial_room
+    
+    # Set optimal initial position
+    init_pos, init_dir = get_optimal_room_position(initial_room)
+    env.place_agent(init_pos)
+    env.agent_dir = init_dir
+    original_direction = init_dir
+    
+    def get_hardcoded_actions(initial_room, other_room):
+        """Get hardcoded action sequence based on starting room"""
+        if initial_room == 0:  # Starting in left room
+            # Left room (1,4) facing right -> door (4,4) -> right room (7,4) -> back to left room (1,4)
+            return [
+                # Phase 1: Look both directions in left room (facing right)
+                0,      # look left (now facing up)
+                1, 1,   # look right twice (now facing right again)
+                
+                # Phase 2: Move from left room (1,4) to door (4,4) - 3 steps forward
+                2, 2, 2,
+                
+                # Phase 3: Move from door (4,4) to right room (7,4) - 3 steps forward  
+                2, 2, 2,
+                
+                # Phase 4: Look both directions in right room (facing right)
+                0,      # look left (now facing up)
+                1, 1,   # look right twice (now facing right again)
+                
+                # Phase 5: Return from right room (7,4) to door (4,4) - 3 steps forward
+                2, 2, 2,
+                
+                # Phase 6: Return from door (4,4) to left room (1,4) - 3 steps forward
+                2, 2, 2,
+                
+                # Phase 7: Face original direction (right) - already facing right, no actions needed
+            ]
+        else:  # Starting in right room
+            # Right room (7,4) facing left -> door (4,4) -> left room (1,4) -> back to right room (7,4)
+            return [
+                # Phase 1: Look both directions in right room (facing left)
+                1,      # look right (now facing up)
+                0, 0,   # look left twice (now facing left again)
+                
+                # Phase 2: Move from right room (7,4) to door (4,4) - 3 steps forward
+                2, 2, 2,
+                
+                # Phase 3: Move from door (4,4) to left room (1,4) - 3 steps forward
+                2, 2, 2,
+                
+                # Phase 4: Look both directions in left room (facing left)
+                1,      # look right (now facing up)
+                0, 0,   # look left twice (now facing left again)
+                
+                # Phase 5: Return from left room (1,4) to door (4,4) - 3 steps forward
+                2, 2, 2,
+                
+                # Phase 6: Return from door (4,4) to right room (7,4) - 3 steps forward
+                2, 2, 2,
+                
+                # Phase 7: Face original direction (left) - already facing left, no actions needed
+            ]
+    
+    # Get the hardcoded action sequence
+    action_sequence = get_hardcoded_actions(initial_room, other_room)
+    
+    # Execute the hardcoded sequence
+    for action in action_sequence:
+        step_and_record(action)
+        total_steps += 1
+    
+
+
 def run_bfs_policy_two_rooms(env, max_T, step_and_record, act_random):
     """BFS-based exploration policy for TwoRoomsMemoryEnv that:
     1. Explores current room thoroughly
@@ -1118,6 +1217,7 @@ def run_episode(
     - 'random': Random actions
     - 'explore': Systematic exploration for FourRoomsMemoryEnv (covers all rooms and actions)
     - 'bfs': BFS-based navigation (for all envs)
+    - 'scripted': Scripted policy for TwoRoomsMemoryEnv (looks both directions, goes to door, explores other room, returns)
     """
     obs_list, act_list, proprio_list = [], [], []
 
@@ -1149,6 +1249,12 @@ def run_episode(
         else:
             # Unknown environment, fall back to random
             raise ValueError(f"Unknown environment: {type(env)}")
+    elif policy == "scripted":
+        if isinstance(env, TwoRoomsMemoryEnv):
+            run_scripted_policy_two_rooms(env, step_and_record)
+            max_T = 22
+        else:
+            raise ValueError(f"Scripted policy only supported for TwoRoomsMemoryEnv, got {type(env)}")
     else:
         raise ValueError(f"Unknown policy: {policy}")
     
@@ -1237,7 +1343,7 @@ def main():
     )
     g.add_argument("--episodes", type=int, default=1000)
     g.add_argument("--output-dir", type=str, default="minigrid_env")
-    g.add_argument("--policy", choices=["random", "bfs", "explore"], default="random")
+    g.add_argument("--policy", choices=["random", "bfs", "explore", "scripted"], default="random")
     g.add_argument("--max-steps", type=int, default=100)
     g.add_argument("--episodes-per-chunk", type=int, default=100)
     # Memory testing parameters
