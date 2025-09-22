@@ -1249,9 +1249,6 @@ def main():
     
     args = parser.parse_args()
 
-    # if args.seed is not None:
-    #     np.random.seed(args.seed)
-
     # Regular dataset generation or evaluation
     if args.env == "four_rooms":
         ctor = lambda: make_four_rooms(
