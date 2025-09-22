@@ -1027,12 +1027,36 @@ def run_scripted_policy_two_rooms(env, max_T, step_and_record):
         for action in door_actions:
             step_and_record(action)
             total_steps += 1
-        
+
+        if env._get_room(env.agent_pos) == 0:
+            # face left
+            step_and_record(0)
+            total_steps += 1
+        else:
+            # face right
+            step_and_record(1)
+            total_steps += 1
+
         # Phase 3: Navigate to middle of other room
         other_room_center = get_room_center(other_room)
         room_actions = navigate_to_position(other_room_center)
         for action in room_actions:
             step_and_record(action)
+            total_steps += 1
+
+        # navigate to door
+        door_actions = navigate_to_position(door_pos)
+        for action in door_actions:
+            step_and_record(action)
+            total_steps += 1
+
+        if env._get_room(env.agent_pos) == 0:
+            # face left
+            step_and_record(0)
+            total_steps += 1
+        else:
+            # face right
+            step_and_record(1)
             total_steps += 1
         
         # Phase 4: Return to original room and position
