@@ -816,6 +816,7 @@ class Trajectory:
     observations: np.ndarray  # [T, H, W, 3]
     actions: np.ndarray  # [T]
     proprio: np.ndarray  # [T, 4]
+    extras: np.ndarray  = None
 
 def get_room_quadrant(pos, width, height):
     """Determine which quadrant/room a position is in"""
@@ -1059,9 +1060,9 @@ def run_scripted_policy_two_rooms(env, max_T, step_and_record):
         execute_exploration_cycle()
     
     # Fill remaining steps with no-op actions if needed
-    while total_steps < max_T:
-        step_and_record(2)  # forward action (no-op if can't move)
-        total_steps += 1
+    # while total_steps < max_T:
+    #     step_and_record(2)  # forward action (no-op if can't move)
+    #     total_steps += 1
     
 
 
@@ -1238,11 +1239,12 @@ def run_episode(
     - 'scripted': Scripted policy for TwoRoomsMemoryEnv (looks both directions, goes to door, explores other room, returns)
     """
     obs_list, act_list, proprio_list = [], [], []
-
+    extras_list = []
     obs, _ = env.reset()
     obs_list.append(obs['visual'])
     proprio_list.append(obs['proprio'])
     act_list.append(0)
+    extras_list.append(env.get_full_render(highlight=True, tile_size=14))
     max_T = max_steps or env.max_steps
 
     def step_and_record(action):
@@ -1251,6 +1253,7 @@ def run_episode(
         obs_list.append(obs['visual'])
         proprio_list.append(obs['proprio'])
         act_list.append(action)
+        extras_list.append(env.get_full_render(highlight=True, tile_size=14))
 
     def act_random():
         """Random action fallback"""
@@ -1279,6 +1282,7 @@ def run_episode(
     obs_list = obs_list[:max_T]
     act_list = act_list[:max_T]
     proprio_list = proprio_list[:max_T]
+    extras_list = extras_list[:max_T]
 
     obs_list = np.stack(obs_list, axis=0) # [max_T, H, W, 3]
     # obs_list = {k: np.stack([o[k] for o in obs_list], axis=0) for k in obs_list[0].keys()}
@@ -1289,6 +1293,7 @@ def run_episode(
         observations=obs_list,
         actions=act_list,
         proprio=proprio_list,
+        extras=extras_list
     )
     return traj
 
@@ -1306,16 +1311,20 @@ def save_trajectories_npy(trajectories: List[Trajectory], out_dir: str, chunk_id
     # observations = {k: np.stack([t.observations[k] for t in trajectories], axis=0) for k in trajectories[0].observations.keys()}
     actions = np.stack([t.actions for t in trajectories])           # (N, T)
     proprio = np.stack([t.proprio for t in trajectories])           # (N, T, 4)
+    extras = np.stack([t.extras for t in trajectories if t.extras is not None])           # (N, T, H, W, 3)
     
     # Save as separate NPY files
     obs_path = os.path.join(out_dir, f"observations_{chunk_idx:04d}.npy")
     act_path = os.path.join(out_dir, f"actions_{chunk_idx:04d}.npy")
     proprio_path = os.path.join(out_dir, f"proprio_{chunk_idx:04d}.npy")
+    extras_path = os.path.join(out_dir, f"extras_{chunk_idx:04d}.npy")
     
     np.save(obs_path, observations)
     np.save(act_path, actions)
     np.save(proprio_path, proprio)
-    return obs_path, act_path, proprio_path
+    if trajectories[0].extras is not None:
+        np.save(extras_path, extras)
+    return obs_path, act_path, proprio_path, extras_path
 
 
 def make_four_rooms(world_size=17, obs_mode="top_down", tile_size=14, agent_view_size=None, 
