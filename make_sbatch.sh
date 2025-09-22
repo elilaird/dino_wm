@@ -10,6 +10,7 @@ PARTITION=${PARTITION:-batch}
 TYPE=${TYPE:-train} # jupyter, eval, test
 CONDA_ENV=${CONDA_ENV:-dino_clean}
 NODES=${NODES:-1}
+BRANCH=${BRANCH:-main}
 
 GPU=${GPU:-8}
 CPUS=${CPUS:-128}
@@ -61,7 +62,7 @@ fi
 
 LOG_FILE="output/${TYPE}/${TYPE}_%j.out"
 
-echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} PARTITION=${PARTITION} TIME=${TIME} TYPE=${TYPE} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
+echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} BRANCH ${BRANCH} PARTITION=${PARTITION} TIME=${TIME} TYPE=${TYPE} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
 
 # write sbatch script
 echo "#!/usr/bin/env zsh
@@ -93,7 +94,7 @@ else
     cd dino_wm_\${SLURM_JOB_ID}
     echo "Current working directory: dino_wm_\${SLURM_JOB_ID}"
     git clone git@github.com:elilaird/dino_wm.git .
-    git checkout main  # Use your production branch
+    git checkout ${BRANCH}  # Use your production branch
 fi
 
 echo "WORK_DIR: \$\(pwd\)"
