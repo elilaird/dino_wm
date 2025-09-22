@@ -1383,22 +1383,22 @@ class Trainer:
                         )
                 
             
-                if horizon_treatment is not None:
-                    # compute rollout error progression
-                    obs_tgt = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
-                    z_tgts = self.model.encode_obs(obs_tgt)
-                    z_cycle = self.model.encode_obs(decoded) # re-encode the decoded visuals
-                    for t in range(1, horizon-1):
-                        z_pred_t = slice_trajdict_with_t(
-                            z_obses, start_idx=t, end_idx=t+1
-                        )
-                        z_t = slice_trajdict_with_t(
-                            z_tgts, start_idx=t, end_idx=t+1
-                        )   
-                        visuals_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1)
-                        div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
-                        for k in div_loss.keys():
-                            logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
+                # if horizon_treatment is not None:
+                #     # compute rollout error progression
+                #     obs_tgt = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
+                #     z_tgts = self.model.encode_obs(obs_tgt)
+                #     z_cycle = self.model.encode_obs(decoded) # re-encode the decoded visuals
+                #     for t in range(1, horizon-1):
+                #         z_pred_t = slice_trajdict_with_t(
+                #             z_obses, start_idx=t, end_idx=t+1
+                #         )
+                #         z_t = slice_trajdict_with_t(
+                #             z_tgts, start_idx=t, end_idx=t+1
+                #         )   
+                #         visuals_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1)
+                #         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
+                #         for k in div_loss.keys():
+                #             logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
 
         logs = {
             key: sum(values) / len(values)
