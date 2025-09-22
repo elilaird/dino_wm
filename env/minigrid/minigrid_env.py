@@ -133,7 +133,7 @@ class CustomDoor(Door):
         self.is_locked = False
 
     def see_behind(self):
-        return False
+        return True
 
     def can_overlap(self):
         return True
@@ -715,17 +715,17 @@ class TwoRoomsMemoryEnv(FourRoomsMemoryEnv):
 
     def __init__(
         self,
-        world_size: int = 17,
+        world_size: int = 9,
         max_steps: Optional[int] = None,
         see_through_walls: bool = False,
-        agent_view_size: int = None,
+        agent_view_size: int = 4,
         render_mode: Optional[str] = "rgb_array",
-        obs_mode: str = "top_down",  # "top_down" or "pov"
+        obs_mode: str = "pov",  # "top_down" or "pov"
         tile_size: int = 14,
         seed: Optional[int] = None,
-        memory_test_mode: str = "navigation",  # "navigation", "object_recall", "color_memory", "sequential_memory"
-        n_memory_objects: int = 3,  # Number of objects to place for memory tests
-        memory_object_types: List[str] = None,  # Types of objects to place
+        memory_test_mode: str = "object_recall",  # "navigation", "object_recall", "color_memory", "sequential_memory"
+        n_memory_objects: int = 12,  # Number of objects to place for memory tests
+        memory_object_types: List[str] = ["ball", "box", "key"],  # Types of objects to place
     ):
         super().__init__(
             world_size=world_size,
@@ -1208,7 +1208,7 @@ def make_four_rooms(world_size=17, obs_mode="top_down", tile_size=14, agent_view
     )
 
 
-def make_two_rooms(world_size=9, obs_mode="pov", tile_size=14, agent_view_size=7, 
+def make_two_rooms(world_size=9, obs_mode="pov", tile_size=14, agent_view_size=4, 
                    memory_test_mode="object_recall", n_memory_objects=12, memory_object_types=["ball", "box", "key"]):
     return TwoRoomsMemoryEnv(
         world_size=world_size, 
