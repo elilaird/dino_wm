@@ -53,6 +53,10 @@ img_size: 224 # should be a multiple of 224
 frameskip: 1
 concat_dim: 1
 
+eval_loopclosure:
+  data_path: /lustre/smuexa01/client/users/ejlaird/dino_wm_data/two_rooms/two_rooms_scripted_object_recall
+  total_episodes: 100
+
 
 # action encoder
 action_emb_dim: 12
