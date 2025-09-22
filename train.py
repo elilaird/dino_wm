@@ -824,8 +824,8 @@ class Trainer:
             #TODO: frechet (decoded visuals vs obs target) 
 
             # cycle consistency (decode > encode > measure)
-            logs[f"{k}_horizon_cycle_mse"] = torch.nn.functional.mse_loss(z_cycle[k], z_tgt[k])
-            logs[f"{k}_horizon_cycle_l2"] = torch.norm(z_cycle[k] - z_tgt[k], p=2)
+            logs[f"{k}_horizon_cycle_mse"] = torch.nn.functional.mse_loss(visuals[k], z_tgt[k])
+            logs[f"{k}_horizon_cycle_l2"] = torch.norm(visuals[k] - z_tgt[k], p=2)
             
         return logs
 
