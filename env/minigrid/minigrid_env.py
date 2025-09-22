@@ -948,101 +948,123 @@ def run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random):
             total_steps += 1
 
 
-def run_scripted_policy_two_rooms(env, step_and_record):
-    """Scripted policy for TwoRoomsMemoryEnv that:
-    1. Starts in optimal position in one room (backed against wall facing door)
-    2. Looks both directions (left/right)
-    3. Goes straight to door
-    4. Goes to optimal position in other room
-    5. Looks both directions
-    6. Returns to original room
-    7. Faces original direction
+def run_scripted_policy_two_rooms(env, max_T, step_and_record, act_random):
+    """Scripted policy for TwoRoomsMemoryEnv that repeats the exploration sequence 5 times:
+    1. Starts at random position in one room
+    2. Turns towards door
+    3. Turns left, then right (looks both directions)
+    4. Goes to door using BFS
+    5. Goes to middle of other room using BFS
+    6. Turns left, then right (looks both directions)
+    7. Returns to original room and original position/direction using BFS
     
-    Uses hardcoded action sequences for deterministic behavior.
-    Produces fixed-length trajectories (21 actions) - no padding needed.
+    Repeats this sequence 5 times to test memory retention over multiple cycles.
     """
     total_steps = 0
     mid_w = env.width // 2  # 4 for 9x9 grid
     mid_h = env.height // 2  # 4 for 9x9 grid
+    door_pos = (mid_w, mid_h)  # (4, 4)
     
-    def get_optimal_room_position(room_idx):
-        """Get optimal position in room - backed against wall facing door"""
-        if room_idx == 0:  # left room
-            # Position at left wall (x=1), middle height (y=4), facing right toward door
-            return (1, mid_h), 0  # (1, 4), face right
-        else:  # right room  
-            # Position at right wall (x=7), middle height (y=4), facing left toward door
-            return (env.width - 2, mid_h), 2  # (7, 4), face left
-    
-    # Randomly choose starting room
-    initial_room = random.randint(0, 1)
+    # Store original position and direction
+    original_pos = tuple(env.agent_pos)
+    original_direction = env.agent_dir
+    initial_room = env._get_room(original_pos)
     other_room = 1 - initial_room
     
-    # Set optimal initial position
-    init_pos, init_dir = get_optimal_room_position(initial_room)
-    env.place_agent(init_pos)
-    env.agent_dir = init_dir
-    original_direction = init_dir
+    def get_room_center(room_idx):
+        """Get center position of a room"""
+        if room_idx == 0:  # left room
+            return (mid_w // 2, mid_h)  # (2, 4)
+        else:  # right room
+            return (mid_w + mid_w // 2, mid_h)  # (6, 4)
     
-    def get_hardcoded_actions(initial_room, other_room):
-        """Get hardcoded action sequence based on starting room"""
-        if initial_room == 0:  # Starting in left room
-            # Left room (1,4) facing right -> door (4,4) -> right room (7,4) -> back to left room (1,4)
-            return [
-                # Phase 1: Look both directions in left room (facing right)
-                0,      # look left (now facing up)
-                1, 1,   # look right twice (now facing right again)
-                
-                # Phase 2: Move from left room (1,4) to door (4,4) - 3 steps forward
-                2, 2, 2,
-                
-                # Phase 3: Move from door (4,4) to right room (7,4) - 3 steps forward  
-                2, 2, 2,
-                
-                # Phase 4: Look both directions in right room (facing right)
-                0,      # look left (now facing up)
-                1, 1,   # look right twice (now facing right again)
-                
-                # Phase 5: Return from right room (7,4) to door (4,4) - 3 steps forward
-                2, 2, 2,
-                
-                # Phase 6: Return from door (4,4) to left room (1,4) - 3 steps forward
-                2, 2, 2,
-                
-                # Phase 7: Face original direction (right) - already facing right, no actions needed
-            ]
-        else:  # Starting in right room
-            # Right room (7,4) facing left -> door (4,4) -> left room (1,4) -> back to right room (7,4)
-            return [
-                # Phase 1: Look both directions in right room (facing left)
-                1,      # look right (now facing up)
-                0, 0,   # look left twice (now facing left again)
-                
-                # Phase 2: Move from right room (7,4) to door (4,4) - 3 steps forward
-                2, 2, 2,
-                
-                # Phase 3: Move from door (4,4) to left room (1,4) - 3 steps forward
-                2, 2, 2,
-                
-                # Phase 4: Look both directions in left room (facing left)
-                1,      # look right (now facing up)
-                0, 0,   # look left twice (now facing left again)
-                
-                # Phase 5: Return from left room (1,4) to door (4,4) - 3 steps forward
-                2, 2, 2,
-                
-                # Phase 6: Return from door (4,4) to right room (7,4) - 3 steps forward
-                2, 2, 2,
-                
-                # Phase 7: Face original direction (left) - already facing left, no actions needed
-            ]
+    def navigate_to_position(target_pos):
+        """Navigate to a specific position using BFS"""
+        current_pos = tuple(env.agent_pos)
+        path = bfs_shortest_path(env.grid, current_pos, target_pos)
+        if path and len(path) > 1:
+            planned_actions = plan_actions_from_path(env.agent_dir, path)
+            return planned_actions
+        return []
     
-    # Get the hardcoded action sequence
-    action_sequence = get_hardcoded_actions(initial_room, other_room)
+    def face_direction(target_dir):
+        """Face a specific direction"""
+        current_dir = env.agent_dir
+        diff = (target_dir - current_dir) % 4
+        if diff == 1:
+            return [1]  # right
+        elif diff == 2:
+            return [1, 1]  # 180 turn
+        elif diff == 3:
+            return [0]  # left
+        return []  # already facing correct direction
     
-    # Execute the hardcoded sequence
-    for action in action_sequence:
-        step_and_record(action)
+    def face_towards_door():
+        """Turn to face towards the door"""
+        current_pos = tuple(env.agent_pos)
+        if current_pos[0] < mid_w:  # in left room, face right
+            return face_direction(0)
+        else:  # in right room, face left
+            return face_direction(2)
+    
+    def execute_exploration_cycle():
+        """Execute one complete exploration cycle"""
+        nonlocal total_steps
+        
+        # Phase 1: Turn towards door
+        face_actions = face_towards_door()
+        for action in face_actions:
+            step_and_record(action)
+            total_steps += 1
+        
+        # Phase 2: Look left, then right
+        # Turn left
+        step_and_record(0)
+        total_steps += 1
+        # Turn right (back to original direction)
+        step_and_record(1)
+        total_steps += 1
+        
+        # Phase 3: Navigate to door
+        door_actions = navigate_to_position(door_pos)
+        for action in door_actions:
+            step_and_record(action)
+            total_steps += 1
+        
+        # Phase 4: Navigate to middle of other room
+        other_room_center = get_room_center(other_room)
+        room_actions = navigate_to_position(other_room_center)
+        for action in room_actions:
+            step_and_record(action)
+            total_steps += 1
+        
+        # Phase 5: Look left, then right in other room
+        # Turn left
+        step_and_record(0)
+        total_steps += 1
+        # Turn right (back to original direction)
+        step_and_record(1)
+        total_steps += 1
+        
+        # Phase 6: Return to original room and position
+        return_actions = navigate_to_position(original_pos)
+        for action in return_actions:
+            step_and_record(action)
+            total_steps += 1
+        
+        # Phase 7: Face original direction
+        face_actions = face_direction(original_direction)
+        for action in face_actions:
+            step_and_record(action)
+            total_steps += 1
+    
+    # Execute the exploration cycle 5 times
+    for cycle in range(5):
+        execute_exploration_cycle()
+    
+    # Fill remaining steps with no-op actions if needed
+    while total_steps < max_T:
+        step_and_record(2)  # forward action (no-op if can't move)
         total_steps += 1
     
 
@@ -1251,8 +1273,7 @@ def run_episode(
             raise ValueError(f"Unknown environment: {type(env)}")
     elif policy == "scripted":
         if isinstance(env, TwoRoomsMemoryEnv):
-            run_scripted_policy_two_rooms(env, step_and_record)
-            max_T = 22
+            run_scripted_policy_two_rooms(env, max_T, step_and_record, act_random)
         else:
             raise ValueError(f"Scripted policy only supported for TwoRoomsMemoryEnv, got {type(env)}")
     else:
