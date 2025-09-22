@@ -1015,8 +1015,14 @@ def run_scripted_policy_two_rooms(env, max_T, step_and_record):
         for action in room_actions:
             step_and_record(action)
             total_steps += 1
+
+        # Phase 2: face door
+        face_actions = face_towards_door()
+        for action in face_actions:
+            step_and_record(action)
+            total_steps += 1
         
-        # Phase 2: Navigate to door
+        # Phase 3: Navigate to door
         door_actions = navigate_to_position(door_pos)
         for action in door_actions:
             step_and_record(action)
