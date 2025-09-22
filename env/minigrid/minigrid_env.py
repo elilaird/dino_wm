@@ -125,36 +125,54 @@ def plan_actions_from_path(
 DOOR_COLORS = ["red", "green", "blue", "yellow", "purple"]
 KEY_COLORS = DOOR_COLORS
 
+class CustomDoor(Door):
+    # custom door for blocking view only
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_open = False
+        self.is_locked = False
+
+    def see_behind(self):
+        return False
+
+    def can_overlap(self):
+        return True
+
+    def toggle(self, env, pos):
+        return True
+
+
 class OverlapBall(Ball):
     def __init__(self, color="blue"):
         super().__init__(color)
-    
+
     def can_overlap(self):
         return True
-    
+
     def see_behind(self):
         return True
+
 
 class OverlapKey(Key):
     def __init__(self, color="blue"):
         super().__init__(color)
-    
+
     def can_overlap(self):
         return True
-    
+
     def see_behind(self):
         return True
+
 
 class OverlapBox(Box):
     def __init__(self, color="blue"):
         super().__init__(color)
-    
+
     def can_overlap(self):
         return True
-    
+
     def see_behind(self):
         return True
-
 # -------------------------
 # Four Rooms Memory Env
 # -------------------------
@@ -197,6 +215,7 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         self.agent_view_size = agent_view_size or math.ceil(world_size / 2)
         if self.agent_view_size % 2 == 0:
             self.agent_view_size += 1
+        self.num_rooms = 4
 
         # Memory test state
         self.memory_objects = []  # List of (object, position, color) tuples
@@ -402,12 +421,12 @@ class FourRoomsMemoryEnv(MiniGridEnv):
 
         # Ensure objects are placed in different rooms
         room_positions = []
-        for room in range(4):
+        for room in range(self.num_rooms):
             room_positions.append(self._get_room_positions(room))
 
         # Place objects in different rooms
         for i in range(self.n_memory_objects):
-            room_idx = i % 4
+            room_idx = i % self.num_rooms
             available_positions = room_positions[room_idx]
             
             # Filter out already used positions
@@ -692,6 +711,103 @@ class FourRoomsMemoryEnv(MiniGridEnv):
             return 2  # face left (toward center)
 
 
+class TwoRoomsMemoryEnv(FourRoomsMemoryEnv):
+
+    def __init__(
+        self,
+        world_size: int = 17,
+        max_steps: Optional[int] = None,
+        see_through_walls: bool = False,
+        agent_view_size: int = None,
+        render_mode: Optional[str] = "rgb_array",
+        obs_mode: str = "top_down",  # "top_down" or "pov"
+        tile_size: int = 14,
+        seed: Optional[int] = None,
+        memory_test_mode: str = "navigation",  # "navigation", "object_recall", "color_memory", "sequential_memory"
+        n_memory_objects: int = 3,  # Number of objects to place for memory tests
+        memory_object_types: List[str] = None,  # Types of objects to place
+    ):
+        super().__init__(
+            world_size=world_size,
+            max_steps=max_steps,
+            see_through_walls=see_through_walls,
+            agent_view_size=agent_view_size,
+            render_mode=render_mode,
+            obs_mode=obs_mode,
+            tile_size=tile_size,
+            seed=seed,
+            memory_test_mode=memory_test_mode,
+            n_memory_objects=n_memory_objects,
+            memory_object_types=memory_object_types,
+        )
+        self.num_rooms = 2
+
+    def _gen_grid(self, width, height):
+        self.grid = Grid(width, height)
+        # outer walls
+        self.grid.wall_rect(0, 0, width, height)
+
+        # internal walls to make 4 rooms
+        mid_w = width // 2
+        mid_h = height // 2
+        # self.grid.horz_wall(1, mid_h, width - 2)
+        self.grid.vert_wall(mid_w, 1, height - 2)
+        self.grid.set(mid_w, mid_h, CustomDoor(color="red"))
+
+        # Place memory objects based on test mode
+        if self.memory_test_mode != "navigation":
+            self._place_memory_objects()
+
+        # Place goal for navigation tasks
+        if self.memory_test_mode == "navigation":
+            gx, gy = self.sample_random_pos()
+            self.put_obj(Goal(), gx, gy)
+            self.goal_pos = (gx, gy)
+
+        # agent spawn
+        self.place_agent(init_state=self.init_state)
+
+    def _get_room_positions(self, room_idx):
+        """Get available positions in a specific room"""
+        mid_w = self.width // 2
+        mid_h = self.height // 2
+        positions = []
+
+        # Define room boundaries
+        if room_idx == 0:  # left
+            x_range = (1, mid_w - 1)
+            y_range = (1, self.height - 2)
+        elif room_idx == 1:  # right
+            x_range = (mid_w + 1, self.width - 2)
+            y_range = (1, self.height - 2)
+
+        # Find empty positions in the room
+        for x in range(x_range[0], x_range[1] + 1):
+            for y in range(y_range[0], y_range[1] + 1):
+                if self.grid.get(x, y) is None:
+                    positions.append((x, y))
+
+        return positions
+
+    def _get_room(self, pos):
+        if pos[0] < self.width // 2:
+            return 0
+        elif pos[0] == self.width // 2:
+            return 1
+        return 0  # middle hallway
+
+    def _get_visible_objects(self):
+        """Get visible memory objects using MiniGrid's built-in visibility system"""
+        visible = []
+        agent_room = self._get_room(self.agent_pos)
+
+        # Check each memory object using built-in visibility methods
+        for obj, pos, color, obj_type in self.memory_objects:
+            if self._get_room(pos) == agent_room:
+                visible.append((obj, pos, color, obj_type))
+
+        return visible
+
 # -------------------------
 # Rollout helpers
 # -------------------------
@@ -715,16 +831,16 @@ def get_room_quadrant(pos, width, height):
         return 3  # bottom-right
 
 def get_room_center(quadrant, width, height):
-        """Get approximate center position of a room quadrant"""
-        mid_w, mid_h = width // 2, height // 2
-        if quadrant == 0:  # top-left
-            return (mid_w // 2, mid_h // 2)
-        elif quadrant == 1:  # top-right
-            return (mid_w + mid_w // 2, mid_h // 2)
-        elif quadrant == 2:  # bottom-left
-            return (mid_w // 2, mid_h + mid_h // 2)
-        else:  # bottom-right
-            return (mid_w + mid_w // 2, mid_h + mid_h // 2)
+    """Get approximate center position of a room quadrant"""
+    mid_w, mid_h = width // 2, height // 2
+    if quadrant == 0:  # top-left
+        return (mid_w // 2, mid_h // 2)
+    elif quadrant == 1:  # top-right
+        return (mid_w + mid_w // 2, mid_h // 2)
+    elif quadrant == 2:  # bottom-left
+        return (mid_w // 2, mid_h + mid_h // 2)
+    else:  # bottom-right
+        return (mid_w + mid_w // 2, mid_h + mid_h // 2)
 
 
 def run_explore_policy_four_rooms(env, max_T, step_and_record, act_random):
@@ -832,6 +948,158 @@ def run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random):
             total_steps += 1
 
 
+def run_bfs_policy_two_rooms(env, max_T, step_and_record, act_random):
+    """BFS-based exploration policy for TwoRoomsMemoryEnv that:
+    1. Explores current room thoroughly
+    2. Goes to door and explores other room
+    3. Returns to original room
+    """
+    total_steps = 0
+    mid_w = env.width // 2
+    mid_h = env.height // 2
+    door_pos = (mid_w, mid_h)
+    
+    # Track exploration state
+    exploration_phase = "initial_room"  # "initial_room", "door", "other_room", "return"
+    initial_room = env._get_room(env.agent_pos)
+    other_room = 1 - initial_room
+    visited_positions = set()
+    room_exploration_steps = 0
+    max_room_exploration = 15  # Max steps to spend exploring each room
+    
+    def get_room_center(room_idx):
+        """Get center position of a room"""
+        if room_idx == 0:  # left room
+            return (mid_w // 2, mid_h)
+        else:  # right room
+            return (mid_w + mid_w // 2, mid_h)
+    
+    def explore_room_systematically(room_idx, max_steps):
+        """Systematically explore a room using BFS to cover different areas"""
+        room_center = get_room_center(room_idx)
+        current_pos = tuple(env.agent_pos)
+        
+        # If not in target room, navigate to it first
+        if env._get_room(current_pos) != room_idx:
+            path = bfs_shortest_path(env.grid, current_pos, room_center)
+            if path and len(path) > 1:
+                planned_actions = plan_actions_from_path(env.agent_dir, path)
+                if planned_actions:
+                    return planned_actions[0]
+        
+        # Generate exploration targets within the room
+        exploration_targets = []
+        if room_idx == 0:  # left room
+            for x in range(1, mid_w - 1, 2):
+                for y in range(1, env.height - 2, 2):
+                    if env.grid.get(x, y) is None:  # empty cell
+                        exploration_targets.append((x, y))
+        else:  # right room
+            for x in range(mid_w + 1, env.width - 2, 2):
+                for y in range(1, env.height - 2, 2):
+                    if env.grid.get(x, y) is None:  # empty cell
+                        exploration_targets.append((x, y))
+        
+        # Find closest unexplored target
+        current_pos = tuple(env.agent_pos)
+        best_target = None
+        best_distance = float('inf')
+        
+        for target in exploration_targets:
+            if target not in visited_positions:
+                path = bfs_shortest_path(env.grid, current_pos, target)
+                if path and len(path) < best_distance:
+                    best_target = target
+                    best_distance = len(path)
+        
+        if best_target:
+            path = bfs_shortest_path(env.grid, current_pos, best_target)
+            if path and len(path) > 1:
+                planned_actions = plan_actions_from_path(env.agent_dir, path)
+                if planned_actions:
+                    return planned_actions[0]
+        
+        # Fallback: random action
+        return act_random()
+    
+    while total_steps < max_T:
+        current_pos = tuple(env.agent_pos)
+        visited_positions.add(current_pos)
+        
+        if exploration_phase == "initial_room":
+            # Explore the initial room thoroughly
+            if room_exploration_steps < max_room_exploration and env._get_room(current_pos) == initial_room:
+                action = explore_room_systematically(initial_room, max_room_exploration - room_exploration_steps)
+                step_and_record(action)
+                total_steps += 1
+                room_exploration_steps += 1
+            else:
+                # Move to door
+                path = bfs_shortest_path(env.grid, current_pos, door_pos)
+                if path and len(path) > 1:
+                    planned_actions = plan_actions_from_path(env.agent_dir, path)
+                    if planned_actions:
+                        action = planned_actions[0]
+                        step_and_record(action)
+                        total_steps += 1
+                        if tuple(env.agent_pos) == door_pos:
+                            exploration_phase = "other_room"
+                            room_exploration_steps = 0
+                    else:
+                        step_and_record(act_random())
+                        total_steps += 1
+                else:
+                    step_and_record(act_random())
+                    total_steps += 1
+        
+        elif exploration_phase == "other_room":
+            # Explore the other room
+            if room_exploration_steps < max_room_exploration and env._get_room(current_pos) == other_room:
+                action = explore_room_systematically(other_room, max_room_exploration - room_exploration_steps)
+                step_and_record(action)
+                total_steps += 1
+                room_exploration_steps += 1
+            else:
+                # Move back to door
+                path = bfs_shortest_path(env.grid, current_pos, door_pos)
+                if path and len(path) > 1:
+                    planned_actions = plan_actions_from_path(env.agent_dir, path)
+                    if planned_actions:
+                        action = planned_actions[0]
+                        step_and_record(action)
+                        total_steps += 1
+                        if tuple(env.agent_pos) == door_pos:
+                            exploration_phase = "return"
+                    else:
+                        step_and_record(act_random())
+                        total_steps += 1
+                else:
+                    step_and_record(act_random())
+                    total_steps += 1
+        
+        elif exploration_phase == "return":
+            # Return to initial room and continue exploring
+            if env._get_room(current_pos) == initial_room:
+                exploration_phase = "initial_room"
+                room_exploration_steps = 0
+            else:
+                # Navigate back to initial room
+                initial_room_center = get_room_center(initial_room)
+                path = bfs_shortest_path(env.grid, current_pos, initial_room_center)
+                if path and len(path) > 1:
+                    planned_actions = plan_actions_from_path(env.agent_dir, path)
+                    if planned_actions:
+                        action = planned_actions[0]
+                        step_and_record(action)
+                        total_steps += 1
+                    else:
+                        step_and_record(act_random())
+                        total_steps += 1
+                else:
+                    step_and_record(act_random())
+                    total_steps += 1
+
+
 def run_random_policy(env, max_T, step_and_record, act_random):
     """Random policy (default fallback)"""
     for t in range(max_T):
@@ -876,6 +1144,8 @@ def run_episode(
     elif policy == "bfs":
         if isinstance(env, FourRoomsMemoryEnv):
             run_bfs_policy_four_rooms(env, max_T, step_and_record, act_random)
+        elif isinstance(env, TwoRoomsMemoryEnv):
+            run_bfs_policy_two_rooms(env, max_T, step_and_record, act_random)
         else:
             # Unknown environment, fall back to random
             run_random_policy(env, max_T, step_and_record, act_random)
