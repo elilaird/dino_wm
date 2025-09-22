@@ -810,23 +810,20 @@ class Trainer:
             if self.cfg.dry_run:
                 return
 
-    def horizon_treatment_eval(self, z_pred, z_tgt, obs, visuals):
+    def horizon_treatment_eval(self, z_pred, z_tgt, visuals):
         logs = {}
 
 
-        z_cycle = self.model.encode_obs(visuals) # re-encode the decoded visuals
         for k in ['visual']:#z_pred.keys():
             # mse
             print(f"z_pred[k].shape: {z_pred[k].shape}")
             print(f"z_tgt[k].shape: {z_tgt[k].shape}")
-            print(f"z_cycle[k].shape: {z_cycle[k].shape}")
             print(f"z_pred device: {z_pred[k].device}")
             print(f"z_tgt device: {z_tgt[k].device}")
-            print(f"z_cycle device: {z_cycle[k].device}")
             print(f"z_pred[k]: {z_pred[k]}")
             print(f"z_tgt[k]: {z_tgt[k]}")
-            print(f"z_cycle[k]: {z_cycle[k]}")
-            exit(1)
+            print(f"visuals[k]: {visuals[k]}")
+            
             # logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
 
             # l2
@@ -1373,7 +1370,6 @@ class Trainer:
                 if self.cfg.has_decoder:
                     decoded = self.model.decode_obs(z_obses)[0]
                     visuals = decoded["visual"]
-                    proprios = decoded["proprio"]
                     imgs = torch.cat([obs["visual"], visuals[0].cpu()], dim=0)
                     if self.accelerator.is_main_process:
                         self.plot_imgs(
@@ -1387,15 +1383,16 @@ class Trainer:
                     # compute rollout error progression
                     obs_tgt = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
                     z_tgts = self.model.encode_obs(obs_tgt)
-                    
-                    for t in range(1, horizon):
+                    z_cycle = self.model.encode_obs(decoded) # re-encode the decoded visuals
+                    for t in range(1, horizon-1):
                         z_pred_t = slice_trajdict_with_t(
                             z_obses, start_idx=t, end_idx=t+1
                         )
                         z_t = slice_trajdict_with_t(
                             z_tgts, start_idx=t, end_idx=t+1
                         )   
-                        div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt, {"visual": visuals, "proprio": proprios})
+                        visuals_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1)
+                        div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
                         for k in div_loss.keys():
                             logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
 
