@@ -1253,7 +1253,7 @@ def main():
     #     np.random.seed(args.seed)
 
     # Regular dataset generation or evaluation
-    if env == "four_rooms":
+    if args.env == "four_rooms":
         ctor = lambda: make_four_rooms(
             memory_test_mode=args.memory_test_mode,
             n_memory_objects=args.n_memory_objects,
