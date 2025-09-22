@@ -813,26 +813,30 @@ class Trainer:
     def horizon_treatment_eval(self, z_pred, z_tgt, obs, visuals):
         logs = {}
 
-        try:
-            z_cycle = self.model.encode_obs(visuals) # re-encode the decoded visuals
-        except Exception as e:
-            print(f"Error encoding visuals: {e}")
-            print(f"visuals: {visuals['visual'].shape}")
-            print(f"visuals: {visuals['proprio'].shape}")
-            
 
+        z_cycle = self.model.encode_obs(visuals) # re-encode the decoded visuals
         for k in ['visual']:#z_pred.keys():
             # mse
-            logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
+            print(f"z_pred[k].shape: {z_pred[k].shape}")
+            print(f"z_tgt[k].shape: {z_tgt[k].shape}")
+            print(f"z_cycle[k].shape: {z_cycle[k].shape}")
+            print(f"z_pred device: {z_pred[k].device}")
+            print(f"z_tgt device: {z_tgt[k].device}")
+            print(f"z_cycle device: {z_cycle[k].device}")
+            print(f"z_pred[k]: {z_pred[k]}")
+            print(f"z_tgt[k]: {z_tgt[k]}")
+            print(f"z_cycle[k]: {z_cycle[k]}")
+            exit(1)
+            # logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
 
             # l2
-            logs[f"{k}_horizon_l2"] = torch.norm(z_pred[k] - z_tgt[k], p=2)
+            # logs[f"{k}_horizon_l2"] = torch.norm(z_pred[k] - z_tgt[k], p=2)
 
             #TODO: frechet (decoded visuals vs obs target) 
 
             # cycle consistency (decode > encode > measure)
-            logs[f"{k}_horizon_cycle_mse"] = torch.nn.functional.mse_loss(z_cycle[k], z_tgt[k])
-            logs[f"{k}_horizon_cycle_l2"] = torch.norm(z_cycle[k] - z_tgt[k], p=2)
+            # logs[f"{k}_horizon_cycle_mse"] = torch.nn.functional.mse_loss(z_cycle[k], z_tgt[k])
+            # logs[f"{k}_horizon_cycle_l2"] = torch.norm(z_cycle[k] - z_tgt[k], p=2)
             
         return logs
 
