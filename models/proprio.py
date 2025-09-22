@@ -87,6 +87,9 @@ class MiniGridProprioceptiveEmbedding(nn.Module):
         coords = x[..., :2].long()  # [B, T, 2]
         dirs = x[..., -1].long()    # [B, T, 1]
         
+        # Clamp coordinates to valid range
+        coords = torch.clamp(coords, 0, self.world_size - 1)
+        
         # Grid coordinates
         grid_indices = coords[..., 0] * self.world_size + coords[..., 1]
         coord_emb = self.grid_embedding(grid_indices)  # [B, T, emb_dim//2]
