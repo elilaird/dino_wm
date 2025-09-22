@@ -1387,7 +1387,7 @@ class Trainer:
                     # compute rollout error progression
                     obs_tgt = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
                     z_tgts = self.model.encode_obs(obs_tgt)
-                    # z_cycle = self.model.encode_obs(decoded) # re-encode the decoded visuals
+                    z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
                     # for t in range(1, horizon-1):
                     #     z_pred_t = slice_trajdict_with_t(
                     #         z_obses, start_idx=t, end_idx=t+1
