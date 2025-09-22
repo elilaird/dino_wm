@@ -133,7 +133,7 @@ class CustomDoor(Door):
         self.is_locked = False
 
     def see_behind(self):
-        return True
+        return False
 
     def can_overlap(self):
         return True
