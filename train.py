@@ -813,6 +813,14 @@ class Trainer:
     def horizon_treatment_eval(self, z_pred, z_tgt, obs, visuals):
         logs = {}
 
+        try:
+            z_cycle = self.model.encode_obs(visuals) # re-encode the decoded visuals
+        except Exception as e:
+            print(f"Error encoding visuals: {e}")
+            print(f"visuals: {visuals['visual'].shape}")
+            print(f"visuals: {visuals['proprio'].shape}")
+            
+
         for k in z_pred.keys():
             # mse
             logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
@@ -823,7 +831,6 @@ class Trainer:
             #TODO: frechet (decoded visuals vs obs target) 
 
             # cycle consistency (decode > encode > measure)
-            z_cycle = self.model.encode_obs(visuals)
             logs[f"{k}_horizon_cycle_mse"] = torch.nn.functional.mse_loss(z_cycle[k], z_tgt[k])
             logs[f"{k}_horizon_cycle_l2"] = torch.norm(z_cycle[k] - z_tgt[k], p=2)
             
@@ -1387,8 +1394,6 @@ class Trainer:
                         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt, {"visual": visuals, "proprio": proprios})
                         for k in div_loss.keys():
                             logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
-        
-
 
         logs = {
             key: sum(values) / len(values)
