@@ -814,7 +814,7 @@ class Trainer:
         logs = {}
 
 
-        for k in ['visual']:#z_pred.keys():
+        for k in z_pred.keys():
             # mse
             logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
 
