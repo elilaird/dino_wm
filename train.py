@@ -816,13 +816,17 @@ class Trainer:
 
         for k in ['visual']:#z_pred.keys():
             # mse
-            print(f"z_pred[k].shape: {z_pred[k].shape}")
-            print(f"z_tgt[k].shape: {z_tgt[k].shape}")
-            print(f"z_pred device: {z_pred[k].device}")
-            print(f"z_tgt device: {z_tgt[k].device}")
-            print(f"z_pred[k]: {z_pred[k]}")
-            print(f"z_tgt[k]: {z_tgt[k]}")
-            print(f"visuals[k]: {visuals[k]}")
+            # Check for NaN/inf values without triggering CUDA errors
+            try:
+                if torch.isnan(z_pred[k]).any() or torch.isinf(z_pred[k]).any():
+                    print(f"WARNING: z_pred[{k}] contains NaN/inf values")
+                if torch.isnan(z_tgt[k]).any() or torch.isinf(z_tgt[k]).any():
+                    print(f"WARNING: z_tgt[{k}] contains NaN/inf values")
+                if torch.isnan(visuals[k]).any() or torch.isinf(visuals[k]).any():
+                    print(f"WARNING: visuals[{k}] contains NaN/inf values")
+            except RuntimeError as e:
+                print(f"ERROR accessing z_pred[{k}] or z_tgt[{k}] or visuals[{k}]: {e}")
+                continue
             
             # logs[f"{k}_horizon_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
 
