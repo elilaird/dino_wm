@@ -1424,7 +1424,7 @@ class Trainer:
                     
                     for k, v in local_results.items():
                         if k not in horizon_logs:
-                            horizon_logs[k] = np.zeros(horizon)
+                            horizon_logs[k] = np.zeros(horizon-1)
                         horizon_logs[k] += np.stack(v) / num_rollout
 
         if horizon_treatment is not None and self.accelerator.is_main_process:
