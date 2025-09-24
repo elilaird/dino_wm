@@ -982,6 +982,13 @@ class Trainer:
         if self.cfg.training.use_scheduler:
             for scheduler in self.schedulers.values():
                 scheduler.step()
+            
+            self.logs_update({
+                "lr_encoder": [self.encoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.encoder_lr is not None else None,
+                "lr_predictor": [self.predictor_optimizer.param_groups[0]["lr"]],
+                "lr_action_encoder": [self.action_encoder_optimizer.param_groups[0]["lr"]],
+                "lr_decoder": [self.decoder_optimizer.param_groups[0]["lr"]] if self.cfg.has_decoder else None,
+            })
 
         loss = self.accelerator.gather_for_metrics(loss).mean()
 
@@ -1490,21 +1497,21 @@ class Trainer:
         epoch_log["epoch"] = step
 
         # Add learning rates to logs
-        if self.cfg.training.use_scheduler:
-            epoch_log["lr_encoder"] = self.encoder_optimizer.param_groups[0][
-                "lr"
-            ]
-            if self.cfg.has_predictor:
-                epoch_log["lr_predictor"] = (
-                    self.predictor_optimizer.param_groups[0]["lr"]
-                )
-                epoch_log["lr_action_encoder"] = (
-                    self.action_encoder_optimizer.param_groups[0]["lr"]
-                )
-            if self.cfg.has_decoder:
-                epoch_log["lr_decoder"] = self.decoder_optimizer.param_groups[
-                    0
-                ]["lr"]
+        # if self.cfg.training.use_scheduler:
+        #     epoch_log["lr_encoder"] = self.encoder_optimizer.param_groups[0][
+        #         "lr"
+        #     ]
+        #     if self.cfg.has_predictor:
+        #         epoch_log["lr_predictor"] = (
+        #             self.predictor_optimizer.param_groups[0]["lr"]
+        #         )
+        #         epoch_log["lr_action_encoder"] = (
+        #             self.action_encoder_optimizer.param_groups[0]["lr"]
+        #         )
+        #     if self.cfg.has_decoder:
+        #         epoch_log["lr_decoder"] = self.decoder_optimizer.param_groups[
+        #             0
+        #         ]["lr"]
 
         # Add epoch time to the log message if available
         epoch_time_msg = ""
