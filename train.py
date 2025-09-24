@@ -776,6 +776,7 @@ class Trainer:
         init_epoch = self.epoch + 1  # epoch starts from 1
         if self.cfg.dry_run:
             self.total_epochs = 1
+        self.train_steps = 0
         for epoch in range(init_epoch, init_epoch + self.total_epochs):
             self.epoch = epoch
             self.accelerator.wait_for_everyone()
@@ -983,8 +984,10 @@ class Trainer:
             for scheduler in self.schedulers.values():
                 scheduler.step()
             
+
             if self.accelerator.is_main_process:
                 self.wandb_run.log({
+                    "step": self.train_steps,
                     "lr_encoder": [self.encoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.encoder_lr is not None else None,
                     "lr_predictor": [self.predictor_optimizer.param_groups[0]["lr"]] if self.cfg.training.predictor_lr is not None else None,
                     "lr_action_encoder": [self.action_encoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.action_encoder_lr is not None else None,
@@ -1047,6 +1050,7 @@ class Trainer:
                 )
                 for k, v in loss_components.items():
                     batch_loss_components[k] += v / num_windows
+                self.train_steps += 1
 
             compute_end.record()
             torch.cuda.synchronize(self.accelerator.device)
