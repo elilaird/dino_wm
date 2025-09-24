@@ -983,12 +983,13 @@ class Trainer:
             for scheduler in self.schedulers.values():
                 scheduler.step()
             
-            self.logs_update({
-                "lr_encoder": [self.encoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.encoder_lr is not None else None,
-                "lr_predictor": [self.predictor_optimizer.param_groups[0]["lr"]],
-                "lr_action_encoder": [self.action_encoder_optimizer.param_groups[0]["lr"]],
-                "lr_decoder": [self.decoder_optimizer.param_groups[0]["lr"]] if self.cfg.has_decoder else None,
-            })
+            if self.accelerator.is_main_process:
+                self.wandb_run.log({
+                    "lr_encoder": [self.encoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.encoder_lr is not None else None,
+                    "lr_predictor": [self.predictor_optimizer.param_groups[0]["lr"]] if self.cfg.training.predictor_lr is not None else None,
+                    "lr_action_encoder": [self.action_encoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.action_encoder_lr is not None else None,
+                    "lr_decoder": [self.decoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.decoder_lr is not None else None,
+                })
 
         loss = self.accelerator.gather_for_metrics(loss).mean()
 

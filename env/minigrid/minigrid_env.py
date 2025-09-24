@@ -302,6 +302,22 @@ class FourRoomsMemoryEnv(MiniGridEnv):
         states = np.stack(states)
         return obses, states
 
+    # def get_pov_render(self, tile_size):
+    #     """
+    #     Render an agent's POV observation for visualization
+    #     """
+    #     grid, vis_mask = self.gen_obs_grid()
+
+    #     # Render the whole grid
+    #     img = grid.render(
+    #         tile_size,
+    #         agent_pos=(self.agent_view_size // 2, self.agent_view_size // 2),
+    #         agent_dir=3,
+    #         highlight_mask=vis_mask,
+    #     )
+
+    #     return img
+
     def gen_obs(self):
         """
         Generate the agent's view (partially observable, low-resolution encoding)
