@@ -1422,10 +1422,11 @@ class Trainer:
                             local_results[f"z_{k}_err_rollout{postfix}_h{horizon}"].append(div_loss[k])
                         local_results["t"].append(t)                            
                     
-                    for k, v in local_results.items():
-                        if k not in horizon_logs:
-                            horizon_logs[k] = np.zeros(horizon)
-                        horizon_logs[k] += np.stack(v) / num_rollout
+                    if self.accelerator.is_main_process:
+                        for k, v in local_results.items():
+                            if k not in horizon_logs:
+                                horizon_logs[k] = np.zeros(horizon)
+                            horizon_logs[k] += np.stack(v.cpu().numpy()) / num_rollout
 
         if horizon_treatment is not None and self.accelerator.is_main_process:
             self.save_horizon_results_to_file(horizon_logs, f"{plotting_dir}/e{self.epoch}_{mode}_horizon{horizon_treatment}_per_step_errors.csv")
