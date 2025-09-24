@@ -44,9 +44,11 @@ training:
   decay_factor: 0.9  # Factor to decay peak LR at each restart
   warmup_percent: 0.05 # warmup percentage of total steps
 
-horizon_treatment: 10
-
 decoder_loss_type: mse
+
+
+horizon_treatment: 300
+eval_long_imagination: True
 
 full_sequence: False
 img_size: 64 

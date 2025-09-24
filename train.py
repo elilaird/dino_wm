@@ -1160,6 +1160,13 @@ class Trainer:
                     }
                     self.logs_update(loop_rollout_logs)
 
+                if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
+                    long_imagination_logs = self.long_imagination_rollout(self.val_traj_dset)
+                    long_imagination_logs = {
+                        f"val_{k}": [v] for k, v in long_imagination_logs.items()
+                    }
+                    self.logs_update(long_imagination_logs)
+
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
             tqdm(self.dataloaders["valid"], desc=f"Epoch {self.epoch} Valid")
@@ -1439,23 +1446,6 @@ class Trainer:
 
         return logs
 
-    def save_horizon_results_to_file(self, horizon_logs, filepath):
-        if not horizon_logs:
-            return
-        try:
-            keys = sorted(horizon_logs.keys())
-            rows = []
-            num_rows = len(next(iter(horizon_logs.values())))
-            for i in range(num_rows):
-                row = {k: horizon_logs[k][i] if i < len(horizon_logs[k]) else None for k in keys}
-                rows.append(row)
-            with open(filepath, "w", newline="") as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=keys)
-                writer.writeheader()
-                writer.writerows(rows)
-        except Exception as e:
-            print(f"Error saving horizon results to file: {e}")
-
     def loopclosure_rollout(self, dset, query_phase_start=0):
         plotting_dir = f"loopclosure_plots/e{self.epoch}_loopclosure"
         if self.accelerator.is_main_process:
@@ -1590,8 +1580,29 @@ class Trainer:
 
         if self.accelerator.is_main_process:
             self.save_horizon_results_to_file(logs, f"{plotting_dir}/e{self.epoch}_long_imagination_per_step_errors.csv")
-                  
         
+        return {
+            k: v[-1] for k, v in logs.items()
+        }
+
+    
+                  
+    def save_horizon_results_to_file(self, horizon_logs, filepath):
+        if not horizon_logs:
+            return
+        try:
+            keys = sorted(horizon_logs.keys())
+            rows = []
+            num_rows = len(next(iter(horizon_logs.values())))
+            for i in range(num_rows):
+                row = {k: horizon_logs[k][i] if i < len(horizon_logs[k]) else None for k in keys}
+                rows.append(row)
+            with open(filepath, "w", newline="") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=keys)
+                writer.writeheader()
+                writer.writerows(rows)
+        except Exception as e:
+            print(f"Error saving horizon results to file: {e}")  
 
     def logs_update(self, logs):
         for key, value in logs.items():
