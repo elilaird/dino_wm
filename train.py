@@ -1421,7 +1421,7 @@ class Trainer:
                             z_tgts, start_idx=t, end_idx=t+1
                         ) # target latents
                         obs_tgt_t = slice_trajdict_with_t(obs_tgt, start_idx=t, end_idx=t+1) # target obs
-                        visuals_t = slice_trajdict_with_t(decoded, start_idx=t, end_idx=t+1) # reconstructed visuals
+                        visuals_t = slice_trajdict_with_t({"visual": visuals, "proprio": obs_tgt["proprio"]}, start_idx=t, end_idx=t+1) # reconstructed visuals
                         cycle_z_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1) # re-encoded visuals
                         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt_t, visuals_t, cycle_z_t)
                         for k in div_loss.keys():
@@ -1489,7 +1489,7 @@ class Trainer:
                         z_tgts, start_idx=t, end_idx=t+1
                     ) # target latents
                     obs_tgt_t = slice_trajdict_with_t(obs_tgt, start_idx=t, end_idx=t+1) # target obs
-                    visuals_t = slice_trajdict_with_t(visuals, start_idx=t, end_idx=t+1) # reconstructed visuals
+                    visuals_t = slice_trajdict_with_t({"visual": visuals, "proprio": obs_tgt["proprio"]}, start_idx=t, end_idx=t+1) # reconstructed visuals
                     cycle_z_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1) # re-encoded visuals
                     div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt_t, visuals_t, cycle_z_t)
                     for k in div_loss.keys():
@@ -1562,7 +1562,7 @@ class Trainer:
                     z_tgts, start_idx=t, end_idx=t+1
                 ) # target latents
                 obs_tgt_t = slice_trajdict_with_t(obs_tgt, start_idx=t, end_idx=t+1) # target obs
-                visuals_t = slice_trajdict_with_t(visuals, start_idx=t, end_idx=t+1) # reconstructed visuals
+                visuals_t = slice_trajdict_with_t({"visual": visuals, "proprio": obs_tgt["proprio"]}, start_idx=t, end_idx=t+1) # reconstructed visuals
                 cycle_z_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1) # re-encoded visuals
                 div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt_t, visuals_t, cycle_z_t)
                 for k in div_loss.keys():
@@ -1582,8 +1582,7 @@ class Trainer:
         return {
             k: v[-1] for k, v in logs.items()
         }
-
-    
+  
                   
     def save_horizon_results_to_file(self, horizon_logs, filepath):
         if not horizon_logs:
@@ -1620,23 +1619,6 @@ class Trainer:
             to_log = sum / count
             epoch_log[key] = to_log
         epoch_log["epoch"] = step
-
-        # Add learning rates to logs
-        # if self.cfg.training.use_scheduler:
-        #     epoch_log["lr_encoder"] = self.encoder_optimizer.param_groups[0][
-        #         "lr"
-        #     ]
-        #     if self.cfg.has_predictor:
-        #         epoch_log["lr_predictor"] = (
-        #             self.predictor_optimizer.param_groups[0]["lr"]
-        #         )
-        #         epoch_log["lr_action_encoder"] = (
-        #             self.action_encoder_optimizer.param_groups[0]["lr"]
-        #         )
-        #     if self.cfg.has_decoder:
-        #         epoch_log["lr_decoder"] = self.decoder_optimizer.param_groups[
-        #             0
-        #         ]["lr"]
 
         # Add epoch time to the log message if available
         epoch_time_msg = ""
