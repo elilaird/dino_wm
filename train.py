@@ -988,11 +988,11 @@ class Trainer:
             if self.accelerator.is_main_process:
                 self.wandb_run.log({
                     "step": self.train_steps,
-                    "lr_encoder": [self.encoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.encoder_lr is not None else None,
-                    "lr_predictor": [self.predictor_optimizer.param_groups[0]["lr"]] if self.cfg.training.predictor_lr is not None else None,
-                    "lr_action_encoder": [self.action_encoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.action_encoder_lr is not None else None,
-                    "lr_decoder": [self.decoder_optimizer.param_groups[0]["lr"]] if self.cfg.training.decoder_lr is not None else None,
-                })
+                    "lr_encoder": self.encoder_optimizer.param_groups[0]["lr"] if self.cfg.training.encoder_lr is not None else None,
+                    "lr_predictor": self.predictor_optimizer.param_groups[0]["lr"] if self.cfg.training.predictor_lr is not None else None,
+                    "lr_action_encoder": self.action_encoder_optimizer.param_groups[0]["lr"] if self.cfg.training.action_encoder_lr is not None else None,
+                    "lr_decoder": self.decoder_optimizer.param_groups[0]["lr"] if self.cfg.training.decoder_lr is not None else None,
+                }, step=self.train_steps, group="learning_rates")
 
         loss = self.accelerator.gather_for_metrics(loss).mean()
 
@@ -1385,7 +1385,7 @@ class Trainer:
 
                 for k in div_loss.keys():
                     log_key = f"z_{k}_err_rollout{postfix}"
-                    log_key += f"_h{horizon}" if horizon_treatment is not None else ""
+                    # log_key += f"_h{horizon}" if horizon_treatment is not None else ""
                     logs[log_key].append(div_loss[k])
 
                 if self.cfg.has_decoder:
@@ -1414,8 +1414,11 @@ class Trainer:
                         )   
                         visuals_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1)
                         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
-                        for k in div_loss.keys():
-                            logs[f"z_{k}_err_rollout{postfix}_h{horizon}_t{t}"].append(div_loss[k])
+                        
+                        if self.accelerator.is_main_process:
+                            self.wandb_run.log({
+                                f"z_{k}_err_rollout{postfix}_h{horizon}": v for k, v in div_loss.items()
+                            }, step=t, group=f"epoch_{self.epoch}_{mode}_rollout{postfix}_h{horizon}")               
 
         logs = {
             key: sum(values) / len(values)
