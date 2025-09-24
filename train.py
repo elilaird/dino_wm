@@ -1420,7 +1420,7 @@ class Trainer:
                         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, visuals_t)
                         for k in div_loss.keys():
                             local_results[f"z_{k}_err_rollout{postfix}_h{horizon}"].append(div_loss[k].cpu().numpy())
-                        local_results["t"].append(t)                            
+                        local_results["t"].append(t / len(num_past))                            
                     
                     for k, v in local_results.items():
                         if k not in horizon_logs:
