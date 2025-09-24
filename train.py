@@ -814,8 +814,6 @@ class Trainer:
 
     def horizon_treatment_eval(self, z_pred, z_tgt, obs_tgt, obs_recon, reencoded_visuals):
         logs = {}
-
-
         for k in z_pred.keys():
             # mse between z_pred and z_tgt latents
             logs[f"{k}_latent_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
@@ -1144,7 +1142,7 @@ class Trainer:
                     self.logs_update(val_long_horizon_logs)
                 
                 # loop closure tests
-                if OmegaConf.select(self.cfg, "eval_loopclosure", default=None) is not None and self.cfg.env == "two_rooms_bfs":
+                if OmegaConf.select(self.cfg, "eval_loopclosure", default=None) is not None and self.cfg.eval_loopclosure.data_path is not None:
                     from datasets.minigrid_dataset import MiniGridMemmapDataset
                     loop_dset = MiniGridMemmapDataset(
                         n_rollout=None,
@@ -1423,7 +1421,7 @@ class Trainer:
                             z_tgts, start_idx=t, end_idx=t+1
                         ) # target latents
                         obs_tgt_t = slice_trajdict_with_t(obs_tgt, start_idx=t, end_idx=t+1) # target obs
-                        visuals_t = slice_trajdict_with_t(visuals, start_idx=t, end_idx=t+1) # reconstructed visuals
+                        visuals_t = slice_trajdict_with_t(decoded, start_idx=t, end_idx=t+1) # reconstructed visuals
                         cycle_z_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1) # re-encoded visuals
                         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt_t, visuals_t, cycle_z_t)
                         for k in div_loss.keys():
