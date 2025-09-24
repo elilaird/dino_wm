@@ -329,7 +329,7 @@ class VWorldModel(nn.Module):
             z[..., -self.action_dim:] = act_repeated
         return z
 
-    def rollout(self, obs_0, act):
+    def rollout(self, obs_0, act, bypass_memory_reset=False):
         """
         input:  obs_0 (dict): (b, n, 3, img_size, img_size)
                   act: (b, t+n, action_dim)
@@ -338,10 +338,11 @@ class VWorldModel(nn.Module):
                 z: (b, t+n+1, num_patches, emb_dim)
         """
 
-        if hasattr(self.predictor, "reset_memory"):
-            self.predictor.reset_memory()
-        elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "reset_memory"):
-            self.predictor.module.reset_memory()
+        if not bypass_memory_reset:
+            if hasattr(self.predictor, "reset_memory"):
+                self.predictor.reset_memory()
+            elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "reset_memory"):
+                self.predictor.module.reset_memory()
         
 
         num_obs_init = obs_0['visual'].shape[1]
