@@ -38,7 +38,7 @@ training:
   action_encoder_weight_decay: 0.1
   max_grad_norm: 0.5
   use_scheduler: True
-  T_0: 2  # Number of epochs for the first restart
+  T_0: 5  # Number of epochs for the first restart
   T_mult: 2  # A factor increases T_i after a restart
   eta_min_ratio: 0.1  # minimum LR as ratio of initial LR
   decay_factor: 0.9  # Factor to decay peak LR at each restart
@@ -46,9 +46,10 @@ training:
 
 decoder_loss_type: mse
 
-
+eval_every_x_epoch: 2
 horizon_treatment: 300
 eval_long_imagination: True
+query_phase_start_idx: 301
 
 full_sequence: False
 img_size: 64 
@@ -65,9 +66,10 @@ normalize_action: False
 proprio_emb_dim: 12 
 num_proprio_repeat: 1
 
-overlap_size: 3
-num_frames: 25
-num_hist: 4
+overlap_size: 6
+step_size: 4
+num_frames: 500
+num_hist: 9
 num_pred: 1 
 has_predictor: True # set this to False for only training a decoder
 has_decoder: True # set this to False for only training a predictor

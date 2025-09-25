@@ -112,7 +112,7 @@ class Trainer:
         self.cfg = cfg
         self.window_size = self.cfg.num_hist + self.cfg.num_pred
         self.overlap_size = getattr(self.cfg, "overlap_size", 0)
-        self.step_size = self.window_size - self.overlap_size
+        self.step_size = self.cfg.step_size
         print(f"Overlap size: {self.overlap_size}")
         print(f"Step size: {self.step_size}")
         with open_dict(cfg):
@@ -828,7 +828,7 @@ class Trainer:
             # mse between obs_recon and obs_tgt
             logs[f"{k}_obs_recon_mse"] = torch.nn.functional.mse_loss(obs_recon[k], obs_tgt[k])
             logs[f"{k}_obs_recon_l2"] = torch.norm(obs_recon[k] - obs_tgt[k], p=2)
-            
+
         return logs
 
     def err_eval_single(self, z_pred, z_tgt):
@@ -984,16 +984,6 @@ class Trainer:
         if self.cfg.training.use_scheduler:
             for scheduler in self.schedulers.values():
                 scheduler.step()
-            
-
-            # if self.accelerator.is_main_process:
-            #     self.wandb_run.log({
-            #         "train_step": self.train_steps,
-            #         "lr_encoder": self.encoder_optimizer.param_groups[0]["lr"] if self.cfg.training.encoder_lr is not None else None,
-            #         "lr_predictor": self.predictor_optimizer.param_groups[0]["lr"] if self.cfg.training.predictor_lr is not None else None,
-            #         "lr_action_encoder": self.action_encoder_optimizer.param_groups[0]["lr"] if self.cfg.training.action_encoder_lr is not None else None,
-            #         "lr_decoder": self.decoder_optimizer.param_groups[0]["lr"] if self.cfg.training.decoder_lr is not None else None,
-            #     }, step=self.train_steps)
 
         loss = self.accelerator.gather_for_metrics(loss).mean()
 
@@ -1032,7 +1022,7 @@ class Trainer:
             data_time = time.perf_counter() - prev_time
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
-            num_windows = max(1, (N - self.overlap_size) // self.step_size)
+            num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
 
             plot = i == 0
             self.model.train()
@@ -1117,53 +1107,59 @@ class Trainer:
                 }
                 self.logs_update(val_rollout_logs)
 
-                # long horizon treatments
-                if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
-                    train_long_horizon_logs = self.openloop_rollout(
-                        self.train_traj_dset,
-                        mode="train",
-                        rand_start_end=False,
-                        horizon_treatment=self.cfg.horizon_treatment,
-                    )
-                    train_long_horizon_logs = {
-                        f"train_{k}": [v] for k, v in train_long_horizon_logs.items()
-                    }
-                    self.logs_update(train_long_horizon_logs)
+                if self.epoch % self.cfg.eval_every_x_epoch == 0:
+                    # long horizon treatments
+                    if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
+                        train_long_horizon_logs = self.openloop_rollout(
+                            self.train_traj_dset,
+                            mode="train",
+                            rand_start_end=False,
+                            horizon_treatment=self.cfg.horizon_treatment,
+                        )
+                        train_long_horizon_logs = {
+                            f"train_{k}": [v] for k, v in train_long_horizon_logs.items()
+                        }
+                        self.logs_update(train_long_horizon_logs)
 
-                    val_long_horizon_logs = self.openloop_rollout(
-                        self.val_traj_dset,
-                        mode="val",
-                        rand_start_end=False,
-                        horizon_treatment=self.cfg.horizon_treatment,
-                    )
-                    val_long_horizon_logs = {
-                        f"val_{k}": [v] for k, v in val_long_horizon_logs.items()
-                    }
-                    self.logs_update(val_long_horizon_logs)
-                
-                # loop closure tests
-                if OmegaConf.select(self.cfg, "eval_loopclosure", default=None) is not None and self.cfg.eval_loopclosure.data_path is not None:
-                    from datasets.minigrid_dataset import MiniGridMemmapDataset
-                    loop_dset = MiniGridMemmapDataset(
-                        n_rollout=None,
-                        transform=self.cfg.dataset.transform,
-                        data_path=self.cfg.eval_loopclosure.data_path,
-                        normalize_action=False,
-                        total_episodes=self.cfg.eval_loopclosure.total_episodes,
-                        proprio_available=True,
-                    )
-                    loop_rollout_logs = self.loopclosure_rollout(loop_dset)
-                    loop_rollout_logs = {
-                        f"val_{k}": [v] for k, v in loop_rollout_logs.items()
-                    }
-                    self.logs_update(loop_rollout_logs)
+                        val_long_horizon_logs = self.openloop_rollout(
+                            self.val_traj_dset,
+                            mode="val",
+                            rand_start_end=False,
+                            horizon_treatment=self.cfg.horizon_treatment,
+                        )
+                        val_long_horizon_logs = {
+                            f"val_{k}": [v] for k, v in val_long_horizon_logs.items()
+                        }
+                        self.logs_update(val_long_horizon_logs)
 
-                if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
-                    long_imagination_logs = self.long_imagination_rollout(self.val_traj_dset)
-                    long_imagination_logs = {
-                        f"val_{k}": [v] for k, v in long_imagination_logs.items()
-                    }
-                    self.logs_update(long_imagination_logs)
+                    # loop closure tests
+                    if OmegaConf.select(self.cfg, "eval_loopclosure", default=None) is not None and self.cfg.eval_loopclosure.data_path is not None:
+                        from datasets.minigrid_dataset import MiniGridMemmapDataset
+                        loop_dset = MiniGridMemmapDataset(
+                            n_rollout=None,
+                            transform=self.cfg.dataset.transform,
+                            data_path=self.cfg.eval_loopclosure.data_path,
+                            normalize_action=False,
+                            total_episodes=self.cfg.eval_loopclosure.total_episodes,
+                            proprio_available=True,
+                        )
+                        loop_rollout_logs = self.loopclosure_rollout(loop_dset)
+                        loop_rollout_logs = {
+                            f"val_{k}": [v] for k, v in loop_rollout_logs.items()
+                        }
+                        self.logs_update(loop_rollout_logs)
+
+                    # long imagination
+                    if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
+                        long_imagination_logs = self.long_imagination_rollout(self.val_traj_dset, query_phase_start_idx=self.cfg.query_phase_start_idx)
+                        long_imagination_logs = {
+                            f"val_{k}": [v] for k, v in long_imagination_logs.items()
+                        }
+                        self.logs_update(long_imagination_logs)
+
+                    # context recall
+                    if OmegaConf.select(self.cfg, "eval_context_recall", default=False):
+                        pass
 
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
@@ -1172,7 +1168,7 @@ class Trainer:
             batch_loss_components = defaultdict(float)
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
-            num_windows = max(1, (N - self.overlap_size) // self.step_size)
+            num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
 
             if hasattr(self.model.predictor, "reset_memory"):
                 self.model.predictor.reset_memory()
@@ -1302,7 +1298,6 @@ class Trainer:
             T = dset[0][0]["visual"].shape[0] // self.cfg.frameskip
             assert horizon_treatment < T, "horizon_treatment must be less than T"
 
-
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.num_hist
         plotting_dir = f"rollout_plots/e{self.epoch}_rollout"
@@ -1311,7 +1306,6 @@ class Trainer:
         self.accelerator.wait_for_everyone()
         logs = defaultdict(list)
         horizon_logs = {}
-        
 
         # rollout with both num_hist and 1 frame as context
         num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
@@ -1406,7 +1400,7 @@ class Trainer:
                             obs["visual"].shape[0],
                             f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}_h{horizon}.png",
                         )           
-            
+
                 if horizon_treatment is not None:
                     local_results = defaultdict(list)
                     # compute rollout error progression
@@ -1427,10 +1421,10 @@ class Trainer:
                         for k in div_loss.keys():
                             local_results[f"{k}_err_horizon_{postfix}_h{horizon}"].append(div_loss[k].cpu().numpy())
                         local_results["t"].append(t / len(num_past))                            
-                    
+
                     for k, v in local_results.items():
                         if k not in horizon_logs:
-                            horizon_logs[k] = np.zeros(horizon-1)
+                            horizon_logs[k] = np.zeros(horizon)
                         horizon_logs[k] += np.stack(v) / num_rollout
 
         if horizon_treatment is not None and self.accelerator.is_main_process:
@@ -1465,7 +1459,7 @@ class Trainer:
                     obs[k][:self.cfg.num_hist].unsqueeze(0).to(self.device)
                 )  # unsqueeze for batch, (b, t, c, h, w)
             z_obses, _ = self.model.rollout(obs_0, actions)
-            
+
             if self.cfg.has_decoder:
                 decoded = self.model.decode_obs(z_obses)[0]
                 visuals = decoded["visual"]
@@ -1476,7 +1470,7 @@ class Trainer:
                         obs["visual"].shape[0],
                         f"{plotting_dir}/e{self.epoch}_{idx}_h{horizon}.png",
                     )
-            
+
                 # compute rollout error progression
                 obs_tgt = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
                 z_tgts = self.model.encode_obs(obs_tgt)
@@ -1503,47 +1497,61 @@ class Trainer:
 
         return logs
 
-
-    def long_imagination_rollout(self, dset, query_phase_start=0):
+    def long_imagination_rollout(self, dset, query_phase_start_idx=0, num_rollout=None):
         plotting_dir = f"long_imagination_plots/e{self.epoch}_long_imagination"
         if self.accelerator.is_main_process:
             os.makedirs(plotting_dir, exist_ok=True)
         self.accelerator.wait_for_everyone()
         logs = {}
 
-        for idx in range(len(dset)):
+        if num_rollout is None:
+            num_rollout = len(dset)
+
+        for idx in range(num_rollout):
             local_logs = defaultdict(list)
-            obs, act, _, _ = dset[idx]
+            obs, actions, _, _ = dset[idx]
             obs = {k:v.unsqueeze(0).to(self.device) for k, v in obs.items()}
-            actions = act.unsqueeze(0).to(self.device)
+            actions = actions.unsqueeze(0).to(self.device)
 
             # context phase
-            step_size = self.window_size - self.cfg.num_hist
-            num_ctx_windows = max(1, (query_phase_start - self.cfg.num_hist) // step_size)
+            num_ctx_windows = 1 + (query_phase_start_idx - self.window_size) // self.step_size
             for window_idx in range(num_ctx_windows):
-                start_idx = window_idx * step_size
-                end_idx = min(start_idx + self.window_size, query_phase_start)
+                start_idx = window_idx * self.step_size
+                end_idx = min(start_idx + self.window_size, query_phase_start_idx)
                 obs_window = {
-                    k: v[:, start_idx:end_idx, ...] for k, v in obs.items()
+                    k: v[:, start_idx:end_idx] for k, v in obs.items()
                 }
-                act_window = actions[:, start_idx:end_idx, ...]
+                act_window = actions[:, start_idx:end_idx]
 
                 # burn in for context phase
                 self.model(obs_window, act_window) # no tracking until query phase
-            
+
+            init_context = self.cfg.num_hist
+            num_phase_steps = actions.shape[1] - query_phase_start_idx
             # rollout on query phase
-            query_start = min(end_idx, query_phase_start) # pick up where context phase left off
-            query_actions = act[:, query_start:, ...]
+            query_actions = actions[:, query_phase_start_idx-init_context:]
             obs_query_start = {
-                k: v[:, query_start-self.cfg.num_hist:query_start, ...] for k, v in obs.items()
+                k: v[
+                    :, query_phase_start_idx - init_context : query_phase_start_idx
+                ]
+                for k, v in obs.items()
             }
+
             z_obses, _ = self.model.rollout(obs_query_start, query_actions, bypass_memory_reset=True)
 
             # evaluate on query phase
             decoded = self.model.decode_obs(z_obses)[0]
-            visuals = decoded["visual"]
+
+            # eval only query phase
+            visuals = decoded["visual"][:, -num_phase_steps:]
             if idx < 5:
-                imgs = torch.cat([obs["visual"].cpu(), visuals[0].cpu()], dim=0)
+                imgs = torch.cat(
+                    [
+                        obs["visual"][0, -num_phase_steps:].cpu(),
+                        visuals[0].cpu(),
+                    ],
+                    dim=0,
+                )
                 if self.accelerator.is_main_process:
                     self.plot_imgs(
                         imgs,
@@ -1551,10 +1559,10 @@ class Trainer:
                         f"{plotting_dir}/e{self.epoch}_{idx}_long_imagination.png",
                     )     
 
-            obs_tgt = {k: v[query_start:, ...] for k, v in obs.items()}
+            obs_tgt = {k: v[:, query_phase_start_idx:] for k, v in obs.items()}
             z_tgts = self.model.encode_obs(obs_tgt)
             z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
-            for t in range(query_start, actions.shape[1]):
+            for t in range(query_phase_start_idx, actions.shape[1]):
                 z_pred_t = slice_trajdict_with_t(
                             z_obses, start_idx=t, end_idx=t+1
                 ) # openloop predicted latents
@@ -1568,22 +1576,20 @@ class Trainer:
                 for k in div_loss.keys():
                     local_logs[f"{k}_err_long_imagination"].append(div_loss[k].cpu().numpy())
                 local_logs["t"].append(t)
-            
+
             # aggregate errors for each time step over whole dataset
             for k, v in local_logs.items():
                 if k not in logs:
                     logs[k] = np.zeros(actions.shape[1])
-                logs[k] += np.stack(v) / len(dset)
-
+                logs[k] += np.stack(v) / num_rollout
 
         if self.accelerator.is_main_process:
             self.save_horizon_results_to_file(logs, f"{plotting_dir}/e{self.epoch}_long_imagination_per_step_errors.csv")
-        
+
         return {
             k: v[-1] for k, v in logs.items()
         }
-  
-                  
+
     def save_horizon_results_to_file(self, horizon_logs, filepath):
         if not horizon_logs:
             return

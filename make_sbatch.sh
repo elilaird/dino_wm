@@ -20,6 +20,7 @@ PY_ARGS="${@}"
 if [ "${PARTITION}" = "short" ]; then
     TIME="0-04:00:00"
     CPUS=16
+    BRANCH=local
 fi
 
 HOME_DIR=${HOME_DIR:-"/users/ejlaird/Projects/dino_wm"}
@@ -48,8 +49,10 @@ fi
 
 if [ "${TYPE}" = "jupyter" ]; then
     COMMAND="jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
+    BRANCH="local"
 elif [ "${TYPE}" = "habitat" ]; then
     COMMAND="python -m habitat_sim.utils.datasets_download --username fde8b8c1eb409327 --password bf777aaf24d6340bf647eb08c3b31817 --uids ${PY_ARGS}  --data-path ${DATA_DIR}/habitat"
+    BRANCH="local"
 else
     # Use accelerate for distributed training
     if [ "${GPU}" -gt 1 ]; then
@@ -85,11 +88,11 @@ conda activate ${ENV_DIR}/${CONDA_ENV}
 
 which python
 
-cd ${WORK_DIR}
 
-if [ \"${TYPE}\" = \"jupyter\" ]; then
-    echo Skipping clone for jupyter
+if [ \"${BRANCH}\" = \"local\" ]; then
+    echo Skipping clone for local testing
 else
+    cd ${WORK_DIR}
     mkdir -p dino_wm_\${SLURM_JOB_ID}
     cd dino_wm_\${SLURM_JOB_ID}
     echo "Current working directory: dino_wm_\${SLURM_JOB_ID}"
