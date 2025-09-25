@@ -479,7 +479,7 @@ def load_minigrid_slice_train_val(
     n_rollout=50,
     data_path='data/minigrid_env',
     normalize_action=False,
-    split_ratio=0.8,
+    split_ratio=0.9,
     num_hist=0,
     num_pred=0,
     frameskip=0,
@@ -511,20 +511,12 @@ def load_minigrid_slice_train_val(
             starts_with_noop_action=starts_with_noop_action,
         )
     
-    if full_sequence:
-        dset_train, dset_val, train_slices, val_slices = get_train_val_full_sequence(
-            traj_dataset=dset, 
-            train_fraction=split_ratio, 
-            frameskip=frameskip,
-            min_seq_length=num_frames if num_frames else num_hist + num_pred,
-        )
-    else:
-        dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
-            traj_dataset=dset, 
-            train_fraction=split_ratio, 
-            num_frames=num_frames if num_frames else num_hist + num_pred, 
-            frameskip=frameskip
-        )
+    dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
+        traj_dataset=dset, 
+        train_fraction=split_ratio, 
+        num_frames=num_frames if num_frames else num_hist + num_pred, 
+        frameskip=frameskip
+    )
 
     datasets = {}
     datasets['train'] = train_slices
