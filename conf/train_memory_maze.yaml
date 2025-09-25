@@ -42,7 +42,7 @@ training:
   T_mult: 2  # A factor increases T_i after a restart
   eta_min_ratio: 0.1  # minimum LR as ratio of initial LR
   decay_factor: 0.9  # Factor to decay peak LR at each restart
-  warmup_percent: 0.05 # warmup percentage of total steps
+  warmup_percent: 0.01 # warmup percentage of total steps
 
 decoder_loss_type: mse
 
