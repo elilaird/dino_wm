@@ -1580,7 +1580,7 @@ class Trainer:
             # aggregate errors for each time step over whole dataset
             for k, v in local_logs.items():
                 if k not in logs:
-                    logs[k] = np.zeros(actions.shape[1])
+                    logs[k] = np.zeros(obs_tgt.shape[1])
                 logs[k] += np.stack(v) / num_rollout
 
         if self.accelerator.is_main_process:
