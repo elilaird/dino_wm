@@ -13,6 +13,9 @@ dataset:
     _target_: "datasets.img_transforms.default_transform"
     img_size: ${img_size}
   in_memory: False
+  total_episodes: null
+  proprio_available: True
+  starts_with_noop_action: True
 
 decoder_path: null
 num_workers: 16 

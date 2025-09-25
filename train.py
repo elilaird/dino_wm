@@ -1151,7 +1151,7 @@ class Trainer:
 
                     # long imagination
                     if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
-                        long_imagination_logs = self.long_imagination_rollout(self.val_traj_dset, query_phase_start_idx=self.cfg.query_phase_start_idx)
+                        long_imagination_logs = self.long_imagination_rollout(self.val_traj_dset, query_phase_start_idx=self.cfg.query_phase_start_idx, num_rollout=self.cfg.num_eval_samples)
                         long_imagination_logs = {
                             f"val_{k}": [v] for k, v in long_imagination_logs.items()
                         }

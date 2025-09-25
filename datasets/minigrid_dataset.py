@@ -209,12 +209,14 @@ class MiniGridMemmapDataset(Dataset):
         action_scale: float = 1.0,
         total_episodes: Optional[int] = None,
         proprio_available: bool = False,
+        starts_with_noop_action: bool = False,
     ):
         self.data_path = Path(data_path)
         self.transform = transform
         self.normalize_action = normalize_action
         self.action_scale = float(action_scale)
         self.proprio_available = proprio_available
+        self.starts_with_noop_action = starts_with_noop_action
 
         # Load index.json
         with open(self.data_path / "index.json", "r") as f:
@@ -419,6 +421,10 @@ class MiniGridMemmapDataset(Dataset):
         if acts.ndim == 1:
             acts = acts.unsqueeze(-1)
 
+        # if starts_with_noop_action, move noop to the end
+        if self.starts_with_noop_action:
+            acts = torch.cat([acts[1:], acts[:1]], dim=0)
+
         if self.proprio_available:
             proprio = torch.from_numpy(proprio_np[frame_indices]).float()
             state = proprio[:, :2].float()
@@ -482,6 +488,7 @@ def load_minigrid_slice_train_val(
     in_memory=True,
     total_episodes=None,
     proprio_available=False,
+    starts_with_noop_action=False,
 ):
     """Load and split MiniGrid dataset following the same pattern as point_maze_dset.py."""
     
@@ -501,6 +508,7 @@ def load_minigrid_slice_train_val(
             normalize_action=normalize_action,
             total_episodes=total_episodes,
             proprio_available=proprio_available,
+            starts_with_noop_action=starts_with_noop_action,
         )
     
     if full_sequence:
