@@ -1293,6 +1293,15 @@ class Trainer:
             if self.cfg.dry_run:
                 break
 
+    def _safe_convert_to_numpy(self, value):
+        """Safely convert tensor values to numpy for CSV storage."""
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        elif isinstance(value, (list, tuple)):
+            return [self._safe_convert_to_numpy(v) for v in value]
+        else:
+            return value
+
     def test(self):
         """Test function that mimics val() but uses test dataset and saves results to CSV."""
         self.model.eval()
@@ -1317,7 +1326,7 @@ class Trainer:
                 
                 # Store rollout results for CSV
                 for k, v in test_rollout_logs.items():
-                    test_results[k].extend(v)
+                    test_results[k].extend(self._safe_convert_to_numpy(v))
 
                 # long horizon treatments
                 if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
@@ -1334,7 +1343,7 @@ class Trainer:
                     
                     # Store long horizon results for CSV
                     for k, v in test_long_horizon_logs.items():
-                        test_results[k].extend(v)
+                        test_results[k].extend(self._safe_convert_to_numpy(v))
 
                 # long imagination
                 if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
@@ -1350,7 +1359,7 @@ class Trainer:
                     
                     # Store long imagination results for CSV
                     for k, v in long_imagination_logs.items():
-                        test_results[k].extend(v)
+                        test_results[k].extend(self._safe_convert_to_numpy(v))
 
         self.accelerator.wait_for_everyone()
         
@@ -1418,7 +1427,7 @@ class Trainer:
                     
                     # Store error logs for CSV
                     for k, v in err_logs.items():
-                        test_results[k].extend(v)
+                        test_results[k].extend(self._safe_convert_to_numpy(v))
 
                 if visual_out is not None:
                     for t in range(
@@ -1440,7 +1449,7 @@ class Trainer:
                         
                         # Store image prediction scores for CSV
                         for k, v in img_pred_scores.items():
-                            test_results[k].extend(v)
+                            test_results[k].extend(self._safe_convert_to_numpy(v))
 
                 if visual_reconstructed is not None:
                     for t in range(obs_window["visual"].shape[1]):
@@ -1461,7 +1470,7 @@ class Trainer:
                         
                         # Store image reconstruction scores for CSV
                         for k, v in img_reconstruction_scores.items():
-                            test_results[k].extend(v)
+                            test_results[k].extend(self._safe_convert_to_numpy(v))
 
                 self.plot_samples(
                     obs_window["visual"],
@@ -1477,7 +1486,7 @@ class Trainer:
             batch_loss_logs = {f"test_{k}": [v] for k, v in batch_loss_components.items()}
             self.logs_update(batch_loss_logs)
             for k, v in batch_loss_logs.items():
-                test_results[k].extend(v)
+                test_results[k].extend(self._safe_convert_to_numpy(v))
 
             if (
                 self.cfg.predictor == "additive_control_vit"
@@ -1490,7 +1499,7 @@ class Trainer:
                 
                 # Store alpha logs for CSV
                 for k, v in alpha_logs.items():
-                    test_results[k].extend(v)
+                    test_results[k].extend(self._safe_convert_to_numpy(v))
 
             if self.cfg.dry_run:
                 break
@@ -1833,7 +1842,7 @@ class Trainer:
             obs_tgt = {k: v[:, query_phase_start_idx:] for k, v in obs.items()}
             z_tgts = self.model.encode_obs(obs_tgt)
             z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
-            for t in range(query_phase_start_idx, actions.shape[1]):
+            for t in range(obs_tgt["visual"].shape[1]):
                 z_pred_t = slice_trajdict_with_t(
                             z_obses, start_idx=t, end_idx=t+1
                 ) # openloop predicted latents

@@ -19,7 +19,6 @@ PY_ARGS="${@}"
 
 if [ "${PARTITION}" = "short" ]; then
     TIME="0-04:00:00"
-    CPUS=16
     BRANCH=local
 fi
 
