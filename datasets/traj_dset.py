@@ -231,16 +231,30 @@ def random_split_traj(
     ]
 
 
-def split_traj_datasets(dataset, train_fraction=0.95, random_seed=42):
+def split_traj_datasets(dataset, train_fraction=0.95, random_seed=42, include_test=False):
     dataset_length = len(dataset)
-    lengths = [
-        int(train_fraction * dataset_length) + 1,
-        dataset_length - int(train_fraction * dataset_length) - 1,
-    ]
-    train_set, val_set = random_split_traj(
-        dataset, lengths, generator=torch.Generator().manual_seed(random_seed)
-    )
-    return train_set, val_set
+    
+    if include_test:
+        # Train gets train_fraction, val gets half of remaining, test gets other half
+        train_length = int(train_fraction * dataset_length)
+        remaining_length = dataset_length - train_length
+        val_length = remaining_length // 2
+        test_length = remaining_length - val_length
+        
+        lengths = [train_length, val_length, test_length]
+        train_set, val_set, test_set = random_split_traj(
+            dataset, lengths, generator=torch.Generator().manual_seed(random_seed)
+        )
+        return train_set, val_set, test_set
+    else:
+        lengths = [
+            int(train_fraction * dataset_length) + 1,
+            dataset_length - int(train_fraction * dataset_length) - 1,
+        ]
+        train_set, val_set = random_split_traj(
+            dataset, lengths, generator=torch.Generator().manual_seed(random_seed)
+        )
+        return train_set, val_set
 
 
 def get_train_val_sliced(
@@ -249,17 +263,32 @@ def get_train_val_sliced(
     random_seed: int = 42,
     num_frames: int = 10,
     frameskip: int = 1,
+    include_test: bool = False,
 ):
-    train, val = split_traj_datasets(
-        traj_dataset,
-        train_fraction=train_fraction,
-        random_seed=random_seed,
-    )
+    if include_test:
+        train, val, test = split_traj_datasets(
+            traj_dataset,
+            train_fraction=train_fraction,
+            random_seed=random_seed,
+            include_test=True,
+        )
 
-    train_slices = TrajSlicerDataset(train, num_frames, frameskip)
-    val_slices = TrajSlicerDataset(val, num_frames, frameskip)
+        train_slices = TrajSlicerDataset(train, num_frames, frameskip)
+        val_slices = TrajSlicerDataset(val, num_frames, frameskip)
+        test_slices = TrajSlicerDataset(test, num_frames, frameskip)
 
-    return train, val, train_slices, val_slices
+        return train, val, test, train_slices, val_slices, test_slices
+    else:
+        train, val = split_traj_datasets(
+            traj_dataset,
+            train_fraction=train_fraction,
+            random_seed=random_seed,
+        )
+
+        train_slices = TrajSlicerDataset(train, num_frames, frameskip)
+        val_slices = TrajSlicerDataset(val, num_frames, frameskip)
+
+        return train, val, train_slices, val_slices
 
 
 def get_train_val_full_sequence(
@@ -268,18 +297,39 @@ def get_train_val_full_sequence(
     random_seed: int = 42,
     frameskip: int = 1,
     min_seq_length: int = 10,
+    include_test: bool = False,
 ):
-    train, val = split_traj_datasets(
-        traj_dataset,
-        train_fraction=train_fraction,
-        random_seed=random_seed,
-    )
+    if include_test:
+        train, val, test = split_traj_datasets(
+            traj_dataset,
+            train_fraction=train_fraction,
+            random_seed=random_seed,
+            include_test=True,
+        )
 
-    train_full = TrajFullSequenceDataset(
-        train, frameskip, min_seq_length=min_seq_length
-    )
-    val_full = TrajFullSequenceDataset(
-        val, frameskip, min_seq_length=min_seq_length
-    )
+        train_full = TrajFullSequenceDataset(
+            train, frameskip, min_seq_length=min_seq_length
+        )
+        val_full = TrajFullSequenceDataset(
+            val, frameskip, min_seq_length=min_seq_length
+        )
+        test_full = TrajFullSequenceDataset(
+            test, frameskip, min_seq_length=min_seq_length
+        )
 
-    return train, val, train_full, val_full
+        return train, val, test, train_full, val_full, test_full
+    else:
+        train, val = split_traj_datasets(
+            traj_dataset,
+            train_fraction=train_fraction,
+            random_seed=random_seed,
+        )
+
+        train_full = TrajFullSequenceDataset(
+            train, frameskip, min_seq_length=min_seq_length
+        )
+        val_full = TrajFullSequenceDataset(
+            val, frameskip, min_seq_length=min_seq_length
+        )
+
+        return train, val, train_full, val_full

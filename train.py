@@ -229,16 +229,20 @@ class Trainer:
             num_pred=self.cfg.num_pred,
             frameskip=self.cfg.frameskip,
             num_frames=self.cfg.num_frames,
+            include_test=True,
         )
 
         if self.accelerator.is_main_process:
             # print length of train and valid datasets
             log.info(f"Train dataset length: {len(self.datasets['train'])}")
             log.info(f"Valid dataset length: {len(self.datasets['valid'])}")
+            log.info(f"Test dataset length: {len(self.datasets['test'])}")
 
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
-        nw = max(1, self.cfg.num_workers - 1)
+        self.test_traj_dset = traj_dsets["test"]
+
+        nw = self.cfg.num_workers
         self.dataloaders = {
             x: torch.utils.data.DataLoader(
                 self.datasets[x],
@@ -251,15 +255,15 @@ class Trainer:
                 drop_last=True if x == "train" else False,
                 prefetch_factor=2,
             )
-            for x in ["train", "valid"]
+            for x in ["train", "valid", "test"]
         }
 
         if self.accelerator.is_main_process:
             log.info(f"dataloader batch size: {self.cfg.gpu_batch_size}")
 
-        self.dataloaders["train"], self.dataloaders["valid"] = (
+        self.dataloaders["train"], self.dataloaders["valid"], self.dataloaders["test"] = (
             self.accelerator.prepare(
-                self.dataloaders["train"], self.dataloaders["valid"]
+                self.dataloaders["train"], self.dataloaders["valid"], self.dataloaders["test"]
             )
         )
 
@@ -811,6 +815,10 @@ class Trainer:
 
             if self.cfg.dry_run:
                 return
+        
+        # test and save results
+        self.test()
+        self.accelerator.wait_for_everyone()
 
     def horizon_treatment_eval(self, z_pred, z_tgt, obs_tgt, obs_recon, reencoded_visuals):
         logs = {}
@@ -1284,6 +1292,269 @@ class Trainer:
 
             if self.cfg.dry_run:
                 break
+
+    def test(self):
+        """Test function that mimics val() but uses test dataset and saves results to CSV."""
+        self.model.eval()
+        
+        # Initialize test results storage
+        test_results = defaultdict(list)
+        
+        if len(self.test_traj_dset) > 0 and self.cfg.has_predictor:
+            rand_start_end = (
+                False if self.cfg.env == "deformable_env" else True
+            )
+            with torch.no_grad():
+                test_rollout_logs = self.openloop_rollout(
+                    self.test_traj_dset,
+                    mode="test",
+                    rand_start_end=rand_start_end,
+                )
+                test_rollout_logs = {
+                    f"test_{k}": [v] for k, v in test_rollout_logs.items()
+                }
+                self.logs_update(test_rollout_logs)
+                
+                # Store rollout results for CSV
+                for k, v in test_rollout_logs.items():
+                    test_results[k].extend(v)
+
+                # long horizon treatments
+                if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
+                    test_long_horizon_logs = self.openloop_rollout(
+                        self.test_traj_dset,
+                        mode="test",
+                        rand_start_end=False,
+                        horizon_treatment=self.cfg.horizon_treatment,
+                    )
+                    test_long_horizon_logs = {
+                        f"test_{k}": [v] for k, v in test_long_horizon_logs.items()
+                    }
+                    self.logs_update(test_long_horizon_logs)
+                    
+                    # Store long horizon results for CSV
+                    for k, v in test_long_horizon_logs.items():
+                        test_results[k].extend(v)
+
+                # long imagination
+                if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
+                    long_imagination_logs = self.long_imagination_rollout(
+                        self.test_traj_dset, 
+                        query_phase_start_idx=self.cfg.query_phase_start_idx, 
+                        num_rollout=self.cfg.num_eval_samples
+                    )
+                    long_imagination_logs = {
+                        f"test_{k}": [v] for k, v in long_imagination_logs.items()
+                    }
+                    self.logs_update(long_imagination_logs)
+                    
+                    # Store long imagination results for CSV
+                    for k, v in long_imagination_logs.items():
+                        test_results[k].extend(v)
+
+        self.accelerator.wait_for_everyone()
+        
+        # Test on test dataloader
+        for i, data in enumerate(
+            tqdm(self.dataloaders["test"], desc=f"Epoch {self.epoch} Test")
+        ):
+            batch_loss_components = defaultdict(float)
+            obs, act, _ = data
+            B, N = obs["visual"].shape[:2]
+            num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
+
+            if hasattr(self.model.predictor, "reset_memory"):
+                self.model.predictor.reset_memory()
+            elif hasattr(self.model.predictor, "module") and hasattr(
+                self.model.predictor.module, "reset_memory"
+            ):
+                self.model.predictor.module.reset_memory()
+
+            for window_idx in range(num_windows):
+                start_idx = window_idx * self.step_size
+                end_idx = min(start_idx + self.window_size, N)
+                obs_window = {
+                    k: v[:, start_idx:end_idx, ...] for k, v in obs.items()
+                }
+                act_window = act[:, start_idx:end_idx, ...]
+
+                # test step
+                with torch.no_grad():
+                    (
+                        z_out,
+                        visual_out,
+                        visual_reconstructed,
+                        loss,
+                        loss_components,
+                    ) = self.model(obs_window, act_window)
+                    loss = self.accelerator.gather_for_metrics(loss).mean()
+                    loss_components = self.accelerator.gather_for_metrics(
+                        loss_components
+                    )
+                    for key, value in loss_components.items():
+                        batch_loss_components[key] += (
+                            value.mean().item() / num_windows
+                        )
+
+            if self.cfg.has_decoder and i == 0:
+                # only eval images when plotting due to speed
+                if self.cfg.has_predictor:
+                    z_obs_out, _ = self.model.separate_emb(z_out)
+                    z_gt = self.model.encode_obs(obs_window)
+                    z_tgt = slice_trajdict_with_t(
+                        z_gt, start_idx=self.cfg.num_pred
+                    )
+
+                    err_logs = self.err_eval(z_obs_out, z_tgt)
+
+                    err_logs = self.accelerator.gather_for_metrics(err_logs)
+                    err_logs = {
+                        key: value.mean().item()
+                        for key, value in err_logs.items()
+                    }
+                    err_logs = {f"test_{k}": [v] for k, v in err_logs.items()}
+
+                    self.logs_update(err_logs)
+                    
+                    # Store error logs for CSV
+                    for k, v in err_logs.items():
+                        test_results[k].extend(v)
+
+                if visual_out is not None:
+                    for t in range(
+                        self.cfg.num_hist,
+                        self.cfg.num_hist + self.cfg.num_pred,
+                    ):
+                        img_pred_scores = eval_images(
+                            visual_out[:, t - self.cfg.num_pred],
+                            obs_window["visual"][:, t],
+                        )
+                        img_pred_scores = self.accelerator.gather_for_metrics(
+                            img_pred_scores
+                        )
+                        img_pred_scores = {
+                            f"test_img_{k}_pred": [v.mean().item()]
+                            for k, v in img_pred_scores.items()
+                        }
+                        self.logs_update(img_pred_scores)
+                        
+                        # Store image prediction scores for CSV
+                        for k, v in img_pred_scores.items():
+                            test_results[k].extend(v)
+
+                if visual_reconstructed is not None:
+                    for t in range(obs_window["visual"].shape[1]):
+                        img_reconstruction_scores = eval_images(
+                            visual_reconstructed[:, t],
+                            obs_window["visual"][:, t],
+                        )
+                        img_reconstruction_scores = (
+                            self.accelerator.gather_for_metrics(
+                                img_reconstruction_scores
+                            )
+                        )
+                        img_reconstruction_scores = {
+                            f"test_img_{k}_reconstructed": [v.mean().item()]
+                            for k, v in img_reconstruction_scores.items()
+                        }
+                        self.logs_update(img_reconstruction_scores)
+                        
+                        # Store image reconstruction scores for CSV
+                        for k, v in img_reconstruction_scores.items():
+                            test_results[k].extend(v)
+
+                self.plot_samples(
+                    obs_window["visual"],
+                    visual_out,
+                    visual_reconstructed,
+                    self.epoch,
+                    batch=i,
+                    num_samples=self.num_reconstruct_samples,
+                    phase="test",
+                )
+
+            # Store batch loss components for CSV
+            batch_loss_logs = {f"test_{k}": [v] for k, v in batch_loss_components.items()}
+            self.logs_update(batch_loss_logs)
+            for k, v in batch_loss_logs.items():
+                test_results[k].extend(v)
+
+            if (
+                self.cfg.predictor == "additive_control_vit"
+                and self.cfg.has_predictor
+                and i == 0
+            ):  # Log on first test batch
+                alpha_logs = self.get_alpha_values()
+                alpha_logs = {f"test_{k}": [v] for k, v in alpha_logs.items()}
+                self.logs_update(alpha_logs)
+                
+                # Store alpha logs for CSV
+                for k, v in alpha_logs.items():
+                    test_results[k].extend(v)
+
+            if self.cfg.dry_run:
+                break
+
+        # Save test results to CSV
+        if self.accelerator.is_main_process and test_results:
+            self.save_test_results_to_csv(test_results)
+
+    def save_test_results_to_csv(self, test_results):
+        """Save test results to CSV file."""
+        if not test_results:
+            return
+            
+        try:
+            # Create test results directory
+            test_dir = "test_results"
+            os.makedirs(test_dir, exist_ok=True)    
+            
+            # Prepare CSV data
+            csv_data = []
+            max_length = max(len(v) for v in test_results.values()) if test_results else 0
+            
+            for i in range(max_length):
+                row = {"epoch": self.epoch, "sample_idx": i}
+                for key, values in test_results.items():
+                    row[key] = values[i] if i < len(values) else None
+                csv_data.append(row)
+            
+            # Write to CSV
+            csv_filename = f"{test_dir}/test_results_epoch_{self.epoch}.csv"
+            fieldnames = ["epoch", "sample_idx"] + list(test_results.keys())
+            
+            with open(csv_filename, "w", newline="") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(csv_data)
+                
+            log.info(f"Test results saved to {csv_filename}")
+            
+            # Also save summary statistics
+            summary_filename = f"{test_dir}/test_summary_epoch_{self.epoch}.csv"
+            summary_data = []
+            for key, values in test_results.items():
+                if values:  # Only process non-empty lists
+                    summary_data.append({
+                        "metric": key,
+                        "mean": np.mean(values),
+                        "std": np.std(values),
+                        "min": np.min(values),
+                        "max": np.max(values),
+                        "count": len(values)
+                    })
+            
+            if summary_data:
+                with open(summary_filename, "w", newline="") as csvfile:
+                    fieldnames = ["metric", "mean", "std", "min", "max", "count"]
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(summary_data)
+                    
+                log.info(f"Test summary saved to {summary_filename}")
+                
+        except Exception as e:
+            log.error(f"Error saving test results to CSV: {e}")
 
     def openloop_rollout(
         self,
