@@ -814,7 +814,7 @@ class Trainer:
                 )
 
             if self.cfg.dry_run:
-                return
+                break
         
         # test and save results
         self.test()
