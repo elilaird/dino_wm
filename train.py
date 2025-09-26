@@ -482,7 +482,21 @@ class Trainer:
             n_params > 0
         ), "Encoder has zero parameters on this rank BEFORE DDP."
 
-        if not self.train_encoder:
+        if self.train_encoder:
+            print("Freezing the first 9 transformer blocks")
+            # freeze the first 9 transformer blocks
+            for i, block in enumerate(self.encoder.base_model.blocks):
+                if i < 9:
+                    for param in block.parameters():
+                        param.requires_grad = False
+                else:
+                    # unfreeze the last 3 transformer blocks
+                    for param in block.parameters():
+                        param.requires_grad = True
+            # unfreeze the layernorm
+            for param in self.encoder.base_model.norm.parameters():
+                param.requires_grad = True
+        else:
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
