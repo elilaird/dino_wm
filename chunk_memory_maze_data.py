@@ -28,12 +28,15 @@ def get_episode_files(input_dir: Path) -> List[Path]:
 
 
 def load_episode_data(episode_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load image and action data from a single episode npz file."""
-    with np.load(episode_path) as data:
-        images = data['image']  # Shape: (501, 64, 64, 3)
-        proprios = data['proprio']  # Shape: (501, 4)
-        actions = data['action']  # Shape: (501, 6)
-    return images, proprios, actions
+    try:
+        with np.load(episode_path) as data:
+            images = data['image']
+            proprios = data['proprio']
+            actions = data['action']
+        return images, proprios, actions
+    except (EOFError, OSError, ValueError) as e:
+        print(f"Warning: Failed to load {episode_path}: {e}")
+        return None, None, None
 
 
 def chunk_episodes(
@@ -80,6 +83,10 @@ def chunk_episodes(
         
         # Load first episode to get shapes
         first_images, first_proprios, first_actions = load_episode_data(chunk_episodes[0])
+        if any(x is None for x in [first_images, first_proprios, first_actions]):
+            print(f"Skipping corrupted episode file: {chunk_episodes[0].name}")
+            episode_idx = end_idx
+            continue
         seq_len, height, width, channels = first_images.shape
         action_dim = first_actions.shape[1] if first_actions.ndim > 1 else 1
         proprio_dim = first_proprios.shape[1] if first_proprios.ndim > 1 else 1
@@ -92,6 +99,10 @@ def chunk_episodes(
         # Load all episodes in this chunk
         for i, episode_file in enumerate(chunk_episodes):
             images, proprios, actions = load_episode_data(episode_file)
+            if any(x is None for x in [images, proprios, actions]):
+                print(f"Skipping corrupted episode file: {episode_file.name}")
+                episode_idx = end_idx
+                continue
             
             # Ensure consistent shapes
             if images.shape != (seq_len, height, width, channels):
@@ -151,7 +162,7 @@ def chunk_episodes(
     index_data = {
         "episodes_per_chunk": episodes_per_chunk,
         "total_episodes": total_episodes,
-        "n_chunks": n_chunks,
+        "n_chunks": chunk_idx+1,
         "max_steps": max_steps,
         "image_shape": [height, width, channels],
         "action_dim": action_dim,
