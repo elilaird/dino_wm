@@ -238,6 +238,22 @@ class Trainer:
             log.info(f"Valid dataset length: {len(self.datasets['valid'])}")
             log.info(f"Test dataset length: {len(self.datasets['test'])}")
 
+        # load context recall dataset for eval
+        if OmegaConf.select(self.cfg, "eval_context_recall", default=False) and self.cfg.context_recall_data_path is not None:
+            _, ctx_recall_dset = hydra.utils.call(
+                self.cfg.env.dataset,
+                num_hist=self.cfg.num_hist,
+                num_pred=self.cfg.num_pred,
+                frameskip=self.cfg.frameskip,
+                num_frames=self.cfg.num_frames,
+                data_path=self.cfg.context_recall_data_path,
+                include_test=True,
+            )
+            self.context_recall_dset = {"valid": ctx_recall_dset["valid"], "test": ctx_recall_dset["test"]}
+            if self.accelerator.is_main_process:
+                log.info(f"Context recall valid dataset length: {len(self.context_recall_dset['valid'])}")
+                log.info(f"Context recall test dataset length: {len(self.context_recall_dset['test'])}")
+
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
         self.test_traj_dset = traj_dsets["test"]
@@ -707,7 +723,8 @@ class Trainer:
             decay_factor = self.cfg.training.decay_factor
 
             # Calculate steps per epoch for step-based scheduling
-            steps_per_epoch = len(self.dataloaders["train"])
+            steps_per_window = 1 + (self.cfg.num_frames - self.window_size) // self.step_size
+            steps_per_epoch = len(self.dataloaders["train"]) * steps_per_window
             warmup_steps = int(
                 self.cfg.training.warmup_percent * steps_per_epoch
             )
@@ -1052,8 +1069,12 @@ class Trainer:
                         self.logs_update(long_imagination_logs)
 
                     # context recall
-                    if OmegaConf.select(self.cfg, "eval_context_recall", default=False):
-                        pass
+                    if OmegaConf.select(self.cfg, "eval_context_recall", default=False) and self.context_recall_dset is not None:
+                        context_recall_logs = self.context_recall_rollout(self.context_recall_dset["valid"], query_phase_start_idx=self.cfg.teleport_start_idx, num_rollout=self.cfg.num_eval_samples)
+                        context_recall_logs = {
+                            f"val_{k}": [v] for k, v in context_recall_logs.items()
+                        }
+                        self.logs_update(context_recall_logs)
 
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
@@ -1246,6 +1267,27 @@ class Trainer:
 
                     # Store long imagination results for CSV
                     for k, v in long_imagination_logs.items():
+                        test_results[k].extend(self._safe_convert_to_numpy(v))
+
+                # context recall
+                if (
+                    OmegaConf.select(
+                        self.cfg, "eval_context_recall", default=False
+                    )
+                    and self.context_recall_dset is not None
+                ):
+                    context_recall_logs = self.context_recall_rollout(
+                        self.context_recall_dset["test"],
+                        query_phase_start_idx=self.cfg.teleport_start_idx,
+                        num_rollout=self.cfg.num_eval_samples if self.dry_run else None,
+                    )
+                    for burn_in_step, logs in context_recall_logs.items():
+                        context_recall_logs[burn_in_step] = {
+                            f"test_{k}_burn_in_{burn_in_step}": [v]
+                            for k, v in logs.items()
+                        }
+                    self.logs_update(context_recall_logs)
+                    for k, v in context_recall_logs.items():
                         test_results[k].extend(self._safe_convert_to_numpy(v))
 
         self.accelerator.wait_for_everyone()
@@ -1731,6 +1773,7 @@ class Trainer:
 
         return logs
 
+    # minigrid only for now
     def loopclosure_rollout(self, dset, query_phase_start=0):
         plotting_dir = f"loopclosure_plots/e{self.epoch}_loopclosure"
         if self.accelerator.is_main_process:
@@ -1883,6 +1926,105 @@ class Trainer:
             k: v[-1] for k, v in logs.items()
         }
 
+    def context_recall_rollout(self, dset, query_phase_start_idx=0, num_rollout=None):
+        plotting_dir = f"context_recall_plots/e{self.epoch}_context_recall"
+        if self.accelerator.is_main_process:
+            os.makedirs(plotting_dir, exist_ok=True)
+        self.accelerator.wait_for_everyone()
+        final_logs = {}
+        burn_in_steps = [0, 5, 10, 15, 20]
+
+        if num_rollout is None:
+            num_rollout = len(dset)
+
+        for burn_in_step in burn_in_steps:
+            logs = {}
+            local_query_phase_start_idx = query_phase_start_idx + burn_in_step
+
+            for idx in range(num_rollout):
+                local_logs = defaultdict(list)
+                obs, actions, _, _ = dset[idx]
+                obs = {k:v.unsqueeze(0).to(self.device) for k, v in obs.items()}
+                actions = actions.unsqueeze(0).to(self.device)
+
+                # context phase
+                num_ctx_windows = 1 + (local_query_phase_start_idx - self.window_size) // self.step_size
+                for window_idx in range(num_ctx_windows):
+                    start_idx = window_idx * self.step_size
+                    end_idx = min(start_idx + self.window_size, local_query_phase_start_idx)
+                    obs_window = {
+                        k: v[:, start_idx:end_idx] for k, v in obs.items()
+                    }
+                    act_window = actions[:, start_idx:end_idx]
+
+                    # burn in for context phase
+                    self.model(obs_window, act_window) # no tracking until query phase
+
+                init_context = self.cfg.num_hist
+                num_phase_steps = actions.shape[1] - local_query_phase_start_idx
+                # rollout on query phase
+                query_actions = actions[:, local_query_phase_start_idx-init_context:]
+                obs_query_start = {
+                    k: v[
+                        :, local_query_phase_start_idx - init_context : local_query_phase_start_idx
+                    ]
+                    for k, v in obs.items()
+                }
+
+                z_obses, _ = self.model.rollout(obs_query_start, query_actions, bypass_memory_reset=True)
+
+                # evaluate on query phase
+                decoded = self.model.decode_obs(z_obses)[0]
+
+                # eval only query phase
+                visuals = decoded["visual"][:, -num_phase_steps:]
+                if idx < min(10, num_rollout):
+                    imgs = torch.cat(
+                        [
+                            obs["visual"][0, -num_phase_steps:].cpu(),
+                            visuals[0].cpu(),
+                        ],
+                        dim=0,
+                    )
+                    if self.accelerator.is_main_process:
+                        self.plot_imgs(
+                            imgs,
+                            visuals.shape[1],
+                            f"{plotting_dir}/e{self.epoch}_{idx}_context_recall_burn_in_{burn_in_step}.png",
+                        )     
+
+                obs_tgt = {k: v[:, local_query_phase_start_idx:] for k, v in obs.items()}
+                z_tgts = self.model.encode_obs(obs_tgt)
+                z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
+                for t in range(obs_tgt["visual"].shape[1]):
+                    z_pred_t = slice_trajdict_with_t(
+                                z_obses, start_idx=t, end_idx=t+1
+                    ) # openloop predicted latents
+                    z_t = slice_trajdict_with_t(
+                        z_tgts, start_idx=t, end_idx=t+1
+                    ) # target latents
+                    obs_tgt_t = slice_trajdict_with_t(obs_tgt, start_idx=t, end_idx=t+1) # target obs
+                    visuals_t = slice_trajdict_with_t({"visual": visuals, "proprio": obs_tgt["proprio"]}, start_idx=t, end_idx=t+1) # reconstructed visuals
+                    cycle_z_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1) # re-encoded visuals
+                    div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt_t, visuals_t, cycle_z_t)
+                    for k in div_loss.keys():
+                        local_logs[f"{k}_err_context_recall_burn_in_{burn_in_step}"].append(div_loss[k].cpu().numpy())
+                    local_logs["t"].append(t)
+
+                # aggregate errors for each time step over whole dataset
+                for k, v in local_logs.items():
+                    if k not in logs:
+                        logs[k] = np.zeros(obs_tgt["visual"].shape[1])
+                    logs[k] += np.stack(v) / num_rollout
+
+            if self.accelerator.is_main_process:
+                self.save_horizon_results_to_file(logs, f"{plotting_dir}/e{self.epoch}_context_recall_per_step_errors_burn_in_{burn_in_step}.csv")
+
+            final_logs[burn_in_step] = {
+                k: v[-1] for k, v in logs.items()
+            }
+        return final_logs
+
     def save_horizon_results_to_file(self, horizon_logs, filepath):
         if not horizon_logs:
             return
@@ -1925,13 +2067,13 @@ class Trainer:
             epoch_time_msg = f"  Epoch time: {epoch_log['epoch_time']:.2f}s"
 
         # Add learning rates to log message
-        lr_msg = ""
-        if self.cfg.training.use_scheduler:
-            lr_msg = f"  Encoder LR: {epoch_log.get('lr_encoder', 0):.2e}"
-            if self.cfg.has_predictor:
-                lr_msg += (
-                    f"  Predictor LR: {epoch_log.get('lr_predictor', 0):.2e}"
-                )
+        lr_msg = f"  Encoder LR: {self.optimizers['encoder'].param_groups[0]['lr']:.2e}"
+        lr_msg += (
+            f"  Predictor LR: {self.optimizers['predictor'].param_groups[0]['lr']:.2e}"
+        )
+        lr_msg += f"  Decoder LR: {self.optimizers['decoder'].param_groups[0]['lr']:.2e}"
+        lr_msg += f"  Action Encoder LR: {self.optimizers['action_encoder'].param_groups[0]['lr']:.2e}"
+       
 
         log.info(
             f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \

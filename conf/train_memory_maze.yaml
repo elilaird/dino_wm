@@ -49,8 +49,14 @@ decoder_loss_type: mse
 eval_every_x_epoch: 5
 num_eval_samples: 10
 horizon_treatment: 300
+
 eval_long_imagination: True
 query_phase_start_idx: 301
+
+eval_context_recall: False
+context_recall_data_path: ${oc.env:DATASET_DIR}/memory_maze/memory-maze-3x7-teleport-chunked-w-proprio
+teleport_start_idx: 150
+
 
 full_sequence: False
 img_size: 64 
