@@ -23,9 +23,9 @@ hydra:
 
 training:
   seed: 0
-  epochs: 100
-  batch_size: 32 # gpu_batch_size
-  save_every_x_epoch: 10 
+  epochs: 50
+  batch_size: 128 # gpu_batch_size (128 for 16 gpus)
+  save_every_x_epoch: 5 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
   encoder_lr: 1e-6
@@ -38,7 +38,7 @@ training:
   action_encoder_weight_decay: 0.1
   max_grad_norm: 0.5
   use_scheduler: True
-  T_0: 100  # Number of epochs for the first restart
+  T_0: 50  # Number of epochs for the first restart
   T_mult: 2  # A factor increases T_i after a restart
   eta_min_ratio: 0.1  # minimum LR as ratio of initial LR
   decay_factor: 0.9  # Factor to decay peak LR at each restart
@@ -46,7 +46,7 @@ training:
 
 decoder_loss_type: mse
 
-eval_every_x_epoch: 2
+eval_every_x_epoch: 5
 num_eval_samples: 10
 horizon_treatment: 300
 eval_long_imagination: True
@@ -56,7 +56,6 @@ full_sequence: False
 img_size: 64 
 frameskip: 1
 concat_dim: 1
-
 
 # action encoder
 action_emb_dim: 12
@@ -75,4 +74,4 @@ num_pred: 1
 has_predictor: True # set this to False for only training a decoder
 has_decoder: True # set this to False for only training a predictor
 
-num_workers: 5
+num_workers: 4

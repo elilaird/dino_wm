@@ -7,7 +7,7 @@ dataset:
   n_rollout: null
   normalize_action: ${normalize_action}
   data_path: ${oc.env:DATASET_DIR}/memory_maze/memory-maze-7x19-reset-two-traversals-chunked
-  split_ratio: 0.9
+  split_ratio: 0.93
   full_sequence: False
   transform:
     _target_: "datasets.img_transforms.default_transform"
@@ -16,6 +16,7 @@ dataset:
   total_episodes: null
   proprio_available: True
   starts_with_noop_action: True
+  include_test: True
 
 decoder_path: null
 num_workers: 16 

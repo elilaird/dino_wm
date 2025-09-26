@@ -815,124 +815,10 @@ class Trainer:
 
             if self.cfg.dry_run:
                 break
-        
+
         # test and save results
         self.test()
         self.accelerator.wait_for_everyone()
-
-    def horizon_treatment_eval(self, z_pred, z_tgt, obs_tgt, obs_recon, reencoded_visuals):
-        logs = {}
-        for k in z_pred.keys():
-            # mse between z_pred and z_tgt latents
-            logs[f"{k}_latent_mse"] = torch.nn.functional.mse_loss(z_pred[k], z_tgt[k])
-
-            # l2 between z_pred and z_tgt latents
-            logs[f"{k}_latent_l2"] = torch.norm(z_pred[k] - z_tgt[k], p=2)
-
-            # cycle consistency (decode > encode > measure)
-            logs[f"{k}_latent_cycle_mse"] = torch.nn.functional.mse_loss(reencoded_visuals[k], z_tgt[k])
-            logs[f"{k}_latent_cycle_l2"] = torch.norm(reencoded_visuals[k] - z_tgt[k], p=2)
-
-            # mse between obs_recon and obs_tgt
-            logs[f"{k}_obs_recon_mse"] = torch.nn.functional.mse_loss(obs_recon[k], obs_tgt[k])
-            logs[f"{k}_obs_recon_l2"] = torch.norm(obs_recon[k] - obs_tgt[k], p=2)
-
-        return logs
-
-    def err_eval_single(self, z_pred, z_tgt):
-        logs = {}
-        for k in z_pred.keys():
-            loss = self.model.emb_criterion(z_pred[k], z_tgt[k])
-            logs[k] = loss
-        return logs
-
-    def err_eval(self, z_out, z_tgt, state_tgt=None):
-        """
-        z_pred: (b, n_hist, n_patches, emb_dim), doesn't include action dims
-        z_tgt: (b, n_hist, n_patches, emb_dim), doesn't include action dims
-        state:  (b, n_hist, dim)
-        """
-        logs = {}
-        slices = {
-            "full": (None, None),
-            "pred": (-self.cfg.num_pred, None),
-            "next1": (-self.cfg.num_pred, -self.cfg.num_pred + 1),
-        }
-        for name, (start_idx, end_idx) in slices.items():
-            z_out_slice = slice_trajdict_with_t(
-                z_out, start_idx=start_idx, end_idx=end_idx
-            )
-            z_tgt_slice = slice_trajdict_with_t(
-                z_tgt, start_idx=start_idx, end_idx=end_idx
-            )
-            z_err = self.err_eval_single(z_out_slice, z_tgt_slice)
-
-            logs.update({f"z_{k}_err_{name}": v for k, v in z_err.items()})
-
-        return logs
-
-    def decoder_eval(self, batch_idx, obs, z_components):
-        # only eval images when plotting due to speed
-        if self.cfg.has_predictor:
-            z_obs_out, _ = self.model.separate_emb(z_components["z_out"])
-            z_gt = self.model.encode_obs(obs)
-            z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.cfg.num_pred)
-
-            # state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
-            err_logs = self.err_eval(z_obs_out, z_tgt)
-
-            err_logs = self.accelerator.gather_for_metrics(err_logs)
-            err_logs = {
-                key: value.mean().item() for key, value in err_logs.items()
-            }
-            err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
-
-            self.logs_update(err_logs)
-
-        if z_components["visual_out"] is not None:
-            for t in range(
-                self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
-            ):
-                img_pred_scores = eval_images(
-                    z_components["visual_out"][:, t - self.cfg.num_pred],
-                    obs["visual"][:, t],
-                )
-                img_pred_scores = self.accelerator.gather_for_metrics(
-                    img_pred_scores
-                )
-                img_pred_scores = {
-                    f"train_img_{k}_pred": [v.mean().item()]
-                    for k, v in img_pred_scores.items()
-                }
-                self.logs_update(img_pred_scores)
-
-        if z_components["visual_reconstructed"] is not None:
-            for t in range(obs["visual"].shape[1]):
-                img_reconstruction_scores = eval_images(
-                    z_components["visual_reconstructed"][:, t],
-                    obs["visual"][:, t],
-                )
-                img_reconstruction_scores = (
-                    self.accelerator.gather_for_metrics(
-                        img_reconstruction_scores
-                    )
-                )
-                img_reconstruction_scores = {
-                    f"train_img_{k}_reconstructed": [v.mean().item()]
-                    for k, v in img_reconstruction_scores.items()
-                }
-                self.logs_update(img_reconstruction_scores)
-
-        if self.accelerator.is_main_process:
-            self.plot_samples(
-                obs["visual"],
-                z_components["visual_out"],
-                z_components["visual_reconstructed"],
-                self.epoch,
-                batch=batch_idx,
-                num_samples=self.num_reconstruct_samples,
-                phase="train",
-            )
 
     def train_step(self, obs, act):
         self.model.train()
@@ -1305,10 +1191,10 @@ class Trainer:
     def test(self):
         """Test function that mimics val() but uses test dataset and saves results to CSV."""
         self.model.eval()
-        
+
         # Initialize test results storage
         test_results = defaultdict(list)
-        
+
         if len(self.test_traj_dset) > 0 and self.cfg.has_predictor:
             rand_start_end = (
                 False if self.cfg.env == "deformable_env" else True
@@ -1323,7 +1209,7 @@ class Trainer:
                     f"test_{k}": [v] for k, v in test_rollout_logs.items()
                 }
                 self.logs_update(test_rollout_logs)
-                
+
                 # Store rollout results for CSV
                 for k, v in test_rollout_logs.items():
                     test_results[k].extend(self._safe_convert_to_numpy(v))
@@ -1340,29 +1226,30 @@ class Trainer:
                         f"test_{k}": [v] for k, v in test_long_horizon_logs.items()
                     }
                     self.logs_update(test_long_horizon_logs)
-                    
+
                     # Store long horizon results for CSV
                     for k, v in test_long_horizon_logs.items():
                         test_results[k].extend(self._safe_convert_to_numpy(v))
 
                 # long imagination
                 if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
+                    # run on full test dataset
                     long_imagination_logs = self.long_imagination_rollout(
                         self.test_traj_dset, 
                         query_phase_start_idx=self.cfg.query_phase_start_idx, 
-                        num_rollout=self.cfg.num_eval_samples
+                        num_rollout=self.cfg.num_eval_samples if self.dry_run else None,
                     )
                     long_imagination_logs = {
                         f"test_{k}": [v] for k, v in long_imagination_logs.items()
                     }
                     self.logs_update(long_imagination_logs)
-                    
+
                     # Store long imagination results for CSV
                     for k, v in long_imagination_logs.items():
                         test_results[k].extend(self._safe_convert_to_numpy(v))
 
         self.accelerator.wait_for_everyone()
-        
+
         # Test on test dataloader
         for i, data in enumerate(
             tqdm(self.dataloaders["test"], desc=f"Epoch {self.epoch} Test")
@@ -1424,7 +1311,7 @@ class Trainer:
                     err_logs = {f"test_{k}": [v] for k, v in err_logs.items()}
 
                     self.logs_update(err_logs)
-                    
+
                     # Store error logs for CSV
                     for k, v in err_logs.items():
                         test_results[k].extend(self._safe_convert_to_numpy(v))
@@ -1446,7 +1333,7 @@ class Trainer:
                             for k, v in img_pred_scores.items()
                         }
                         self.logs_update(img_pred_scores)
-                        
+
                         # Store image prediction scores for CSV
                         for k, v in img_pred_scores.items():
                             test_results[k].extend(self._safe_convert_to_numpy(v))
@@ -1467,7 +1354,7 @@ class Trainer:
                             for k, v in img_reconstruction_scores.items()
                         }
                         self.logs_update(img_reconstruction_scores)
-                        
+
                         # Store image reconstruction scores for CSV
                         for k, v in img_reconstruction_scores.items():
                             test_results[k].extend(self._safe_convert_to_numpy(v))
@@ -1496,7 +1383,7 @@ class Trainer:
                 alpha_logs = self.get_alpha_values()
                 alpha_logs = {f"test_{k}": [v] for k, v in alpha_logs.items()}
                 self.logs_update(alpha_logs)
-                
+
                 # Store alpha logs for CSV
                 for k, v in alpha_logs.items():
                     test_results[k].extend(self._safe_convert_to_numpy(v))
@@ -1512,33 +1399,33 @@ class Trainer:
         """Save test results to CSV file."""
         if not test_results:
             return
-            
+
         try:
             # Create test results directory
             test_dir = "test_results"
             os.makedirs(test_dir, exist_ok=True)    
-            
+
             # Prepare CSV data
             csv_data = []
             max_length = max(len(v) for v in test_results.values()) if test_results else 0
-            
+
             for i in range(max_length):
                 row = {"epoch": self.epoch, "sample_idx": i}
                 for key, values in test_results.items():
                     row[key] = values[i] if i < len(values) else None
                 csv_data.append(row)
-            
+
             # Write to CSV
             csv_filename = f"{test_dir}/test_results_epoch_{self.epoch}.csv"
             fieldnames = ["epoch", "sample_idx"] + list(test_results.keys())
-            
+
             with open(csv_filename, "w", newline="") as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(csv_data)
-                
+
             log.info(f"Test results saved to {csv_filename}")
-            
+
             # Also save summary statistics
             summary_filename = f"{test_dir}/test_summary_epoch_{self.epoch}.csv"
             summary_data = []
@@ -1552,18 +1439,144 @@ class Trainer:
                         "max": np.max(values),
                         "count": len(values)
                     })
-            
+
             if summary_data:
                 with open(summary_filename, "w", newline="") as csvfile:
                     fieldnames = ["metric", "mean", "std", "min", "max", "count"]
                     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                     writer.writeheader()
                     writer.writerows(summary_data)
-                    
+
                 log.info(f"Test summary saved to {summary_filename}")
-                
+
         except Exception as e:
             log.error(f"Error saving test results to CSV: {e}")
+
+    def horizon_treatment_eval(
+        self, z_pred, z_tgt, obs_tgt, obs_recon, reencoded_visuals
+    ):
+        logs = {}
+        for k in z_pred.keys():
+            # mse between z_pred and z_tgt latents
+            logs[f"{k}_latent_mse"] = torch.nn.functional.mse_loss(
+                z_pred[k], z_tgt[k]
+            )
+
+            # l2 between z_pred and z_tgt latents
+            logs[f"{k}_latent_l2"] = torch.norm(z_pred[k] - z_tgt[k], p=2)
+
+            # cycle consistency (decode > encode > measure)
+            logs[f"{k}_latent_cycle_mse"] = torch.nn.functional.mse_loss(
+                reencoded_visuals[k], z_tgt[k]
+            )
+            logs[f"{k}_latent_cycle_l2"] = torch.norm(
+                reencoded_visuals[k] - z_tgt[k], p=2
+            )
+
+            # mse between obs_recon and obs_tgt
+            logs[f"{k}_obs_recon_mse"] = torch.nn.functional.mse_loss(
+                obs_recon[k], obs_tgt[k]
+            )
+            logs[f"{k}_obs_recon_l2"] = torch.norm(
+                obs_recon[k] - obs_tgt[k], p=2
+            )
+
+        return logs
+
+    def err_eval_single(self, z_pred, z_tgt):
+        logs = {}
+        for k in z_pred.keys():
+            loss = self.model.emb_criterion(z_pred[k], z_tgt[k])
+            logs[k] = loss
+        return logs
+
+    def err_eval(self, z_out, z_tgt, state_tgt=None):
+        """
+        z_pred: (b, n_hist, n_patches, emb_dim), doesn't include action dims
+        z_tgt: (b, n_hist, n_patches, emb_dim), doesn't include action dims
+        state:  (b, n_hist, dim)
+        """
+        logs = {}
+        slices = {
+            "full": (None, None),
+            "pred": (-self.cfg.num_pred, None),
+            "next1": (-self.cfg.num_pred, -self.cfg.num_pred + 1),
+        }
+        for name, (start_idx, end_idx) in slices.items():
+            z_out_slice = slice_trajdict_with_t(
+                z_out, start_idx=start_idx, end_idx=end_idx
+            )
+            z_tgt_slice = slice_trajdict_with_t(
+                z_tgt, start_idx=start_idx, end_idx=end_idx
+            )
+            z_err = self.err_eval_single(z_out_slice, z_tgt_slice)
+
+            logs.update({f"z_{k}_err_{name}": v for k, v in z_err.items()})
+
+        return logs
+
+    def decoder_eval(self, batch_idx, obs, z_components):
+        # only eval images when plotting due to speed
+        if self.cfg.has_predictor:
+            z_obs_out, _ = self.model.separate_emb(z_components["z_out"])
+            z_gt = self.model.encode_obs(obs)
+            z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.cfg.num_pred)
+
+            # state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
+            err_logs = self.err_eval(z_obs_out, z_tgt)
+
+            err_logs = self.accelerator.gather_for_metrics(err_logs)
+            err_logs = {
+                key: value.mean().item() for key, value in err_logs.items()
+            }
+            err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
+
+            self.logs_update(err_logs)
+
+        if z_components["visual_out"] is not None:
+            for t in range(
+                self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
+            ):
+                img_pred_scores = eval_images(
+                    z_components["visual_out"][:, t - self.cfg.num_pred],
+                    obs["visual"][:, t],
+                )
+                img_pred_scores = self.accelerator.gather_for_metrics(
+                    img_pred_scores
+                )
+                img_pred_scores = {
+                    f"train_img_{k}_pred": [v.mean().item()]
+                    for k, v in img_pred_scores.items()
+                }
+                self.logs_update(img_pred_scores)
+
+        if z_components["visual_reconstructed"] is not None:
+            for t in range(obs["visual"].shape[1]):
+                img_reconstruction_scores = eval_images(
+                    z_components["visual_reconstructed"][:, t],
+                    obs["visual"][:, t],
+                )
+                img_reconstruction_scores = (
+                    self.accelerator.gather_for_metrics(
+                        img_reconstruction_scores
+                    )
+                )
+                img_reconstruction_scores = {
+                    f"train_img_{k}_reconstructed": [v.mean().item()]
+                    for k, v in img_reconstruction_scores.items()
+                }
+                self.logs_update(img_reconstruction_scores)
+
+        if self.accelerator.is_main_process:
+            self.plot_samples(
+                obs["visual"],
+                z_components["visual_out"],
+                z_components["visual_reconstructed"],
+                self.epoch,
+                batch=batch_idx,
+                num_samples=self.num_reconstruct_samples,
+                phase="train",
+            )
 
     def openloop_rollout(
         self,
@@ -1824,7 +1837,7 @@ class Trainer:
 
             # eval only query phase
             visuals = decoded["visual"][:, -num_phase_steps:]
-            if idx < 5:
+            if idx < min(10, num_rollout):
                 imgs = torch.cat(
                     [
                         obs["visual"][0, -num_phase_steps:].cpu(),
@@ -1835,7 +1848,7 @@ class Trainer:
                 if self.accelerator.is_main_process:
                     self.plot_imgs(
                         imgs,
-                        obs["visual"].shape[0],
+                        visuals.shape[1],
                         f"{plotting_dir}/e{self.epoch}_{idx}_long_imagination.png",
                     )     
 
