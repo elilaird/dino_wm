@@ -124,7 +124,7 @@ class Trainer:
 
         if self.cfg.model.train_encoder:
             ddp_kwargs = DistributedDataParallelKwargs(
-                find_unused_parameters=True
+                find_unused_parameters=True 
             )
         else:
             ddp_kwargs = DistributedDataParallelKwargs(
@@ -2081,12 +2081,12 @@ class Trainer:
             epoch_time_msg = f"  Epoch time: {epoch_log['epoch_time']:.2f}s"
 
         # Add learning rates to log message
-        lr_msg = f"  Encoder LR: {self.optimizers['encoder'].param_groups[0]['lr']:.2e}"
+        lr_msg = f"  Encoder LR: {self.encoder_optimizer.param_groups[0]['lr']:.2e}"
         lr_msg += (
-            f"  Predictor LR: {self.optimizers['predictor'].param_groups[0]['lr']:.2e}"
+            f"  Predictor LR: {self.predictor_optimizer.param_groups[0]['lr']:.2e}"
         )
-        lr_msg += f"  Decoder LR: {self.optimizers['decoder'].param_groups[0]['lr']:.2e}"
-        lr_msg += f"  Action Encoder LR: {self.optimizers['action_encoder'].param_groups[0]['lr']:.2e}"
+        lr_msg += f"  Decoder LR: {self.decoder_optimizer.param_groups[0]['lr']:.2e}"
+        lr_msg += f"  Action Encoder LR: {self.action_encoder_optimizer.param_groups[0]['lr']:.2e}"
        
 
         log.info(
