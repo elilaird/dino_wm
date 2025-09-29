@@ -1375,8 +1375,21 @@ class MemoryInjectionSSMTransformer(nn.Module):
 
 
 class AdaMemSSMTransformer(MemoryInjectionSSMTransformer):
-    def __init__(self, zero_init=False, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        dim,
+        state_size,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        dropout=0.0,
+        dim_head=64,
+        dt: float = 1.0, # could change to frameskip
+        alpha_init: float = 0.0,
+        zero_init: bool = False,
+        ):
+        super().__init__(dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, 0.0)
         self.injection_layers = nn.ModuleList([
             AdaptiveLayerNorm(self.dim, self.dim, zero_init=zero_init) for _ in range(self.depth)
         ])

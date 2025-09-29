@@ -178,6 +178,8 @@ class Trainer:
 
         # OmegaConf.set_struct(cfg, False)
         with open_dict(cfg):
+            if cfg.dry_run:
+                cfg.training.batch_size = 32
             cfg.effective_batch_size = cfg.training.batch_size
             cfg.gpu_batch_size = (
                 cfg.training.batch_size // self.accelerator.num_processes
@@ -2196,26 +2198,26 @@ class Trainer:
 
     def get_alpha_values(self):
         """Get current alpha values from the additive control transformer"""
-        if hasattr(self.predictor, "transformer") and hasattr(
-            self.predictor.transformer, "alphas"
+        unwrapped_predictor = self.accelerator.unwrap_model(self.predictor)
+        
+        if hasattr(unwrapped_predictor, "transformer") and hasattr(
+            unwrapped_predictor.transformer, "alphas"
         ):
-            module = self.predictor.transformer
-        elif (
-            hasattr(self.predictor, "module")
-            and hasattr(self.predictor.module, "transformer")
-            and hasattr(self.predictor.module.transformer, "alphas")
-        ):
-            module = self.predictor.module.transformer
+            if unwrapped_predictor.transformer.alphas is not None:
+                module = unwrapped_predictor.transformer
+            else:
+                return {}
         else:
             return {}
 
         alphas = {}
-        for i, alpha in enumerate(module.alphas):
-            alphas[f"alpha_layer_{i}"] = alpha.item()
-            if alpha.grad is not None:
-                alphas[f"alpha_layer_{i}_grad_norm"] = alpha.grad.norm().item()
-            else:
-                alphas[f"alpha_layer_{i}_grad_norm"] = 0.0
+        if module.alphas is not None:
+            for i, alpha in enumerate(module.alphas):
+                alphas[f"alpha_layer_{i}"] = alpha.item()
+                if alpha.grad is not None:
+                    alphas[f"alpha_layer_{i}_grad_norm"] = alpha.grad.norm().item()
+                else:
+                    alphas[f"alpha_layer_{i}_grad_norm"] = 0.0
         return alphas
 
 
