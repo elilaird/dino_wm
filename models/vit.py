@@ -5,6 +5,7 @@ from einops import rearrange
 from torch.nn import functional as F
 
 from .memory import NeuralMemory, LookupMemory
+from .conditioners import AdaptiveLayerNorm
 
 # helpers
 NUM_FRAMES = 1
@@ -91,6 +92,7 @@ def generate_mac_mask_matrix(npatch, nwindow, n_persistent, n_retrieved):
 
     mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
     return mask
+
 
 
 class FeedForward(nn.Module):
@@ -1350,7 +1352,7 @@ class MemoryInjectionSSMTransformer(nn.Module):
         if self.H_buffer is None:
             self.H_buffer = self.init_state(B, x.device)
 
-        # iterate through frames to aggregate memory
+        # iterate through time steps to aggregate memory
         M_new = []
         h_new = self.H_buffer
         for i in range(n_frames):
@@ -1372,8 +1374,45 @@ class MemoryInjectionSSMTransformer(nn.Module):
         self.H_buffer = None
 
 
+class AdaMemSSMTransformer(MemoryInjectionSSMTransformer):
+    def __init__(self, zero_init=False, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.injection_layers = nn.ModuleList([
+            AdaptiveLayerNorm(self.dim, self.dim, zero_init=zero_init) for _ in range(self.depth)
+        ])
+
+        self.alphas = None
+    
+    def forward(self, x):
+        B, T, D = x.shape
+        n_frames = T // self.num_patches
+
+        x = self.ln_in(x)
+
+        if self.H_buffer is None:
+            self.H_buffer = self.init_state(B, x.device)
+
+        # iterate through time steps to aggregate memory
+        M_new = []
+        h_new = self.H_buffer
+        for i in range(n_frames):
+            x_i = x[:, i * self.num_patches : (i + 1) * self.num_patches, :]
+            h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)
+            M_new.append(m_i)
+
+        M_new = torch.cat(M_new, dim=1)
+        self.H_buffer = h_new.detach()
+
+        for i, (attn, ff) in enumerate(self.layers):
+            x = x + attn(x)
+            x = x + ff(x)
+            x = self.injection_layers[i](x, M_new)
+            
+        return self.ln_out(x)
+
+
 class StateSpaceViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type: str = "sst", alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0):
+    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type: str = "sst", alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, **kwargs):
         super().__init__()
         self.dim = dim
         self.state_size = state_size
@@ -1385,7 +1424,7 @@ class StateSpaceViTPredictor(nn.Module):
         self.use_gate = use_gate
         self.num_patches = num_patches
         self.num_frames = num_frames
-        assert ssm_type in ["sst", "misst"], f"Invalid SSM type: {ssm_type}"
+        assert ssm_type in ["sst", "misst", "adamem"], f"Invalid SSM type: {ssm_type}"
 
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
@@ -1405,6 +1444,10 @@ class StateSpaceViTPredictor(nn.Module):
             self.transformer = MemoryInjectionSSMTransformer(
                 dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init
             )
+        elif ssm_type == "adamem":
+            self.transformer = AdaMemSSMTransformer(
+                dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init, zero_init=kwargs.get("zero_init", False)
+            )
 
 
     def forward(self, x):
@@ -1415,3 +1458,4 @@ class StateSpaceViTPredictor(nn.Module):
 
     def reset_memory(self):
         self.transformer.reset_memory()
+

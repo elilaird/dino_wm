@@ -1230,8 +1230,7 @@ class Trainer:
         """Test function that mimics val() but uses test dataset and saves results to CSV."""
         self.model.eval()
 
-        # Initialize test results storage
-        # test_results = defaultdict(list)
+        print("Running eval on test set...")
 
         if len(self.test_traj_dset) > 0 and self.cfg.has_predictor:
             rand_start_end = (
