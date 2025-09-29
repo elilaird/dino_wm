@@ -317,6 +317,18 @@ class Trainer:
 
         self.init_models()
         self.init_optimizers()
+        
+        # Load checkpoint after all models are instantiated
+        with self.accelerator.main_process_first():
+            model_ckpt = (
+                Path(self.cfg.saved_folder)
+                / "checkpoints"
+                / "model_latest.pth"
+            )
+            if model_ckpt.exists():
+                self.load_ckpt(model_ckpt)
+                log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+        self.accelerator.wait_for_everyone()
 
         self.epoch_log = OrderedDict()
 
@@ -640,17 +652,7 @@ class Trainer:
             print(f"Model type: {type(self.model)}")
             print(self.model)
 
-        # Load checkpoint after all models are instantiated
-        with self.accelerator.main_process_first():
-            model_ckpt = (
-                Path(self.cfg.saved_folder)
-                / "checkpoints"
-                / "model_latest.pth"
-            )
-            if model_ckpt.exists():
-                self.load_ckpt(model_ckpt)
-                log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
-        self.accelerator.wait_for_everyone()
+        
 
     def init_optimizers(self):
         # Scale learning rates by number of processes for proper multi-GPU training
