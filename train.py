@@ -1902,13 +1902,13 @@ class Trainer:
             decoded = self.model.decode_obs(z_obses)[0]
 
             # eval only query phase
-            visuals = decoded["visual"][:, -num_phase_steps:]
-            z_obses = {k: v[:, -num_phase_steps:] for k, v in z_obses.items()}
+            visuals = decoded["visual"][:, -(num_phase_steps + 1): -1] # offset by 1 to exclude the last predicted frame which has no gt
+            z_obses = {k: v[:, -(num_phase_steps + 1): -1] for k, v in z_obses.items()}
 
             if idx < min(10, num_rollout):
                 imgs = torch.cat(
                     [
-                        obs["visual"][0, -num_phase_steps:].cpu(),
+                        obs["visual"][0, -num_phase_steps:].cpu(), # this doesn't have the extra frame
                         visuals[0].cpu(),
                     ],
                     dim=0,
@@ -2007,14 +2007,14 @@ class Trainer:
                 decoded = self.model.decode_obs(z_obses)[0]
                 
                 # eval only query phase
-                visuals = decoded["visual"][:, -num_phase_steps:]
-                z_obses = {k: v[:, -num_phase_steps:] for k, v in z_obses.items()}
+                visuals = decoded["visual"][:, -(num_phase_steps + 1): -1] # offset by 1 to exclude the last predicted frame which has no gt
+                z_obses = {k: v[:, -(num_phase_steps + 1): -1] for k, v in z_obses.items()}
 
                 # save plots
                 if idx < min(10, num_rollout):
                     imgs = torch.cat(
                         [
-                            obs["visual"][0, -num_phase_steps:].cpu(),
+                            obs["visual"][0, -num_phase_steps:].cpu(), # this doesn't have the extra frame
                             visuals[0].cpu(),
                         ],
                         dim=0,
