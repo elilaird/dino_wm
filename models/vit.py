@@ -1412,7 +1412,7 @@ class AdaMemSSMTransformer(MemoryInjectionSSMTransformer):
 
 
 class StateSpaceViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type: str = "sst", alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, **kwargs):
+    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type: str = "sst", alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, zero_init: bool = False):
         super().__init__()
         self.dim = dim
         self.state_size = state_size
@@ -1446,7 +1446,7 @@ class StateSpaceViTPredictor(nn.Module):
             )
         elif ssm_type == "adamem":
             self.transformer = AdaMemSSMTransformer(
-                dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init, zero_init=kwargs.get("zero_init", False)
+                dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init, zero_init=zero_init
             )
 
 
