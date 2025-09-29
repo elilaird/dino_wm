@@ -168,7 +168,7 @@ class LookupMemory(nn.Module):
 
     def retrieve(self):
         return self.memory_bank.clone()
-    
+
     def update(self, batch):
         self.memory_bank = torch.cat([
             self.memory_bank,
@@ -180,3 +180,35 @@ class LookupMemory(nn.Module):
 
     def reset_weights(self):
         self.memory_bank = torch.empty(self.bank_size, 0, self.d_model)
+
+
+## --- SSM-based Memory Generators --- ##
+class SSMCell(nn.Module):
+    def __init__(self, d_model: int, n_state: int):
+        super().__init__()
+        self.U = nn.Linear(d_model, n_state, bias=False)  # write encoder
+        self.C = nn.Linear(n_state, d_model, bias=False)  # read head
+        self.log_tau = nn.Parameter(torch.zeros(n_state))  # time constants
+
+    def discretize(self, dt: float = 1.0):
+        tau = F.softplus(self.log_tau) + 1e-4
+        Abar = torch.exp(-dt / tau)  # [S]
+        Bbar = 1.0 - Abar  # [S]
+        return Abar, Bbar
+
+    @torch.no_grad()
+    def init_state(self, B: int, P: int, n_state: int, device=None):
+        return torch.zeros(B, P, n_state, device=device)
+
+    def forward(self, X_t, H_t, dt: float = 1.0):
+        """
+        X_t: [B, P, D], H_t: [B, P, S]
+        returns: H_{t+1}, M_{t+1}=[B,P,D]
+        """
+        Abar, Bbar = self.discretize(dt)  # [S]
+        Abar = Abar.view(1, 1, -1)  # [1,1,S]
+        Bbar = Bbar.view(1, 1, -1)
+        Ux = self.U(X_t)  # [B,P,S]
+        H_tp1 = Abar * H_t + Bbar * Ux
+        M_tp1 = self.C(H_tp1)  # [B,P,D]
+        return H_tp1, M_tp1

@@ -4,95 +4,13 @@ from torch import nn
 from einops import rearrange
 from torch.nn import functional as F
 
-from .memory import NeuralMemory, LookupMemory
-from .conditioners import AdaptiveLayerNorm
+from .model_utils import *
+from .memory_retrieval import NeuralMemory, LookupMemory, SSMCell
+from .memory_injection import AdaptiveLayerNorm, MemoryLoRAAdapter, MemoryLoRAProj
 
 # helpers
 NUM_FRAMES = 1
 NUM_PATCHES = 1
-
-
-def pair(t):
-    return t if isinstance(t, tuple) else (t, t)
-
-
-def generate_mask_matrix(npatch, nwindow):
-    zeros = torch.zeros(npatch, npatch)
-    ones = torch.ones(npatch, npatch)
-    rows = []
-    for i in range(nwindow):
-        row = torch.cat([ones] * (i + 1) + [zeros] * (nwindow - i - 1), dim=1)
-        rows.append(row)
-    mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
-    return mask
-
-
-def generate_mask_with_memory(npatch, nwindow):
-    """
-    M_i attends to all M_j and X_j for j < i
-    X_i attends to all M_j and X_j for j < i
-    """
-    zeros = torch.zeros(npatch, npatch)
-    ones = torch.ones(npatch, npatch)
-    rows = []
-    for i in range(nwindow):
-        row = torch.cat([ones] * (i + 1) + [zeros] * (nwindow - i - 1), dim=1)
-        row = torch.cat([row, row], dim=1)
-        rows.append(row)
-    rows += rows
-    mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
-    return mask
-
-
-def generate_sliding_window_mask(seq_len, window_size):
-    """Generate mask for sliding window attention"""
-    mask = torch.zeros(seq_len, seq_len)
-    for i in range(seq_len):
-        start = max(0, i - window_size + 1)
-        mask[i, start : i + 1] = 1
-    return mask.unsqueeze(0).unsqueeze(0)
-
-
-def generate_mac_mask_matrix(npatch, nwindow, n_persistent, n_retrieved):
-    """
-    Generate frame-level mask for MAC transformer using the same pattern as generate_mask_matrix
-    but accounting for persistent tokens and memory frames.
-    """
-    total_frames = n_persistent + n_retrieved + nwindow
-
-    # Create blocks for each frame type
-    zeros = torch.zeros(npatch, npatch)
-    ones = torch.ones(npatch, npatch)
-
-    rows = []
-
-    # Persistent token rows (can attend to everything)
-    for i in range(n_persistent):
-        row = torch.cat([ones] * total_frames, dim=1)
-        rows.append(row)
-
-    # Memory frame rows (can attend to everything)
-    for i in range(n_retrieved):
-        row = torch.cat([ones] * total_frames, dim=1)
-        rows.append(row)
-
-    # Main sequence rows (frame-level causality + access to persistent/memory)
-    for i in range(nwindow):
-        # Allow attention to persistent tokens (all frames can attend to persistent tokens)
-        persistent_blocks = [ones] * n_persistent
-
-        # Allow attention to memory frames (all frames can attend to memory frames)
-        memory_blocks = [ones] * n_retrieved
-
-        # Allow attention to current and previous frames in main sequence (frame-level causality)
-        main_blocks = [ones] * (i + 1) + [zeros] * (nwindow - i - 1)
-
-        row = torch.cat(persistent_blocks + memory_blocks + main_blocks, dim=1)
-        rows.append(row)
-
-    mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
-    return mask
-
 
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):
@@ -160,6 +78,117 @@ class Attention(nn.Module):
         out = torch.matmul(attn, v)
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
+
+
+class AttentionWithLoRA(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, bias=None,
+                 lora_rank=16, lora_alpha=8.0, zero_init=True, lora_on_out=False):
+        super().__init__()
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == dim)
+
+        self.heads = heads
+        self.scale = dim_head**-0.5
+
+        self.norm = nn.LayerNorm(dim)
+
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+
+        # base packed qkv
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
+
+        # optional out proj
+        self.to_out = (
+            nn.Sequential(nn.Linear(inner_dim, dim), nn.Dropout(dropout))
+            if project_out else nn.Identity()
+        )
+
+        if bias is None:
+            bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
+        self.register_buffer("bias", bias)
+
+        # ---- LoRA: memory-conditioned adapters on Q, K, V (and optionally out) ----
+        # We’ll treat the packed qkv as three separate augmented linears.
+        self.q_lora = MemoryLoRAProj(in_dim=dim, out_dim=inner_dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
+        self.k_lora = MemoryLoRAProj(in_dim=dim, out_dim=inner_dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
+        self.v_lora = MemoryLoRAProj(in_dim=dim, out_dim=inner_dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
+
+        self.lora_on_out = lora_on_out
+        if lora_on_out and project_out:
+            self.out_lora = MemoryLoRAProj(in_dim=inner_dim, out_dim=dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
+        else:
+            self.out_lora = None
+
+    def forward(self, x, memory_tokens=None):
+        B, T, C = x.size()
+
+        x = self.norm(x)
+
+        # base qkv
+        qkv = self.to_qkv(x).chunk(3, dim=-1)  # each [B, T, inner_dim]
+        q_base, k_base, v_base = qkv
+
+        if memory_tokens is not None:
+            # add memory-conditioned low-rank updates to Q, K, V
+            q = q_base + self.q_lora(x, memory_tokens)
+            k = k_base + self.k_lora(x, memory_tokens)
+            v = v_base + self.v_lora(x, memory_tokens)
+        else:
+            q, k, v = q_base, k_base, v_base
+
+        # reshape into heads
+        q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
+        k = rearrange(k, "b n (h d) -> b h n d", h=self.heads)
+        v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        # causal mask
+        dots = dots.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+
+        attn = self.attend(dots)
+        attn = self.dropout(attn)
+
+        out = torch.matmul(attn, v)
+        out = rearrange(out, "b h n d -> b n (h d)")
+
+        out = self.to_out(out)
+        if self.out_lora is not None and memory_tokens is not None:
+            out = out + self.out_lora(rearrange(out, "b n c -> b n c"), memory_tokens)
+
+        return out
+
+class FeedForwardWithLoRA(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout=0.0,
+                 lora_rank=16, lora_alpha=8.0, zero_init=True):
+        super().__init__()
+        self.ln = nn.LayerNorm(dim)
+
+        self.lin1 = nn.Linear(dim, hidden_dim)
+        self.lin2 = nn.Linear(hidden_dim, dim)
+
+        self.act = nn.GELU()
+        self.do1 = nn.Dropout(dropout)
+        self.do2 = nn.Dropout(dropout)
+
+        # LoRA adapters for both projections
+        self.lora1 = MemoryLoRAProj(in_dim=dim,       out_dim=hidden_dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
+        self.lora2 = MemoryLoRAProj(in_dim=hidden_dim,out_dim=dim,        rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
+
+    def forward(self, x, memory_tokens=None):
+        x = self.ln(x)
+
+        h = self.lin1(x)
+        if memory_tokens is not None:
+            h = h + self.lora1(x, memory_tokens)
+        h = self.act(h)
+        h = self.do1(h)
+
+        y = self.lin2(h)
+        if memory_tokens is not None:
+            y = y + self.lora2(h, memory_tokens)
+        y = self.do2(y)
+        return y
 
 
 class Transformer(nn.Module):
@@ -1152,37 +1181,6 @@ class LookupViTPredictor(nn.Module):
         self.mem.reset_weights()
 
 
-class SSMCell(nn.Module):
-    def __init__(self, d_model: int, n_state: int):
-        super().__init__()
-        self.U = nn.Linear(d_model, n_state, bias=False)  # write encoder
-        self.C = nn.Linear(n_state, d_model, bias=False)  # read head
-        self.log_tau = nn.Parameter(torch.zeros(n_state))  # time constants
-
-    def discretize(self, dt: float = 1.0):
-        tau = F.softplus(self.log_tau) + 1e-4
-        Abar = torch.exp(-dt / tau)  # [S]
-        Bbar = 1.0 - Abar  # [S]
-        return Abar, Bbar
-
-    @torch.no_grad()
-    def init_state(self, B: int, P: int, n_state: int, device=None):
-        return torch.zeros(B, P, n_state, device=device)
-
-    def forward(self, X_t, H_t, dt: float = 1.0):
-        """
-        X_t: [B, P, D], H_t: [B, P, S]
-        returns: H_{t+1}, M_{t+1}=[B,P,D]
-        """
-        Abar, Bbar = self.discretize(dt)  # [S]
-        Abar = Abar.view(1, 1, -1)  # [1,1,S]
-        Bbar = Bbar.view(1, 1, -1)
-        Ux = self.U(X_t)  # [B,P,S]
-        H_tp1 = Abar * H_t + Bbar * Ux
-        M_tp1 = self.C(H_tp1)  # [B,P,D]
-        return H_tp1, M_tp1
-
-
 class StateSpaceTransformer(nn.Module):
     def __init__(
         self,
@@ -1421,75 +1419,6 @@ class AdaMemSSMTransformer(MemoryInjectionSSMTransformer):
             x = self.injection_layers[i](x, M_new)
 
         return self.ln_out(x)
-
-
-class MemoryLoRAAdapter(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        rank: int = 64, # low-rank r 
-        lora_alpha: float = 1.0, # scale multiplier (often alpha / r)
-        dropout: float = 0.0,
-        zero_init: bool = True, # if True, initialize B to zeros so adapter starts as no-op
-        hidden_mul: int = 2, # width of memory MLP that generates A(m)
-    ):
-
-        super().__init__()
-        self.dim = dim
-        self.rank = rank
-        self.scale = lora_alpha / max(1, rank)
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-        # Shared low-rank basis B (d x r)
-        self.B = nn.Parameter(
-            torch.zeros(dim, rank)
-            if zero_init
-            else torch.randn(dim, rank) * (0.02)
-        )
-
-        # Generator for A(m): takes a memory summary (dim) -> (r x d)
-        self.A_gen = nn.Sequential(
-            nn.Linear(dim, hidden_mul * dim),
-            nn.GELU(),
-            nn.Linear(hidden_mul * dim, rank * dim),
-        )
-
-        # Optional: layernorm on memory summary for stability
-        self.mem_ln = nn.LayerNorm(dim)
-
-        # Initialize the last layer close to zero so Δ starts tiny
-        nn.init.zeros_(self.A_gen[-1].weight)
-        nn.init.zeros_(self.A_gen[-1].bias)
-
-    def forward(
-        self, x: torch.Tensor, memory_tokens: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        x: [B, T, D]
-        memory_tokens: [B, S, D] (concatenated per-frame memory from SSM)
-        returns Δy: [B, T, D]
-        """
-        Bsz, T, D = x.shape
-        assert (
-            D == self.dim
-        ), f"LoRA dim mismatch: got {D}, expected {self.dim}"
-
-        # Summarize memory tokens -> [B, D]
-        # (Swap to attention pooling if you prefer selective recall)
-        m_summary = self.mem_ln(memory_tokens.mean(dim=1))  # [B, D]
-
-        # Generate A(m): [B, r, d]
-        A = self.A_gen(m_summary).view(Bsz, self.rank, self.dim)
-
-        # Project x into low-rank space: [B, T, r]
-        xB = x @ self.B  # (B,T,D) @ (D,r) -> (B,T,r)
-
-        # Contract back to D with A(m): [B, T, D]
-        # Δy[b, t, d] = sum_r xB[b, t, r] * A[b, r, d]
-        delta = torch.einsum("btr,brd->btd", xB, A)
-
-        return self.dropout(delta * self.scale)
-
 
 class LoRAMemSSMTransformer(MemoryInjectionSSMTransformer):
     def __init__(
