@@ -1,0 +1,15 @@
+_target_: models.vit.StateSpaceViTPredictor
+depth: 6
+heads: 16
+mlp_dim: 2048
+dropout: 0.1
+emb_dropout: 0
+state_size: 256
+use_gate: False
+dt: 1.0
+alpha_init: 0.1
+ssm_type: loramem
+zero_init: False
+lora_rank: 64
+lora_alpha: 1.0
+lora_dropout: 0.0

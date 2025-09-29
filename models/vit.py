@@ -94,7 +94,6 @@ def generate_mac_mask_matrix(npatch, nwindow, n_persistent, n_retrieved):
     return mask
 
 
-
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):
         super().__init__()
@@ -1395,7 +1394,7 @@ class AdaMemSSMTransformer(MemoryInjectionSSMTransformer):
         ])
 
         self.alphas = None
-    
+
     def forward(self, x):
         B, T, D = x.shape
         n_frames = T // self.num_patches
@@ -1420,12 +1419,179 @@ class AdaMemSSMTransformer(MemoryInjectionSSMTransformer):
             x = x + attn(x)
             x = x + ff(x)
             x = self.injection_layers[i](x, M_new)
-            
+
         return self.ln_out(x)
 
 
+class MemoryLoRAAdapter(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        rank: int = 64, # low-rank r 
+        lora_alpha: float = 1.0, # scale multiplier (often alpha / r)
+        dropout: float = 0.0,
+        zero_init: bool = True, # if True, initialize B to zeros so adapter starts as no-op
+        hidden_mul: int = 2, # width of memory MLP that generates A(m)
+    ):
+
+        super().__init__()
+        self.dim = dim
+        self.rank = rank
+        self.scale = lora_alpha / max(1, rank)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+        # Shared low-rank basis B (d x r)
+        self.B = nn.Parameter(
+            torch.zeros(dim, rank)
+            if zero_init
+            else torch.randn(dim, rank) * (0.02)
+        )
+
+        # Generator for A(m): takes a memory summary (dim) -> (r x d)
+        self.A_gen = nn.Sequential(
+            nn.Linear(dim, hidden_mul * dim),
+            nn.GELU(),
+            nn.Linear(hidden_mul * dim, rank * dim),
+        )
+
+        # Optional: layernorm on memory summary for stability
+        self.mem_ln = nn.LayerNorm(dim)
+
+        # Initialize the last layer close to zero so Δ starts tiny
+        nn.init.zeros_(self.A_gen[-1].weight)
+        nn.init.zeros_(self.A_gen[-1].bias)
+
+    def forward(
+        self, x: torch.Tensor, memory_tokens: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        x: [B, T, D]
+        memory_tokens: [B, S, D] (concatenated per-frame memory from SSM)
+        returns Δy: [B, T, D]
+        """
+        Bsz, T, D = x.shape
+        assert (
+            D == self.dim
+        ), f"LoRA dim mismatch: got {D}, expected {self.dim}"
+
+        # Summarize memory tokens -> [B, D]
+        # (Swap to attention pooling if you prefer selective recall)
+        m_summary = self.mem_ln(memory_tokens.mean(dim=1))  # [B, D]
+
+        # Generate A(m): [B, r, d]
+        A = self.A_gen(m_summary).view(Bsz, self.rank, self.dim)
+
+        # Project x into low-rank space: [B, T, r]
+        xB = x @ self.B  # (B,T,D) @ (D,r) -> (B,T,r)
+
+        # Contract back to D with A(m): [B, T, D]
+        # Δy[b, t, d] = sum_r xB[b, t, r] * A[b, r, d]
+        delta = torch.einsum("btr,brd->btd", xB, A)
+
+        return self.dropout(delta * self.scale)
+
+
+class LoRAMemSSMTransformer(MemoryInjectionSSMTransformer):
+    def __init__(
+        self,
+        dim,
+        state_size,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        dropout=0.0,
+        dim_head=64,
+        dt: float = 1.0,
+        alpha_init: float = 0.0, 
+        zero_init: bool = True,    # zero-init LoRA branch so it starts as a no-op
+        lora_rank: int = 128,
+        lora_alpha: float = 8.0,
+        lora_dropout: float = 0.0,
+        # if you want different ranks per sublayer, add args here
+    ):
+        super().__init__(dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init)
+
+        self.alphas = None
+        self.injection_layers = None
+
+        # --- SSM memory path (unchanged) ---
+        self.ssm_cell = SSMCell(dim, state_size)
+        self.ln_in = nn.LayerNorm(dim)
+        self.ln_out = nn.LayerNorm(dim)
+        self.H_buffer = None  # persistent hidden state for streaming
+
+        # --- ViT blocks ---
+        self.layers = nn.ModuleList([])
+        self.lora_post_attn = nn.ModuleList([])
+        self.lora_post_ff = nn.ModuleList([])
+
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(dim, heads, dim_head, dropout),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            # LoRA adapters after attn and after ff
+            self.lora_post_attn.append(
+                MemoryLoRAAdapter(
+                    dim=dim,
+                    rank=lora_rank,
+                    lora_alpha=lora_alpha,
+                    dropout=lora_dropout,
+                    zero_init=zero_init,
+                )
+            )
+            self.lora_post_ff.append(
+                MemoryLoRAAdapter(
+                    dim=dim,
+                    rank=lora_rank,
+                    lora_alpha=lora_alpha,
+                    dropout=lora_dropout,
+                    zero_init=zero_init,
+                )
+            )
+
+    def forward(self, x):
+        """
+        x: [B, T, D] where T = num_frames * num_patches
+        """
+        B, T, D = x.shape
+        n_frames = T // self.num_patches
+
+        x = self.ln_in(x)
+
+        if self.H_buffer is None:
+            self.H_buffer = self.init_state(B, x.device)
+
+        M_new = []
+        h_new = self.H_buffer
+        for i in range(n_frames):
+            x_i = x[:, i * self.num_patches : (i + 1) * self.num_patches, :]  # [B, P, D]
+            h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)                   # m_i: [B, P, D]
+            M_new.append(m_i)
+        M_new = torch.cat(M_new, dim=1)  # [B, T, D]
+        self.H_buffer = h_new.detach()
+
+        # --- transformer blocks with LoRA memory adapters ---
+        for (attn, ff), lora_attn, lora_ff in zip(self.layers, self.lora_post_attn, self.lora_post_ff):
+            x = x + attn(x)
+            # LoRA after attention
+            x = x + lora_attn(x, M_new)
+
+            x = x + ff(x)
+            # LoRA after feedforward
+            x = x + lora_ff(x, M_new)
+
+        return self.ln_out(x)
+
+
+
 class StateSpaceViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type: str = "sst", alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, zero_init: bool = False):
+    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type: str = "sst", alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, zero_init: bool = False, lora_rank: int = 64, lora_alpha: float = 1.0, lora_dropout: float = 0.0):
         super().__init__()
         self.dim = dim
         self.state_size = state_size
@@ -1437,7 +1603,7 @@ class StateSpaceViTPredictor(nn.Module):
         self.use_gate = use_gate
         self.num_patches = num_patches
         self.num_frames = num_frames
-        assert ssm_type in ["sst", "misst", "adamem"], f"Invalid SSM type: {ssm_type}"
+        assert ssm_type in ["sst", "misst", "adamem", "loramem"], f"Invalid SSM type: {ssm_type}"
 
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
@@ -1461,7 +1627,10 @@ class StateSpaceViTPredictor(nn.Module):
             self.transformer = AdaMemSSMTransformer(
                 dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init, zero_init=zero_init
             )
-
+        elif ssm_type == "loramem":
+            self.transformer = LoRAMemSSMTransformer(
+                dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+            )
 
     def forward(self, x):
         b, n, _ = x.shape
@@ -1471,4 +1640,3 @@ class StateSpaceViTPredictor(nn.Module):
 
     def reset_memory(self):
         self.transformer.reset_memory()
-
