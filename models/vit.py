@@ -80,6 +80,52 @@ class Attention(nn.Module):
         return self.to_out(out)
 
 
+class CrossAttention(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
+        super().__init__()
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == dim)
+
+        self.heads = heads
+        self.scale = dim_head**-0.5
+
+        self.norm = nn.LayerNorm(dim)
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+        self.to_kv = nn.Linear(dim, inner_dim * 2, bias=False)
+
+        self.to_out = (
+            nn.Sequential(nn.Linear(inner_dim, dim), nn.Dropout(dropout))
+            if project_out
+            else nn.Identity()
+        )
+
+    def forward(self, x, context):
+        B, T, C = x.size()
+        B_c, T_c, C_c = context.size()
+
+        x = self.norm(x)
+
+        q = self.to_q(x)
+        kv = self.to_kv(context)
+        k, v = kv.chunk(2, dim=-1)
+
+        q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
+        k = rearrange(k, "b n (h d) -> b h n d", h=self.heads)
+        v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+
+        attn = self.attend(dots)
+        attn = self.dropout(attn)
+
+        out = torch.matmul(attn, v)
+        out = rearrange(out, "b h n d -> b n (h d)")
+        return self.to_out(out)
+
+
 class AttentionWithLoRA(nn.Module):
     def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, bias=None,
                  lora_rank=16, lora_alpha=8.0, zero_init=True, lora_on_out=False):
@@ -1214,6 +1260,7 @@ class StateSpaceTransformer(nn.Module):
 
         self.ssm_cell = SSMCell(dim, state_size)
         self.ln_in = nn.LayerNorm(dim)
+        self.ln_out = nn.LayerNorm(dim)
 
         self.H_buffer = None # keep track of hidden memory state w/o passing around
 
@@ -1282,7 +1329,7 @@ class StateSpaceTransformer(nn.Module):
             # remove the prepended tokens
             ctx = ctx[:, T:, :]
 
-        return ctx
+        return self.ln_out(ctx)
 
     @torch.no_grad()
     def init_state(self, B: int, device=None):
@@ -1304,8 +1351,9 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
         dim_head=64,
         dt: float = 1.0, # could change to frameskip
         alpha_init: float = 0.1,
+        **kwargs,
     ):
-        super().__init__(dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init)
+        super().__init__(dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init, **kwargs)
 
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
         self.alphas = nn.ParameterList([
@@ -1359,8 +1407,9 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
         dim_head=64,
         dt: float = 1.0, # could change to frameskip
         zero_init: bool = False,
-        ):
-        super().__init__(dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, zero_init=zero_init)
+        **kwargs,
+    ):
+        super().__init__(dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, zero_init=zero_init, **kwargs)
         
     
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
@@ -1412,8 +1461,9 @@ class LoRAMemSSMTransformer(StateSpaceTransformer):
         lora_rank: int = 128,
         lora_alpha: float = 8.0,
         lora_dropout: float = 0.0,
+        **kwargs,
     ):
-        super().__init__(dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+        super().__init__(dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout, **kwargs)
 
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
         self.layers = nn.ModuleList([])
@@ -1466,6 +1516,53 @@ class LoRAMemSSMTransformer(StateSpaceTransformer):
         return self.ln_out(x)
 
 
+class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
+    def __init__(
+        self,
+        dim,
+        state_size,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        dropout=0.0,
+        dim_head=64,
+        dt: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, **kwargs)
+    
+    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+        self.layers = nn.ModuleList([])
+        self.injection_layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(dim, heads, dim_head, dropout),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            self.injection_layers.append(
+                CrossAttention(dim, heads, dim_head, dropout)
+            )
+
+    def forward(self, x):
+        x = self.ln_in(x)
+
+        M_new = self._ssm_forward(x)
+
+        for i, (attn, ff) in enumerate(self.layers):
+            x = x + attn(x)
+            x = x + ff(x)
+            x = x + self.injection_layers[i](x, M_new)
+            
+        return self.ln_out(x)
+
+
+
+
 class StateSpaceViTPredictor(nn.Module):
     def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type: str = "sst", alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, zero_init: bool = False, lora_rank: int = 64, lora_alpha: float = 1.0, lora_dropout: float = 0.0):
         super().__init__()
@@ -1479,7 +1576,6 @@ class StateSpaceViTPredictor(nn.Module):
         self.use_gate = use_gate
         self.num_patches = num_patches
         self.num_frames = num_frames
-        assert ssm_type in ["sst", "misst", "adamem", "loramem_post"], f"Invalid SSM type: {ssm_type}"
 
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
@@ -1507,6 +1603,12 @@ class StateSpaceViTPredictor(nn.Module):
             self.transformer = LoRAMemSSMTransformer(
                 dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout
             )
+        elif ssm_type == "ssm_ca":
+            self.transformer = MemCrossAttentionSSMTransformer(
+                dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt
+            )
+        else:
+            raise ValueError(f"Invalid SSM type: {ssm_type}")
 
     def forward(self, x):
         b, n, _ = x.shape
