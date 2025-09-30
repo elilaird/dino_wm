@@ -1249,10 +1249,6 @@ class Trainer:
                 }
                 self.logs_update(test_rollout_logs)
 
-                # Store rollout results for CSV
-                # for k, v in test_rollout_logs.items():
-                #     test_results[k].extend(self._safe_convert_to_numpy(v))
-
                 # long horizon treatments
                 if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
                     test_long_horizon_logs = self.openloop_rollout(
@@ -1266,10 +1262,6 @@ class Trainer:
                     }
                     self.logs_update(test_long_horizon_logs)
 
-                    # Store long horizon results for CSV
-                    # for k, v in test_long_horizon_logs.items():
-                    #     test_results[k].extend(self._safe_convert_to_numpy(v))
-
                 # long imagination
                 if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
                     # run on full test dataset
@@ -1277,15 +1269,12 @@ class Trainer:
                         self.test_traj_dset, 
                         query_phase_start_idx=self.cfg.query_phase_start_idx, 
                         num_rollout=self.cfg.num_eval_samples if self.cfg.dry_run else None,
+                        plotting_dir=f"test_results/e{self.epoch}_long_imagination"
                     )
                     long_imagination_logs = {
                         f"test_{k}": [v] for k, v in long_imagination_logs.items()
                     }
                     self.logs_update(long_imagination_logs)
-
-                    # Store long imagination results for CSV
-                    # for k, v in long_imagination_logs.items():
-                    #     test_results[k].extend(self._safe_convert_to_numpy(v))
 
                 # context recall
                 if (
@@ -1298,13 +1287,12 @@ class Trainer:
                         self.context_recall_dset["test"],
                         query_phase_start_idx=self.cfg.teleport_start_idx,
                         num_rollout=self.cfg.num_eval_samples if self.cfg.dry_run else None,
+                        plotting_dir=f"test_results/e{self.epoch}_context_recall"
                     )
                     context_recall_logs = {
                         f"test_{k}": [v] for k, v in context_recall_logs.items()
                     }
                     self.logs_update(context_recall_logs)
-                    # for k, v in context_recall_logs.items():
-                    #     test_results[k].extend(self._safe_convert_to_numpy(v))
 
         self.accelerator.wait_for_everyone()
 
@@ -1832,8 +1820,9 @@ class Trainer:
 
         return logs
 
-    def long_imagination_rollout(self, dset, query_phase_start_idx=0, num_rollout=None):
-        plotting_dir = f"long_imagination_plots/e{self.epoch}_long_imagination"
+    def long_imagination_rollout(self, dset, query_phase_start_idx=0, num_rollout=None, plotting_dir=None):
+        if plotting_dir is None:
+            plotting_dir = f"long_imagination_plots/e{self.epoch}_long_imagination"
         if self.accelerator.is_main_process:
             os.makedirs(plotting_dir, exist_ok=True)
         self.accelerator.wait_for_everyone()
@@ -1909,8 +1898,9 @@ class Trainer:
 
         return logs
 
-    def context_recall_rollout(self, dset, query_phase_start_idx=0, num_rollout=None):
-        plotting_dir = f"context_recall_plots/e{self.epoch}_context_recall"
+    def context_recall_rollout(self, dset, query_phase_start_idx=0, num_rollout=None, plotting_dir=None):
+        if plotting_dir is None:
+            plotting_dir = f"context_recall_plots/e{self.epoch}_context_recall"
         if self.accelerator.is_main_process:
             os.makedirs(plotting_dir, exist_ok=True)
         self.accelerator.wait_for_everyone()
