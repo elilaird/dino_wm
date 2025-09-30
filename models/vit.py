@@ -1620,7 +1620,7 @@ class StateSpaceViTPredictor(nn.Module):
                 ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt
             )
         else:
-            raise ValueError(f"Invalid retrieval type: {injection_type}")
+            raise ValueError(f"Invalid injection type: {injection_type}")
 
     def forward(self, x):
         b, n, _ = x.shape
