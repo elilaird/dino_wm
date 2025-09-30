@@ -212,3 +212,162 @@ class SSMCell(nn.Module):
         H_tp1 = Abar * H_t + Bbar * Ux
         M_tp1 = self.C(H_tp1)  # [B,P,D]
         return H_tp1, M_tp1
+
+
+class MambaSSMCell(nn.Module):
+    """
+    Full Mamba-style selective SSM cell (diagonal state matrix).
+
+    Shapes:
+      X_t:  [B, P, D]
+      H_t:  [B, P, S]
+      step(...) -> (H_{t+1}, Y_{t+1}=[B,P,D])
+      scan(X_win, H0) with X_win: [B, T, P, D] -> (H_seq: [B,T,P,S], Y_seq: [B,T,P,D], H_T: [B,P,S])
+    """
+
+    def __init__(self, d_model: int, n_state: int, dt_rank: int = 4):
+        super().__init__()
+        self.D = d_model
+        self.S = n_state
+
+        # ---- Fixed A (diagonal), stable: logA = -exp(a_hat) <= 0
+        self.a_hat = nn.Parameter(torch.randn(self.S))
+
+        # ---- Input-dependent carriers and selectors
+        # u_t = U(x_t) (carrier that enters the state via B_t)
+        self.U = nn.Linear(self.D, self.S, bias=False)
+
+        # B_t = s_B(x_t), C_t = s_C(x_t)  (per-token modulators)
+        self.sB = nn.Linear(self.D, self.S, bias=True)
+        self.sC = nn.Linear(self.D, self.S, bias=True)
+
+        # Δ_t = softplus( W2( SiLU(W1 x_t) ) )  -> scalar per (B,P,1) then broadcast to S
+        self.sDelta1 = nn.Linear(self.D, dt_rank, bias=True)
+        self.sDelta2 = nn.Linear(dt_rank, 1, bias=True)
+
+        # ---- Readout: (C_t ⊙ h_t) -> D
+        self.readout = nn.Linear(self.S, self.D, bias=False)
+
+    def _logA(self):
+        # logA ≤ 0 (vector of size S)
+        return -torch.exp(self.a_hat)
+
+    def _selective_params(self, X):
+        """
+        X: [B, P, D]
+        Returns:
+          A_t: [B, P, S], b_t: [B, P, S], C_t: [B, P, S]
+        where recurrence is h' = A_t ⊙ h + b_t and output uses C_t.
+        """
+        B, P, D = X.shape
+        logA = self._logA().view(1, 1, self.S)  # [1,1,S]
+
+        # u_t and selectors
+        u_t = self.U(X)  # [B,P,S]
+        B_t = self.sB(X)  # [B,P,S]
+        C_t = self.sC(X)  # [B,P,S]
+
+        # Δ_t scalar per (B,P,1) -> broadcast to S
+        dt_feat = F.silu(self.sDelta1(X))  # [B,P,R]
+        dt = F.softplus(self.sDelta2(dt_feat))  # [B,P,1] >= 0
+        dt = dt.expand(-1, -1, self.S)  # [B,P,S]
+
+        # Discretized per-step decay: A_t = exp( dt * logA ), in (0,1]
+        A_t = torch.exp(dt * logA)  # [B,P,S]
+
+        # Input injection already discretized: b_t = (1 - A_t) * (B_t ⊙ u_t)
+        b_t = (1.0 - A_t) * (B_t * u_t)  # [B,P,S]
+
+        return A_t, b_t, C_t
+
+    @torch.no_grad()
+    def init_state(
+        self, B: int, P: int, n_state: int = None, device=None, dtype=None
+    ):
+        S = self.S if n_state is None else n_state
+        return torch.zeros(B, P, S, device=device, dtype=dtype)
+
+    # ---------- One-step recurrent update (streaming/inference) ----------
+    def step(self, X_t, H_t):
+        """
+        One selective step:
+          X_t: [B,P,D], H_t: [B,P,S]
+          returns: (H_{t+1}, Y_{t+1}=[B,P,D])
+        """
+        A_t, b_t, C_t = self._selective_params(X_t)  # [B,P,S]
+        H_tp1 = A_t * H_t + b_t  # [B,P,S]
+        Y_tp1 = self.readout(C_t * H_tp1)  # [B,P,D]
+        return H_tp1, Y_tp1
+
+    # ---------- Fast parallel scan over a window (training) ----------
+    @staticmethod
+    def _scan_window(A, b, H0):
+        """
+        Parallel prefix for diagonal recurrence with initial state:
+          h_t = A_t ⊙ h_{t-1} + b_t
+        Closed form (inclusive):
+          P_t = Π_{j<=t} A_j
+          h_t = P_t ⊙ (H0 + Σ_{k<=t} b_k / P_k)
+        A,b:  [B, T, P, S]
+        H0:   [B, P, S]
+        returns: H_seq [B,T,P,S]
+        """
+        eps = 1e-12
+        P = torch.cumprod(A.clamp_min(eps), dim=1)  # [B,T,P,S]
+        invP = 1.0 / P.clamp_min(eps)  # [B,T,P,S]
+        c = torch.cumsum(b * invP, dim=1)  # [B,T,P,S]
+        H0e = H0.unsqueeze(1)  # [B,1,P,S]
+        H_seq = P * (H0e + c)  # [B,T,P,S]
+        return H_seq
+
+    def scan(self, X_win, H0):
+        """
+        Parallel selective scan over a window:
+          X_win: [B, T, P, D]
+          H0:    [B, P, S]  (carried state from previous window)
+        returns:
+          H_seq: [B, T, P, S]
+          Y_seq: [B, T, P, D]
+          H_T:   [B, P, S]
+        """
+        B, T, P, D = X_win.shape
+        # Flatten time into batch for parameter eval, then reshape back
+        Xf = X_win.reshape(B * T, P, D)  # [BT,P,D]
+        A_t, b_t, C_t = self._selective_params(Xf)  # [BT,P,S] each
+        A_t = A_t.view(B, T, P, self.S)
+        b_t = b_t.view(B, T, P, self.S)
+        C_t = C_t.view(B, T, P, self.S)
+
+        # Parallel recurrence with initial state H0
+        H_seq = self._scan_window(A_t, b_t, H0)  # [B,T,P,S]
+
+        # Readout (token-dependent C_t gates the state)
+        Y_seq = self.readout((C_t * H_seq).reshape(B * T, P, self.S)).view(
+            B, T, P, self.D
+        )
+
+        H_T = H_seq[:, -1, :, :]  # [B,P,S]
+        return H_seq, Y_seq, H_T
+
+    # ---------- Backward-compatible forward ----------
+    def forward(self, X_t, H_t=None, dt: float = 1.0, mode: str = "step"):
+        """
+        mode == "step":   X_t: [B,P,D], H_t:[B,P,S] -> (H_{t+1}, Y_{t+1})
+        mode == "scan":   X_t: [B,T,P,D], H_t:[B,P,S] -> (H_seq, Y_seq, H_T)
+        """
+        if mode == "step":
+            if H_t is None:
+                H_t = self.init_state(
+                    X_t.size(0),
+                    X_t.size(1),
+                    device=X_t.device,
+                    dtype=X_t.dtype,
+                )
+            return self.step(X_t, H_t)
+        elif mode == "scan":
+            assert (
+                H_t is not None
+            ), "H_t (initial state) required for scan mode"
+            return self.scan(X_t, H_t)
+        else:
+            raise ValueError("mode must be 'step' or 'scan'")

@@ -8,4 +8,5 @@ state_size: 256
 use_gate: False
 dt: 1.0
 alpha_init: 0.1
-ssm_type: ssm_ca
+ssm_type: "lti"
+injection_type: "ssm_ca"
