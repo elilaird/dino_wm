@@ -1861,10 +1861,14 @@ class Trainer:
                 for k, v in obs.items()
             }
 
+            obs_tgt = {k: v[:, -num_phase_steps:] for k, v in obs.items()}
+            z_tgts = self.model.encode_obs(obs_tgt)
+
             z_obses, _ = self.model.rollout(obs_query_start, query_actions, bypass_memory_reset=True)
 
             # evaluate on query phase
             decoded = self.model.decode_obs(z_obses)[0]
+            decoded_tgt = self.model.decode_obs(z_tgts)[0]
 
             # eval only query phase
             visuals = decoded["visual"][:, -(num_phase_steps + 1): -1] # offset by 1 to exclude the last predicted frame which has no gt
@@ -1874,6 +1878,7 @@ class Trainer:
                 imgs = torch.cat(
                     [
                         obs["visual"][0, -num_phase_steps:].cpu(), # this doesn't have the extra frame
+                        decoded_tgt["visual"][0, -num_phase_steps:].cpu(),
                         visuals[0].cpu(),
                     ],
                     dim=0,
@@ -1885,8 +1890,7 @@ class Trainer:
                         f"{plotting_dir}/e{self.epoch}_{idx}_long_imagination.png",
                     )     
 
-            obs_tgt = {k: v[:, -num_phase_steps:] for k, v in obs.items()}
-            z_tgts = self.model.encode_obs(obs_tgt)
+            
             z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
             div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": visuals, "proprio": obs_tgt["proprio"]}, z_cycle)
             for k in div_loss.keys():
@@ -1945,8 +1949,12 @@ class Trainer:
 
                 z_obses, _ = self.model.rollout(obs_query_start, query_actions, bypass_memory_reset=True)
 
+                obs_tgt = {k: v[:, -num_phase_steps:] for k, v in obs.items()}
+                z_tgts = self.model.encode_obs(obs_tgt)
+
                 # evaluate on query phase
                 decoded = self.model.decode_obs(z_obses)[0]
+                decoded_tgt = self.model.decode_obs(z_tgts)[0]
                 
                 # eval only query phase
                 visuals = decoded["visual"][:, -(num_phase_steps + 1): -1] # offset by 1 to exclude the last predicted frame which has no gt
@@ -1957,6 +1965,7 @@ class Trainer:
                     imgs = torch.cat(
                         [
                             obs["visual"][0, -num_phase_steps:].cpu(), # this doesn't have the extra frame
+                            decoded_tgt["visual"][0, -num_phase_steps:].cpu(),
                             visuals[0].cpu(),
                         ],
                         dim=0,
@@ -1968,8 +1977,6 @@ class Trainer:
                             f"{plotting_dir}/e{self.epoch}_{idx}_context_recall_burn_in_{burn_in_step}.png",
                         )     
 
-                obs_tgt = {k: v[:, -num_phase_steps:] for k, v in obs.items()}
-                z_tgts = self.model.encode_obs(obs_tgt)
                 z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
                 div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": visuals, "proprio": obs_tgt["proprio"]}, z_cycle)
                 for k in div_loss.keys():
