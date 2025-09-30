@@ -371,3 +371,36 @@ class MambaSSMCell(nn.Module):
             return self.scan(X_t, H_t)
         else:
             raise ValueError("mode must be 'step' or 'scan'")
+
+
+# Integration with Triton kernels
+try:
+    from .mamba_triton import MambaTritonSSM, create_mamba_triton_model
+    TRITON_AVAILABLE = True
+except ImportError:
+    TRITON_AVAILABLE = False
+    MambaTritonSSM = None
+    create_mamba_triton_model = None
+
+
+class MambaTritonSSMCell(MambaSSMCell):
+    """
+    Mamba SSM cell with Triton kernel acceleration.
+    Falls back to standard implementation if Triton is not available.
+    """
+    
+    def __init__(self, d_model: int, n_state: int, dt_rank: int = 4, use_triton: bool = True):
+        if use_triton and TRITON_AVAILABLE:
+            # Use Triton-accelerated implementation
+            self.triton_ssm = MambaTritonSSM(d_model, n_state, dt_rank)
+            self.use_triton = True
+        else:
+            # Fall back to standard implementation
+            super().__init__(d_model, n_state, dt_rank)
+            self.use_triton = False
+    
+    def forward(self, X_t, H_t=None, dt: float = 1.0, mode: str = "step"):
+        if self.use_triton:
+            return self.triton_ssm.forward(X_t)
+        else:
+            return super().forward(X_t, H_t, dt, mode)
