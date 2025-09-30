@@ -735,7 +735,7 @@ class MACTransformerBlock(nn.Module):
         device = x_seg.device
 
         # retrieve long-term memory for current segment
-        q_t = self.mem_W_Q(F.normalize(x_seg, p=2, dim=-1))  # [B, T, d_model]
+        q_t = self.mem_W_Q(x_seg)  # [B, T, d_model]
         h = self.mem.retrieve(q_t)  # [B, T, d_model]
 
         if self.use_slots:
@@ -747,12 +747,10 @@ class MACTransformerBlock(nn.Module):
         else:
             self.n_retrieved = T
 
-        h = F.normalize(h, p=2, dim=-1)
-
         # prepend persistent tokens and retrieved memory slots
         if self.n_persistent > 0:
             P = (
-                F.normalize(self.P, p=2, dim=-1).unsqueeze(0).expand(B, -1, -1)
+                self.P.unsqueeze(0).expand(B, -1, -1)
             )  # [B, n_persistent, d_model]
             x_aug = torch.cat(
                 [P, h, x_seg], dim=1
@@ -777,26 +775,26 @@ class MACTransformerBlock(nn.Module):
             ]
             if self.update_type == "selfattention":
                 k = (
-                    self.mem_W_Q(F.normalize(memory_tokens, p=2, dim=-1))
+                    self.mem_W_Q(memory_tokens)
                     if self.proj_k_eq_q
-                    else F.normalize(memory_tokens, p=2, dim=-1)
+                    else memory_tokens
                 )
                 self.mem.update_from_batch(
                     k.detach(),
-                    F.normalize(memory_tokens, p=2, dim=-1).detach(),
+                    memory_tokens.detach(),
                 )
             elif self.update_type == "crossattention":
                 assert (
                     out.shape[1] == memory_tokens.shape[1]
                 ), f"out.shape[1] ({out.shape[1]}) != memory_tokens.shape[1] ({memory_tokens.shape[1]})"
                 k = (
-                    self.mem_W_Q(F.normalize(out, p=2, dim=-1))
+                    self.mem_W_Q(out)
                     if self.proj_k_eq_q
-                    else F.normalize(out, p=2, dim=-1)
+                    else out
                 )
                 self.mem.update_from_batch(
                     k.detach(),
-                    F.normalize(memory_tokens, p=2, dim=-1).detach(),
+                    memory_tokens.detach(),
                 )
             else:
                 raise ValueError(f"Invalid update_type: {self.update_type}")

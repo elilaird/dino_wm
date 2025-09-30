@@ -1249,10 +1249,6 @@ class Trainer:
                 }
                 self.logs_update(test_rollout_logs)
 
-                # Store rollout results for CSV
-                # for k, v in test_rollout_logs.items():
-                #     test_results[k].extend(self._safe_convert_to_numpy(v))
-
                 # long horizon treatments
                 if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
                     test_long_horizon_logs = self.openloop_rollout(
@@ -1266,10 +1262,6 @@ class Trainer:
                     }
                     self.logs_update(test_long_horizon_logs)
 
-                    # Store long horizon results for CSV
-                    # for k, v in test_long_horizon_logs.items():
-                    #     test_results[k].extend(self._safe_convert_to_numpy(v))
-
                 # long imagination
                 if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
                     # run on full test dataset
@@ -1277,15 +1269,12 @@ class Trainer:
                         self.test_traj_dset, 
                         query_phase_start_idx=self.cfg.query_phase_start_idx, 
                         num_rollout=self.cfg.num_eval_samples if self.cfg.dry_run else None,
+                        plotting_dir=f"test_results/e{self.epoch}_long_imagination"
                     )
                     long_imagination_logs = {
                         f"test_{k}": [v] for k, v in long_imagination_logs.items()
                     }
                     self.logs_update(long_imagination_logs)
-
-                    # Store long imagination results for CSV
-                    # for k, v in long_imagination_logs.items():
-                    #     test_results[k].extend(self._safe_convert_to_numpy(v))
 
                 # context recall
                 if (
@@ -1298,13 +1287,12 @@ class Trainer:
                         self.context_recall_dset["test"],
                         query_phase_start_idx=self.cfg.teleport_start_idx,
                         num_rollout=self.cfg.num_eval_samples if self.cfg.dry_run else None,
+                        plotting_dir=f"test_results/e{self.epoch}_context_recall"
                     )
                     context_recall_logs = {
                         f"test_{k}": [v] for k, v in context_recall_logs.items()
                     }
                     self.logs_update(context_recall_logs)
-                    # for k, v in context_recall_logs.items():
-                    #     test_results[k].extend(self._safe_convert_to_numpy(v))
 
         self.accelerator.wait_for_everyone()
 
@@ -1760,34 +1748,7 @@ class Trainer:
                     for k in div_loss.keys():
                         logs[f"{k}_err_horizon_{postfix}_h{horizon}"].append(div_loss[k].cpu().numpy())
 
-                    # for t in range(1, horizon + 1):
-                    #     z_pred_t = slice_trajdict_with_t(
-                    #         z_obses, start_idx=t, end_idx=t+1
-                    #     ) # openloop predicted latents
-                    #     z_t = slice_trajdict_with_t(
-                    #         z_tgts, start_idx=t, end_idx=t+1
-                    #     ) # target latents
-                    #     obs_tgt_t = slice_trajdict_with_t(obs_tgt, start_idx=t, end_idx=t+1) # target obs
-                    #     visuals_t = slice_trajdict_with_t({"visual": visuals, "proprio": obs_tgt["proprio"]}, start_idx=t, end_idx=t+1) # reconstructed visuals
-                    #     cycle_z_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1) # re-encoded visuals
-                    #     div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt_t, visuals_t, cycle_z_t)
-                    #     for k in div_loss.keys():
-                    #         local_results[f"{k}_err_horizon_{postfix}_h{horizon}"].append(div_loss[k].cpu().numpy())
-                    #     local_results["t"].append(t / len(num_past))                            
-
-        #             for k, v in local_results.items():
-        #                 if k not in horizon_logs:
-        #                     horizon_logs[k] = np.zeros(horizon)
-        #                 horizon_logs[k] += np.stack(v) / num_rollout
-
-        # if horizon_treatment is not None and self.accelerator.is_main_process:
-        #     self.save_horizon_results_to_file(horizon_logs, f"{plotting_dir}/e{self.epoch}_{mode}_horizon{horizon_treatment}_per_step_errors.csv")
-
-        # logs = {
-        #     key: sum(values) / len(values)
-        #     for key, values in logs.items()
-        #     if values
-        # }
+    
         for k, v in logs.items():
             logs[k] = np.mean(v) if v else 0
 
@@ -1859,8 +1820,9 @@ class Trainer:
 
         return logs
 
-    def long_imagination_rollout(self, dset, query_phase_start_idx=0, num_rollout=None):
-        plotting_dir = f"long_imagination_plots/e{self.epoch}_long_imagination"
+    def long_imagination_rollout(self, dset, query_phase_start_idx=0, num_rollout=None, plotting_dir=None):
+        if plotting_dir is None:
+            plotting_dir = f"long_imagination_plots/e{self.epoch}_long_imagination"
         if self.accelerator.is_main_process:
             os.makedirs(plotting_dir, exist_ok=True)
         self.accelerator.wait_for_everyone()
@@ -1899,10 +1861,14 @@ class Trainer:
                 for k, v in obs.items()
             }
 
+            obs_tgt = {k: v[:, -num_phase_steps:] for k, v in obs.items()}
+            z_tgts = self.model.encode_obs(obs_tgt)
+
             z_obses, _ = self.model.rollout(obs_query_start, query_actions, bypass_memory_reset=True)
 
             # evaluate on query phase
             decoded = self.model.decode_obs(z_obses)[0]
+            decoded_tgt = self.model.decode_obs(z_tgts)[0]
 
             # eval only query phase
             visuals = decoded["visual"][:, -(num_phase_steps + 1): -1] # offset by 1 to exclude the last predicted frame which has no gt
@@ -1912,6 +1878,7 @@ class Trainer:
                 imgs = torch.cat(
                     [
                         obs["visual"][0, -num_phase_steps:].cpu(), # this doesn't have the extra frame
+                        decoded_tgt["visual"][0, -num_phase_steps:].cpu(),
                         visuals[0].cpu(),
                     ],
                     dim=0,
@@ -1923,8 +1890,7 @@ class Trainer:
                         f"{plotting_dir}/e{self.epoch}_{idx}_long_imagination.png",
                     )     
 
-            obs_tgt = {k: v[:, -num_phase_steps:] for k, v in obs.items()}
-            z_tgts = self.model.encode_obs(obs_tgt)
+            
             z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
             div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": visuals, "proprio": obs_tgt["proprio"]}, z_cycle)
             for k in div_loss.keys():
@@ -1934,34 +1900,11 @@ class Trainer:
         for k, v in local_logs.items():
             logs[k] = np.mean(v)
 
-        #     for t in range(obs_tgt["visual"].shape[1]):
-        #         z_pred_t = slice_trajdict_with_t(
-        #                     z_obses, start_idx=t, end_idx=t+1
-        #         ) # openloop predicted latents
-        #         z_t = slice_trajdict_with_t(
-        #             z_tgts, start_idx=t, end_idx=t+1
-        #         ) # target latents
-        #         obs_tgt_t = slice_trajdict_with_t(obs_tgt, start_idx=t, end_idx=t+1) # target obs
-        #         visuals_t = slice_trajdict_with_t({"visual": visuals, "proprio": obs_tgt["proprio"]}, start_idx=t, end_idx=t+1) # reconstructed visuals
-        #         cycle_z_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1) # re-encoded visuals
-        #         div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt_t, visuals_t, cycle_z_t)
-        #         for k in div_loss.keys():
-        #             local_logs[f"{k}_err_long_imagination"].append(div_loss[k].cpu().numpy())
-        #         local_logs["t"].append(t)
-
-        #     # aggregate errors for each time step over whole dataset
-        #     for k, v in local_logs.items():
-        #         if k not in logs:
-        #             logs[k] = np.zeros(obs_tgt["visual"].shape[1])
-        #         logs[k] += np.stack(v) / num_rollout
-
-        # if self.accelerator.is_main_process:
-        #     self.save_horizon_results_to_file(logs, f"{plotting_dir}/e{self.epoch}_long_imagination_per_step_errors.csv")
-
         return logs
 
-    def context_recall_rollout(self, dset, query_phase_start_idx=0, num_rollout=None):
-        plotting_dir = f"context_recall_plots/e{self.epoch}_context_recall"
+    def context_recall_rollout(self, dset, query_phase_start_idx=0, num_rollout=None, plotting_dir=None):
+        if plotting_dir is None:
+            plotting_dir = f"context_recall_plots/e{self.epoch}_context_recall"
         if self.accelerator.is_main_process:
             os.makedirs(plotting_dir, exist_ok=True)
         self.accelerator.wait_for_everyone()
@@ -2006,8 +1949,12 @@ class Trainer:
 
                 z_obses, _ = self.model.rollout(obs_query_start, query_actions, bypass_memory_reset=True)
 
+                obs_tgt = {k: v[:, -num_phase_steps:] for k, v in obs.items()}
+                z_tgts = self.model.encode_obs(obs_tgt)
+
                 # evaluate on query phase
                 decoded = self.model.decode_obs(z_obses)[0]
+                decoded_tgt = self.model.decode_obs(z_tgts)[0]
                 
                 # eval only query phase
                 visuals = decoded["visual"][:, -(num_phase_steps + 1): -1] # offset by 1 to exclude the last predicted frame which has no gt
@@ -2018,6 +1965,7 @@ class Trainer:
                     imgs = torch.cat(
                         [
                             obs["visual"][0, -num_phase_steps:].cpu(), # this doesn't have the extra frame
+                            decoded_tgt["visual"][0, -num_phase_steps:].cpu(),
                             visuals[0].cpu(),
                         ],
                         dim=0,
@@ -2029,8 +1977,6 @@ class Trainer:
                             f"{plotting_dir}/e{self.epoch}_{idx}_context_recall_burn_in_{burn_in_step}.png",
                         )     
 
-                obs_tgt = {k: v[:, -num_phase_steps:] for k, v in obs.items()}
-                z_tgts = self.model.encode_obs(obs_tgt)
                 z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
                 div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": visuals, "proprio": obs_tgt["proprio"]}, z_cycle)
                 for k in div_loss.keys():
