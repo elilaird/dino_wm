@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 
 
 class NeuralMemory(nn.Module):
@@ -332,11 +333,11 @@ class MambaSSMCell(nn.Module):
         """
         B, T, P, D = X_win.shape
         # Flatten time into batch for parameter eval, then reshape back
-        Xf = X_win.reshape(B * T, P, D)  # [BT,P,D]
+        Xf = rearrange(X_win, "b t p d -> (b t) p d")
         A_t, b_t, C_t = self._selective_params(Xf)  # [BT,P,S] each
-        A_t = A_t.view(B, T, P, self.S)
-        b_t = b_t.view(B, T, P, self.S)
-        C_t = C_t.view(B, T, P, self.S)
+        A_t = rearrange(A_t, "(b t) p s -> b t p s", b=B, t=T)
+        b_t = rearrange(b_t, "(b t) p s -> b t p s", b=B, t=T)
+        C_t = rearrange(C_t, "(b t) p s -> b t p s", b=B, t=T)
 
         # Parallel recurrence with initial state H0
         H_seq = self._scan_window(A_t, b_t, H0)  # [B,T,P,S]
@@ -345,6 +346,7 @@ class MambaSSMCell(nn.Module):
         Y_seq = self.readout((C_t * H_seq).reshape(B * T, P, self.S)).view(
             B, T, P, self.D
         )
+        Y_seq = rearrange(Y_seq, "b t p d -> b (t p) d")
 
         H_T = H_seq[:, -1, :, :]  # [B,P,S]
         return H_seq, Y_seq, H_T
@@ -371,4 +373,3 @@ class MambaSSMCell(nn.Module):
             return self.scan(X_t, H_t)
         else:
             raise ValueError("mode must be 'step' or 'scan'")
-

@@ -1295,23 +1295,29 @@ class StateSpaceTransformer(nn.Module):
                 )
             )
 
-    def _ssm_forward(self, x):
+    def _ssm_forward(self, x, mode: str = "step"):
         B, T, D = x.shape
         n_frames = T // self.num_patches
-        
-        if self.H_buffer is None:
-            self.H_buffer = self.init_state(B, x.device)
-        
-        # iterate through frames to aggregate memory
-        M_new = []
-        h_new = self.H_buffer
-        for i in range(n_frames):
-            x_i = x[:, i * self.num_patches : (i + 1) * self.num_patches, :]
-            h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)
-            M_new.append(m_i)
 
-        M_new = torch.cat(M_new, dim=1)
-        self.H_buffer = h_new.detach()
+        if self.H_buffer is None:
+                self.H_buffer = self.init_state(B, x.device)
+
+        if mode == "step":  
+            # iterate through frames to aggregate memory
+            M_new = []
+            h_new = self.H_buffer
+            for i in range(n_frames):
+                x_i = x[:, i * self.num_patches : (i + 1) * self.num_patches, :]
+                h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)
+                M_new.append(m_i)
+
+            M_new = torch.cat(M_new, dim=1)
+            self.H_buffer = h_new.detach()
+
+        elif mode == "scan":
+            x = rearrange(x, "b (t p) d -> b t p d", t=T//self.num_patches)
+            _, M_new, H_T = self.ssm_cell(x, self.H_buffer, mode="scan")
+            self.H_buffer = H_T.detach()
 
         return M_new
 
