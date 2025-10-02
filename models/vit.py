@@ -1664,3 +1664,324 @@ class StateSpaceViTPredictor(nn.Module):
 
     def reset_memory(self):
         self.transformer.reset_memory()
+
+
+ ###### HYBRID ARCHITECTURES ######
+class DualAttentionSSMKeys(nn.Module):
+    """
+    Dual attention combining:
+      - alpha (memory-driven):  Q vs K_mem, where K_mem = Proj(C_t ⊙ h_t)
+      - beta  (content-driven): Q vs K_cnt, where K_cnt = W_K x
+
+    Fusion modes:
+      - 'sum' : out = out_alpha + out_beta
+      - 'diff': out = out_alpha - out_beta
+      - 'mul' : attn = softmax( (alpha_probs * beta_probs) )
+      - 'gate': out = g * out_alpha + (1 - g) * out_beta  (token-wise learned gate)
+
+    Shapes:
+      x:      [B, T, D] where T = n_frames * n_patches  (consistent with your bias mask)
+      bias:   [1, 1, T, T] causal/structured mask
+      returns:
+        y:    [B, T, D]
+        H_T:  [B, P, S] (final SSM state to carry, with P = n_patches)
+    """
+
+    def __init__(
+        self,
+        dim,
+        heads=8,
+        dim_head=64,
+        dropout=0.0,
+        n_patches=1,
+        n_frames=1,
+        fusion="sum",                 # 'sum' | 'diff' | 'mul' | 'gate'
+        bias=None
+    ):
+        super().__init__()
+
+        self.dim = dim
+        self.heads = heads
+        self.dim_head = dim_head
+        self.inner = heads * dim_head
+        self.scale = dim_head ** -0.5
+        self.n_patches = n_patches
+        self.n_frames = n_frames
+        self.fusion = fusion
+        self.ssm = MambaSSMCell(d_model=dim, n_state= dim // 2) # replace dt_rank eventually
+
+        # projections
+        self.norm = nn.LayerNorm(dim)
+        self.to_q = nn.Linear(dim, self.inner, bias=False)
+        self.to_k_cnt = nn.Linear(dim, self.inner, bias=False)  # content keys
+        self.to_v = nn.Linear(dim, self.inner, bias=False)
+
+        # project SSM (C_t ⊙ h_t) -> key space (per token)
+        # we will construct K_mem via: Proj( (C_t ⊙ H_seq) )
+        self.proj_k_mem = nn.Linear(dim, self.inner, bias=False)
+
+        # output projection
+        self.to_out = nn.Sequential(nn.Linear(self.inner, dim), nn.Dropout(dropout))
+
+        # attention bits
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+
+        # optional learned gate for 'gate' fusion (token-wise, head-shared)
+        if self.fusion == "gate":
+            self.gate = nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, dim),
+                nn.GELU(),
+                nn.Linear(dim, 1),
+                nn.Sigmoid()
+            )
+
+        # mask (expects T = n_frames * n_patches)
+        if bias is None:
+            bias = generate_mask_matrix(self.n_patches, self.n_frames)
+        self.register_buffer("bias", bias)  # [1,1,T,T]
+
+    def _reshape_for_ssm(self, x):
+        """
+        x: [B, T, D] with T = n_frames * n_patches
+        returns X_win: [B, T_frames, P, D]
+        """
+        B, T, D = x.shape
+        P = self.n_patches
+        F = self.n_frames
+        assert T == P * F, f"T ({T}) must equal n_patches*n_frames ({P*F})"
+        X_win = rearrange(x, "b (t p) d -> b t p d", t=F, p=P)  # [B, F, P, D]
+        return X_win
+
+    def _heads(self, t):
+        return rearrange(t, "b n (h d) -> b h n d", h=self.heads)
+
+    def _unheads(self, t):
+        return rearrange(t, "b h n d -> b n (h d)")
+
+    def forward(self, x, H0=None):
+        """
+        x:  [B, T, D]
+        H0: [B, P, S] or None (zeros)
+        returns: y [B,T,D], H_T [B,P,S]
+        """
+        B, T, D = x.shape
+        P, F = self.n_patches, self.n_frames
+
+        x = self.norm(x)
+
+        # ---- Q, K_content, V from raw features
+        Q = self._heads(self.to_q(x))        # [B,H,T,dh]
+        K_cnt = self._heads(self.to_k_cnt(x))# [B,H,T,dh]
+        V = self._heads(self.to_v(x))        # [B,H,T,dh]
+
+        # ---- SSM trajectory to build K_mem = Proj(C_t ⊙ h_t)
+        X_win = self._reshape_for_ssm(x)     # [B,F,P,D]
+        if H0 is None:
+            H0 = self.ssm.init_state(B, P, device=x.device, dtype=x.dtype)  # [B,P,S]
+        _, Y_seq, H_T = self.ssm(X_win, H0, mode="scan")  # Y_seq: (B, F*P, D), H_T: (B, P, S)
+
+        # # Token-wise (C_t ⊙ h_t) already used inside self.ssm.readout for Y_seq;
+        # # we need (C_t ⊙ h_t) again to produce keys. Recompute C_t for keys:
+        # Xf = rearrange(X_win, "b t p d -> (b t) p d")
+        # _, _, C_t = self.ssm._selective_params(Xf)                 # [BF,P,S]
+        # C_t = rearrange(C_t, "(b t) p s -> b t p s", b=B, t=F)     # [B,F,P,S]
+        # Ch = C_t * H_seq                                           # [B,F,P,S]
+
+        # Project to key space per token, then flatten time*patch -> tokens
+        K_mem_tokens = self.proj_k_mem(Y_seq)   # [B,T,Inner]
+        K_mem = self._heads(K_mem_tokens)       # [B,H,T,dh]
+
+        # ---- Two attention maps (beta: content, alpha: memory)
+        dots_beta = torch.matmul(Q, K_cnt.transpose(-1, -2)) * self.scale  # [B,H,T,T]
+        dots_alpha = torch.matmul(Q, K_mem.transpose(-1, -2)) * self.scale
+
+        # apply same causal/structured mask
+        mask = self.bias[:, :, :T, :T] == 0  # [1,1,T,T] -> bool
+        dots_beta = dots_beta.masked_fill(mask, float("-inf"))
+        dots_alpha = dots_alpha.masked_fill(mask, float("-inf"))
+
+        # softmax maps
+        attn_beta = self.attend(dots_beta)    # [B,H,T,T]
+        attn_alpha = self.attend(dots_alpha)  # [B,H,T,T]
+
+        # optional dropout on maps
+        attn_beta = self.dropout(attn_beta)
+        attn_alpha = self.dropout(attn_alpha)
+
+        # ---- Fuse attentions / outputs
+        if self.fusion == "sum":
+            # (alphaV + betaV)
+            out = torch.matmul(attn_alpha, V) + torch.matmul(attn_beta, V)
+
+        elif self.fusion == "diff":
+            # (alphaV - betaV)  (differential attention)
+            out = torch.matmul(attn_alpha, V) - torch.matmul(attn_beta, V)
+
+        elif self.fusion == "mul":
+            # multiplicative agreement: softmax(alpha ⊙ beta)
+            attn_agree = attn_alpha * attn_beta
+            # renormalize per head
+            attn_agree = attn_agree / (attn_agree.sum(dim=-1, keepdim=True) + 1e-9)
+            out = torch.matmul(attn_agree, V)
+
+        elif self.fusion == "gate":
+            # token-wise gate g \in [0,1], shared across heads
+            # use the input x to predict gate; broadcast to heads
+            g = self.gate(x).clamp(0.0, 1.0)            # [B,T,1]
+            g = g.transpose(1, 2)                       # [B,1,T]
+            g = g.unsqueeze(-1)                         # [B,1,T,1]
+            out_alpha = torch.matmul(attn_alpha, V)
+            out_beta  = torch.matmul(attn_beta, V)
+            out = g * out_alpha + (1.0 - g) * out_beta  # broadcast over heads
+
+        else:
+            raise ValueError(f"Unknown fusion '{self.fusion}'")
+
+        # ---- Merge heads and project out
+        out = self._unheads(out)            # [B,T,Inner]
+        y = self.to_out(out)                # [B,T,D]
+        return y, H_T
+
+
+class HybridTransformerLayer(nn.Module):
+    """
+    A single Transformer layer where the attention sublayer is replaced
+    by DualAttentionSSMKeys. Residual + FFN preserved.
+    """
+    def __init__(
+        self,
+        dim,
+        heads,
+        dim_head,
+        mlp_dim,
+        n_patches,
+        n_frames,
+        dropout=0.0,
+        fusion="sum",
+        bias=None
+    ):
+        super().__init__()
+        self.attn = DualAttentionSSMKeys(
+            dim=dim,
+            heads=heads,
+            dim_head=dim_head,
+            dropout=dropout,
+            n_patches=n_patches,
+            n_frames=n_frames,
+            fusion=fusion,
+            bias=bias
+        )
+        self.ff = FeedForward(dim, mlp_dim, dropout=dropout)
+
+    def forward(self, x, H0=None):
+        # attention + residual
+        attn_out, H_T = self.attn(x, H0=H0)
+        x = x + attn_out
+        # ff + residual
+        x = x + self.ff(x)
+        return x, H_T
+
+
+class HybridTransformer(nn.Module):
+    """
+    Stack of HybridTransformerLayers. We carry the SSM state across layers
+    OR re-init per layer. Here we carry within each layer (common pattern:
+    one SSM per layer). You can also share one SSM across layers if desired.
+    """
+    def __init__(
+        self,
+        dim,
+        depth,
+        heads,
+        dim_head,
+        mlp_dim,
+        n_patches,
+        n_frames,
+        dropout=0.0,
+        fusion="sum",
+        bias=None
+    ):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList([])
+
+        for _ in range(depth):
+            layer = HybridTransformerLayer(
+                dim=dim,
+                heads=heads,
+                dim_head=dim_head,
+                mlp_dim=mlp_dim,
+                n_patches=n_patches,
+                n_frames=n_frames,
+                dropout=dropout,
+                fusion=fusion,
+                bias=bias
+            )
+            self.layers.append(layer)
+
+    def forward(self, x, H0=None):
+        """
+        x:  [B, T, D]  with T = n_frames * n_patches
+        H0: Optional initial SSM state for the FIRST layer.
+            If provided, it will be used for the first layer; subsequent
+            layers will init zeros unless you choose to thread H across.
+        """
+        # Carry SSM state per-layer independently; thread H only within the layer.
+        for i, layer in enumerate(self.layers):
+            H0_i = H0 if (i == 0) else None
+            x, _ = layer(x, H0=H0_i)
+        return self.norm(x)
+
+
+class HybridViTPredictor(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        pool="cls",
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+        fusion="sum",
+    ):
+        super().__init__()
+        assert pool in {
+            "cls",
+            "mean",
+        }, "pool type must be either cls (cls token) or mean (mean pooling)"
+
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * (num_patches), dim)
+        )  # dim for the pos encodings
+        self.dropout = nn.Dropout(emb_dropout)
+        self.transformer = HybridTransformer(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            dim_head=dim_head,
+            mlp_dim=mlp_dim,
+            n_patches=num_patches,
+            n_frames=num_frames,
+            dropout=dropout,
+            fusion=fusion,
+        )
+        self.pool = pool
+
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        x = self.transformer(x)
+        return x
