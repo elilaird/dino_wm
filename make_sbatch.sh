@@ -13,8 +13,8 @@ NODES=${NODES:-1}
 BRANCH=${BRANCH:-main}
 
 GPU=${GPU:-8}
-CPUS=${CPUS:-128}
-MEM=${MEM:-512G}
+CPUS=${CPUS:-64}
+MEM=${MEM:-96G}
 PY_ARGS="${@}"
 
 if [ "${PARTITION}" = "short" ]; then

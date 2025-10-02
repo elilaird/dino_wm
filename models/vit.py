@@ -1408,6 +1408,32 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
             
         return self.ln_out(x)
 
+class MemoryInjectionPreSSMTransformer(MemoryInjectionSSMTransformer):
+    def __init__(
+        self,
+        ssm_type,
+        dim,
+        state_size,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        dropout=0.0,
+        dim_head=64,
+        dt: float = 1.0, # could change to frameskip
+        alpha_init: float = 0.1,
+        **kwargs,
+    ):
+        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init, **kwargs)
+
+    def forward(self, x):
+        x = self.ln_in(x)
+        M_new = self._ssm_forward(x)
+        for i, (attn, ff) in enumerate(self.layers):
+            x = x + attn(x)
+            x = x + self.injection_layers[i](M_new) * self.alphas[i]
+            x = x + ff(x)
+        return self.ln_out(x)
 
 class AdaMemSSMTransformer(StateSpaceTransformer):
     def __init__(
@@ -1579,8 +1605,6 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
         return self.ln_out(x)
 
 
-
-
 class StateSpaceViTPredictor(nn.Module):
     def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type, injection_type, alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, zero_init: bool = False, lora_rank: int = 64, lora_alpha: float = 1.0, lora_dropout: float = 0.0):
         super().__init__()
@@ -1611,6 +1635,10 @@ class StateSpaceViTPredictor(nn.Module):
             )
         elif injection_type == "misst":
             self.transformer = MemoryInjectionSSMTransformer(
+                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init
+            )
+        elif injection_type == "misst_pre":
+            self.transformer = MemoryInjectionPreSSMTransformer(
                 ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init
             )
         elif injection_type == "adamem":

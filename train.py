@@ -1796,25 +1796,6 @@ class Trainer:
                 for k in div_loss.keys():
                     logs[f"z_{k}_err_loopclosure_h{horizon}"].append(div_loss[k].cpu().numpy())
 
-                # for t in range(1, horizon):
-                #     z_pred_t = slice_trajdict_with_t(
-                #             z_obses, start_idx=t, end_idx=t+1
-                #     ) # openloop predicted latents
-                #     z_t = slice_trajdict_with_t(
-                #         z_tgts, start_idx=t, end_idx=t+1
-                #     ) # target latents
-                #     obs_tgt_t = slice_trajdict_with_t(obs_tgt, start_idx=t, end_idx=t+1) # target obs
-                #     visuals_t = slice_trajdict_with_t({"visual": visuals, "proprio": obs_tgt["proprio"]}, start_idx=t, end_idx=t+1) # reconstructed visuals
-                #     cycle_z_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1) # re-encoded visuals
-                #     div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt_t, visuals_t, cycle_z_t)
-                #     for k in div_loss.keys():
-                #         logs[f"z_{k}_err_loopclosure_h{horizon}_t{t}"].append(div_loss[k])
-
-        # logs = {
-        #     key: sum(values) / len(values)
-        #     for key, values in logs.items()
-        #     if values
-        # }
         for k, v in logs.items():
             logs[k] = np.mean(v)
 
@@ -1986,38 +1967,75 @@ class Trainer:
             for k, v in local_logs.items():
                 logs[k] = np.mean(v)
 
-
-                # for t in range(obs_tgt["visual"].shape[1]):
-                #     z_pred_t = slice_trajdict_with_t(
-                #                 z_obses, start_idx=t, end_idx=t+1
-                #     ) # openloop predicted latents
-                #     z_t = slice_trajdict_with_t(
-                #         z_tgts, start_idx=t, end_idx=t+1
-                #     ) # target latents
-                #     obs_tgt_t = slice_trajdict_with_t(obs_tgt, start_idx=t, end_idx=t+1) # target obs
-                #     visuals_t = slice_trajdict_with_t({"visual": visuals, "proprio": obs_tgt["proprio"]}, start_idx=t, end_idx=t+1) # reconstructed visuals
-                #     cycle_z_t = slice_trajdict_with_t(z_cycle, start_idx=t, end_idx=t+1) # re-encoded visuals
-                #     div_loss = self.horizon_treatment_eval(z_pred_t, z_t, obs_tgt_t, visuals_t, cycle_z_t)
-                #     for k in div_loss.keys():
-                #         local_logs[f"{k}_err_context_recall_burn_in_{burn_in_step}"].append(div_loss[k].cpu().numpy())
-                #     local_logs[f"t_burn_in_{burn_in_step}"].append(t)
-
-                # aggregate errors for each time step over rollouts
-                # for k, v in local_logs.items():
-                #     if k not in logs:
-                #         logs[k] = np.zeros(obs_tgt["visual"].shape[1])
-                #     logs[k] += np.stack(v) / num_rollout
-
-        # save errors avg over rollout for each burn in step
-        # if self.accelerator.is_main_process:
-        #     self.save_horizon_results_to_file(logs, f"{plotting_dir}/e{self.epoch}_context_recall_per_step_errors.csv")
-
-        # return overall avg error over timesteps
-        # logs = {
-        #     f"overall_{k}": v[-1] for k, v in logs.items()
-        # }
-
         return logs
+
+    def oracle_memory_benchmark(self, dset, oracle_mode='perfect_memory', num_rollouts=2, prepend_type='half'):
+        if plotting_dir is None:
+            plotting_dir = f"oracle_{oracle_mode}/e{self.epoch}_oracle_{oracle_mode}"
+        if self.accelerator.is_main_process:
+            os.makedirs(plotting_dir, exist_ok=True)
+        self.accelerator.wait_for_everyone()
+        logs = {}
+
+        # for a given context length, burn in num_hist context frames
+        # encode next window of frames as the memory latents
+        # prepend the memory latents to the context 
+        # rollout n context steps forward
+        # evaluate the rollout error
+        # report avg rollout error for a trajectory over all rollouts
+        
+        for idx in range(num_rollouts):
+            obs, actions, _, _ = dset[idx]
+            obs = {k:v.unsqueeze(0).to(self.device) for k, v in obs.items()}
+            actions = actions.unsqueeze(0).to(self.device)
+
+            errors = []
+            # loop through trajectory using windows
+            # for start_idx in range(0, actions.shape[1], self.window_size):
+            # only one window for now
+            start_idx = 0
+            end_idx = start_idx + self.window_size
+            half_hist = self.cfg.num_hist // 2
+            obs_w_oracle = {
+                k: torch.cat([v[:, half_hist:end_idx], v[:, start_idx:half_hist]], dim=1) for k, v in obs.items()
+            }
+            act_w_oracle = torch.cat([actions[:, half_hist:end_idx], actions[:, start_idx:half_hist], actions[:, half_hist:end_idx]], dim=1)
+
+            # since model.rollout encodes the context already, we can prepend the oracle to half the history and rollout to end_idx
+            z_obses, _ = self.model.rollout(obs_w_oracle, act_w_oracle)
+            z_tgts = {k: v[:, :half_hist] for k, v in z_obses.items()} # first half_hist frames are oracle embeddings
+            z_obses = {k: v[:, -half_hist:-1] for k, v in z_obses.items()} # last half_hist frames are rollout embeddings
+
+            print(f"z_tgts: {z_tgts['visual'].shape}, z_obses: {z_obses['visual'].shape}")
+
+            decoded_tgt = self.model.decode_obs(z_tgts)[0]
+            decoded = self.model.decode_obs(z_obses)[0]
+
+            errors.append({"recon": self.err_eval_single(decoded, decoded_tgt)['visual']})
+            errors.append({"pred": self.err_eval_single(z_obses, z_tgts)['visual']})
+
+            # save plots
+            if idx < min(10, num_rollouts):
+                imgs = torch.cat(
+                    [
+                        obs_w_oracle["visual"][0, :half_hist].cpu(), # true target
+                        decoded_tgt["visual"][0].cpu(), # decoded oracle
+                        decoded["visual"][0].cpu(), # decoded pred
+                    ],
+                    dim=0,
+                )
+                if self.accelerator.is_main_process:
+                    self.plot_imgs(imgs, half_hist, f"{plotting_dir}/e{self.epoch}_{idx}_oracle_{oracle_mode}.png")
+                
+                
+
+
+
+
+
+ 
+        
+    
 
     def save_horizon_results_to_file(self, horizon_logs, filepath):
         if not horizon_logs:
