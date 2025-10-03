@@ -374,10 +374,8 @@ class VWorldModel(nn.Module):
 
         if hasattr(self.predictor, "set_step_size"):
             self.predictor.set_step_size(step_size)
-            print(f"Set predictor step size to {step_size}")
         elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "set_step_size"):
             self.predictor.module.set_step_size(step_size)
-            print(f"Set predictor step size to {step_size}")
 
     def reset_predictor_memory(self):
         if hasattr(self.predictor, "reset_memory"):
