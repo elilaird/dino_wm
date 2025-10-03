@@ -14,7 +14,7 @@ BRANCH=${BRANCH:-main}
 
 GPU=${GPU:-8}
 CPUS=${CPUS:-64}
-MEM=${MEM:-96G}
+MEM=${MEM:-400G}
 PY_ARGS="${@}"
 
 if [ "${PARTITION}" = "short" ]; then

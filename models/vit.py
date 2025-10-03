@@ -1742,6 +1742,8 @@ class DualAttentionSSMKeys(nn.Module):
             bias = generate_mask_matrix(self.n_patches, self.n_frames)
         self.register_buffer("bias", bias)  # [1,1,T,T]
 
+        self.H_buffer = None
+
     def _reshape_for_ssm(self, x):
         """
         x: [B, T, D] with T = n_frames * n_patches
@@ -1778,16 +1780,11 @@ class DualAttentionSSMKeys(nn.Module):
 
         # ---- SSM trajectory to build K_mem = Proj(C_t ⊙ h_t)
         X_win = self._reshape_for_ssm(x)     # [B,F,P,D]
-        if H0 is None:
-            H0 = self.ssm.init_state(B, P, device=x.device, dtype=x.dtype)  # [B,P,S]
-        _, Y_seq, H_T = self.ssm(X_win, H0, mode="scan")  # Y_seq: (B, F*P, D), H_T: (B, P, S)
+        if self.H_buffer is None:
+            self.H_buffer = self.ssm.init_state(B, P, device=x.device, dtype=x.dtype)  # [B,P,S]
+        _, Y_seq, H_T = self.ssm(X_win, self.H_buffer, mode="scan")  # Y_seq: (B, F*P, D), H_T: (B, P, S)
+        self.H_buffer = H_T.detach() # update buffer to carry over to next window 
 
-        # # Token-wise (C_t ⊙ h_t) already used inside self.ssm.readout for Y_seq;
-        # # we need (C_t ⊙ h_t) again to produce keys. Recompute C_t for keys:
-        # Xf = rearrange(X_win, "b t p d -> (b t) p d")
-        # _, _, C_t = self.ssm._selective_params(Xf)                 # [BF,P,S]
-        # C_t = rearrange(C_t, "(b t) p s -> b t p s", b=B, t=F)     # [B,F,P,S]
-        # Ch = C_t * H_seq                                           # [B,F,P,S]
 
         # Project to key space per token, then flatten time*patch -> tokens
         K_mem_tokens = self.proj_k_mem(Y_seq)   # [B,T,Inner]
