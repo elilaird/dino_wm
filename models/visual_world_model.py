@@ -23,6 +23,7 @@ class VWorldModel(nn.Module):
         train_predictor=False,
         train_decoder=True,
         decoder_loss_type='mse',
+        step_size=1,
     ):
         super().__init__()
         self.num_hist = num_hist
@@ -40,6 +41,7 @@ class VWorldModel(nn.Module):
         self.proprio_dim = proprio_dim * num_proprio_repeat 
         self.action_dim = action_dim * num_action_repeat
         self.decoder_loss_type = decoder_loss_type 
+        self.step_size = step_size
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -339,10 +341,11 @@ class VWorldModel(nn.Module):
         """
 
         if not bypass_memory_reset:
-            if hasattr(self.predictor, "reset_memory"):
-                self.predictor.reset_memory()
-            elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "reset_memory"):
-                self.predictor.module.reset_memory()
+            self.reset_predictor_memory()
+
+
+        # set step size to 1 for autoregressive rollout
+        self.set_predictor_step_size(1)
         
 
         num_obs_init = obs_0['visual'].shape[1]
@@ -363,4 +366,21 @@ class VWorldModel(nn.Module):
         z_new = z_pred[:, -1 :, ...] # take only the next pred
         z = torch.cat([z, z_new], dim=1)
         z_obses, z_acts = self.separate_emb(z)
+
+        self.set_predictor_step_size(self.step_size) # reset step size to original
         return z_obses, z
+
+    def set_predictor_step_size(self, step_size):
+
+        if hasattr(self.predictor, "set_step_size"):
+            self.predictor.set_step_size(step_size)
+            print(f"Set predictor step size to {step_size}")
+        elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "set_step_size"):
+            self.predictor.module.set_step_size(step_size)
+            print(f"Set predictor step size to {step_size}")
+
+    def reset_predictor_memory(self):
+        if hasattr(self.predictor, "reset_memory"):
+            self.predictor.reset_memory()
+        elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "reset_memory"):
+            self.predictor.module.reset_memory()

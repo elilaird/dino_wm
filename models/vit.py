@@ -300,7 +300,7 @@ class ViTPredictor(nn.Module):
         )
         self.pool = pool
 
-    def forward(self, x):
+    def forward(self, x, H=None):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
@@ -352,7 +352,7 @@ class ViTPredictorWithPersistentTokens(nn.Module):
             self.persistent_tokens = None
 
     def forward(
-        self, x
+        self, x, H=None
     ):  # x: (b, window_size * H/patch_size * W/patch_size, 384)
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
@@ -456,7 +456,7 @@ class AdditiveControlViTPredictor(nn.Module):
             dim, depth, heads, dim_head, mlp_dim, dim, alpha_init, dropout
         )
 
-    def forward(self, x):
+    def forward(self, x, H=None):
         """
         x: (b, num_frames * num_patches, dim) - visual/proprio embeddings only
         actions: (b, num_frames, action_dim) - separate action input (optional)
@@ -501,7 +501,7 @@ class MAGTransformerBlock(nn.Module):
         if self.gate_type == "sigmoid_convex":
             self.V_y = nn.Linear(dim, dim)
 
-    def forward(self, x):
+    def forward(self, x, H=None):
         x = self.pre_norm(x)
         x_in = x
         x = x + self.attention(x)
@@ -642,7 +642,7 @@ class MAGViTPredictor(nn.Module):
             use_residual=use_residual,
         )
 
-    def forward(self, x):
+    def forward(self, x, H=None):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
@@ -923,7 +923,7 @@ class MACViTPredictor(nn.Module):
             proj_k_eq_q,
         )
 
-    def forward(self, x):
+    def forward(self, x, H=None):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
@@ -1215,7 +1215,7 @@ class LookupViTPredictor(nn.Module):
             dim_head,
         )
 
-    def forward(self, x):
+    def forward(self, x, H=None):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
@@ -1235,6 +1235,7 @@ class StateSpaceTransformer(nn.Module):
         depth,
         heads,
         mlp_dim,
+        step_size,
         dropout=0.0,
         dim_head=64,
         dt: float = 1.0,  # could change to frameskip
@@ -1253,7 +1254,9 @@ class StateSpaceTransformer(nn.Module):
         self.dt = dt
         self.num_patches = num_patches
         self.ssm_type = ssm_type
+        self.step_size = step_size
         assert ssm_type in {"lti", "mamba"}, "Invalid SSM type"
+        print(f"Step size: {step_size}")
 
         if use_gate:
             self.gate = nn.Linear(dim, dim)
@@ -1300,28 +1303,32 @@ class StateSpaceTransformer(nn.Module):
         n_frames = T // self.num_patches
 
         if self.H_buffer is None:
-                self.H_buffer = self.init_state(B, x.device)
+            self.H_buffer = self.init_state(B, x.device)
 
         if mode == "step":  
             # iterate through frames to aggregate memory
             M_new = []
+            hs = []
             h_new = self.H_buffer
             for i in range(n_frames):
                 x_i = x[:, i * self.num_patches : (i + 1) * self.num_patches, :]
                 h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)
                 M_new.append(m_i)
+                hs.append(h_new.detach())
 
             M_new = torch.cat(M_new, dim=1)
-            self.H_buffer = h_new.detach()
+
+            # this is to handle difference step sizes (autoregressive vs windowed training)
+            self.H_buffer = hs[min(self.step_size - 1, n_frames - 1)]
 
         elif mode == "scan":
             x = rearrange(x, "b (t p) d -> b t p d", t=T//self.num_patches)
-            _, M_new, H_T = self.ssm_cell(x, self.H_buffer, mode="scan")
-            self.H_buffer = H_T.detach()
+            H, M_new, _ = self.ssm_cell(x, self.H_buffer, mode="scan")
+            self.H_buffer = H[:, min(self.step_size - 1, n_frames - 1)].detach()
 
         return M_new
 
-    def forward(self, x):
+    def forward(self, x, H=None):
         B, T, D = x.shape
         x = self.ln_in(x)
 
@@ -1351,6 +1358,9 @@ class StateSpaceTransformer(nn.Module):
 
     def reset_memory(self):
         self.H_buffer = None
+    
+    def set_step_size(self, step_size):
+        self.step_size = step_size
 
 class MemoryInjectionSSMTransformer(StateSpaceTransformer):
     def __init__(
@@ -1362,13 +1372,14 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
         depth,
         heads,
         mlp_dim,
+        step_size,
         dropout=0.0,
         dim_head=64,
         dt: float = 1.0, # could change to frameskip
         alpha_init: float = 0.1,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init, **kwargs)
+        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init, **kwargs)
 
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
         self.alphas = nn.ParameterList([
@@ -1418,13 +1429,14 @@ class MemoryInjectionPreSSMTransformer(MemoryInjectionSSMTransformer):
         depth,
         heads,
         mlp_dim,
+        step_size,
         dropout=0.0,
         dim_head=64,
         dt: float = 1.0, # could change to frameskip
         alpha_init: float = 0.1,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init, **kwargs)
+        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init, **kwargs)
 
     def forward(self, x):
         x = self.ln_in(x)
@@ -1445,13 +1457,14 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
         depth,
         heads,
         mlp_dim,
+        step_size,
         dropout=0.0,
         dim_head=64,
         dt: float = 1.0, # could change to frameskip
         zero_init: bool = False,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, zero_init=zero_init, **kwargs)
+        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, zero_init=zero_init, **kwargs)
         
     
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
@@ -1497,6 +1510,7 @@ class LoRAMemSSMTransformer(StateSpaceTransformer):
         depth,
         heads,
         mlp_dim,
+        step_size,
         dropout=0.0,
         dim_head=64,
         dt: float = 1.0,
@@ -1506,7 +1520,7 @@ class LoRAMemSSMTransformer(StateSpaceTransformer):
         lora_dropout: float = 0.0,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout, **kwargs)
+        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout, **kwargs)
 
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
         self.layers = nn.ModuleList([])
@@ -1569,12 +1583,13 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
         depth,
         heads,
         mlp_dim,
+        step_size,
         dropout=0.0,
         dim_head=64,
         dt: float = 1.0,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, **kwargs)
+        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, **kwargs)
     
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
         self.layers = nn.ModuleList([])
@@ -1606,7 +1621,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
 
 
 class StateSpaceViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type, injection_type, alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, zero_init: bool = False, lora_rank: int = 64, lora_alpha: float = 1.0, lora_dropout: float = 0.0):
+    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type, injection_type, step_size, alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, zero_init: bool = False, lora_rank: int = 64, lora_alpha: float = 1.0, lora_dropout: float = 0.0):
         super().__init__()
         self.dim = dim
         self.state_size = state_size
@@ -1631,27 +1646,27 @@ class StateSpaceViTPredictor(nn.Module):
 
         if injection_type == "sst":
             self.transformer = StateSpaceTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, use_gate=use_gate
+                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, use_gate=use_gate
             )
         elif injection_type == "misst":
             self.transformer = MemoryInjectionSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init
+                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init
             )
         elif injection_type == "misst_pre":
             self.transformer = MemoryInjectionPreSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init
+                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init
             )
         elif injection_type == "adamem":
             self.transformer = AdaMemSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init, zero_init=zero_init
+                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init, zero_init=zero_init
             )
         elif injection_type == "loramem_post":
             self.transformer = LoRAMemSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt, alpha_init=alpha_init, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout
             )
         elif injection_type == "ssm_ca":
             self.transformer = MemCrossAttentionSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, dropout, dim_head, dt
+                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt
             )
         else:
             raise ValueError(f"Invalid injection type: {injection_type}")
@@ -1664,6 +1679,9 @@ class StateSpaceViTPredictor(nn.Module):
 
     def reset_memory(self):
         self.transformer.reset_memory()
+    
+    def set_step_size(self, step_size):
+        self.transformer.set_step_size(step_size)
 
 
  ###### HYBRID ARCHITECTURES ######

@@ -6,3 +6,4 @@ train_encoder: False
 train_predictor: True
 train_decoder: True
 decoder_loss_type: ${decoder_loss_type}
+step_size: ${step_size}

@@ -11,3 +11,4 @@ alpha_init: 0.1
 ssm_type: "lti"
 injection_type: "adamem"
 zero_init: False
+step_size: ${step_size}

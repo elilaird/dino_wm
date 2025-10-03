@@ -10,3 +10,4 @@ dt: 1.0
 alpha_init: 0.1
 ssm_type: "lti"
 injection_type: "ssm_ca"
+step_size: ${step_size}

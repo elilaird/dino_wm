@@ -936,16 +936,19 @@ class Trainer:
         compute_end = torch.cuda.Event(enable_timing=True)
         prev_time = time.perf_counter()
 
+        self.model.set_predictor_step_size(self.step_size)
+
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
 
-            if hasattr(self.model.predictor, "reset_memory"):
-                self.model.predictor.reset_memory()
-            elif hasattr(self.model.predictor, "module") and hasattr(
-                self.model.predictor.module, "reset_memory"
-            ):
-                self.model.predictor.module.reset_memory()
+            # if hasattr(self.model.predictor, "reset_memory"):
+            #     self.model.predictor.reset_memory()
+            # elif hasattr(self.model.predictor, "module") and hasattr(
+            #     self.model.predictor.module, "reset_memory"
+            # ):
+            #     self.model.predictor.module.reset_memory()
+            self.model.reset_predictor_memory()
 
             batch_loss_components = defaultdict(float)
 
@@ -1104,12 +1107,13 @@ class Trainer:
             B, N = obs["visual"].shape[:2]
             num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
 
-            if hasattr(self.model.predictor, "reset_memory"):
-                self.model.predictor.reset_memory()
-            elif hasattr(self.model.predictor, "module") and hasattr(
-                self.model.predictor.module, "reset_memory"
-            ):
-                self.model.predictor.module.reset_memory()
+            # if hasattr(self.model.predictor, "reset_memory"):
+            #     self.model.predictor.reset_memory()
+            # elif hasattr(self.model.predictor, "module") and hasattr(
+            #     self.model.predictor.module, "reset_memory"
+            # ):
+            #     self.model.predictor.module.reset_memory()
+            self.model.reset_predictor_memory()
 
             for window_idx in range(num_windows):
                 start_idx = window_idx * self.step_size
@@ -1305,12 +1309,13 @@ class Trainer:
             B, N = obs["visual"].shape[:2]
             num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
 
-            if hasattr(self.model.predictor, "reset_memory"):
-                self.model.predictor.reset_memory()
-            elif hasattr(self.model.predictor, "module") and hasattr(
-                self.model.predictor.module, "reset_memory"
-            ):
-                self.model.predictor.module.reset_memory()
+            # if hasattr(self.model.predictor, "reset_memory"):
+            #     self.model.predictor.reset_memory()
+            # elif hasattr(self.model.predictor, "module") and hasattr(
+            #     self.model.predictor.module, "reset_memory"
+            # ):
+            #     self.model.predictor.module.reset_memory()
+            self.model.reset_predictor_memory()
 
             for window_idx in range(num_windows):
                 start_idx = window_idx * self.step_size
@@ -1648,12 +1653,13 @@ class Trainer:
         # rollout with both num_hist and 1 frame as context
         num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
 
-        if hasattr(self.model.predictor, "reset_memory"):
-            self.model.predictor.reset_memory()
-        elif hasattr(self.model.predictor, "module") and hasattr(
-            self.model.predictor.module, "reset_memory"
-        ):
-            self.model.predictor.module.reset_memory()
+        # if hasattr(self.model.predictor, "reset_memory"):
+        #     self.model.predictor.reset_memory()
+        # elif hasattr(self.model.predictor, "module") and hasattr(
+        #     self.model.predictor.module, "reset_memory"
+        # ):
+        #     self.model.predictor.module.reset_memory()
+        self.model.reset_predictor_memory()
 
         # sample traj
         for idx in range(num_rollout):
@@ -2027,15 +2033,6 @@ class Trainer:
                 if self.accelerator.is_main_process:
                     self.plot_imgs(imgs, half_hist, f"{plotting_dir}/e{self.epoch}_{idx}_oracle_{oracle_mode}.png")
                 
-                
-
-
-
-
-
- 
-        
-    
 
     def save_horizon_results_to_file(self, horizon_logs, filepath):
         if not horizon_logs:
