@@ -1746,14 +1746,18 @@ class DualAttentionSSMKeys(nn.Module):
 
         self.H_buffer = None
 
-    def _reshape_for_ssm(self, x):
+    def _reshape_for_ssm(self, x, num_frames=None):
         """
         x: [B, T, D] with T = n_frames * n_patches
         returns X_win: [B, T_frames, P, D]
         """
         B, T, D = x.shape
         P = self.n_patches
-        F = self.n_frames
+        if num_frames is None:
+            F = T // P
+        else:
+            F = num_frames
+
         assert T == P * F, f"T ({T}) must equal n_patches*n_frames ({P*F})"
         X_win = rearrange(x, "b (t p) d -> b t p d", t=F, p=P)  # [B, F, P, D]
         return X_win
@@ -1771,7 +1775,7 @@ class DualAttentionSSMKeys(nn.Module):
         returns: y [B,T,D], H_T [B,P,S]
         """
         B, T, D = x.shape
-        P, F = self.n_patches, self.n_frames
+        P, F = self.n_patches, T // self.n_patches
 
         x = self.norm(x)
 
@@ -1781,7 +1785,7 @@ class DualAttentionSSMKeys(nn.Module):
         V = self._heads(self.to_v(x))        # [B,H,T,dh]
 
         # ---- SSM trajectory to build K_mem = Proj(C_t ⊙ h_t)
-        X_win = self._reshape_for_ssm(x)     # [B,F,P,D]
+        X_win = self._reshape_for_ssm(x, num_frames=F)     # [B,F,P,D]
         if self.H_buffer is None:
             self.H_buffer = self.ssm.init_state(B, P, device=x.device, dtype=x.dtype)  # [B,P,S]
         _, Y_seq, H_T = self.ssm(X_win, self.H_buffer, mode="scan")  # Y_seq: (B, F*P, D), H_T: (B, P, S)
