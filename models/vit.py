@@ -1840,6 +1840,9 @@ class DualAttentionSSMKeys(nn.Module):
         out = self._unheads(out)            # [B,T,Inner]
         y = self.to_out(out)                # [B,T,D]
         return y, H_T
+    
+    def reset_memory(self):
+        self.H_buffer = None
 
 
 class HybridTransformerLayer(nn.Module):
@@ -1879,6 +1882,9 @@ class HybridTransformerLayer(nn.Module):
         # ff + residual
         x = x + self.ff(x)
         return x, H_T
+    
+    def reset_memory(self):
+        self.attn.reset_memory()
 
 
 class HybridTransformer(nn.Module):
@@ -1930,6 +1936,10 @@ class HybridTransformer(nn.Module):
             H0_i = H0 if (i == 0) else None
             x, _ = layer(x, H0=H0_i)
         return self.norm(x)
+    
+    def reset_memory(self):
+        for layer in self.layers:
+            layer.reset_memory()
 
 
 class HybridViTPredictor(nn.Module):
@@ -1982,3 +1992,6 @@ class HybridViTPredictor(nn.Module):
         x = self.dropout(x)
         x = self.transformer(x)
         return x
+    
+    def reset_memory(self):
+        self.transformer.reset_memory()
