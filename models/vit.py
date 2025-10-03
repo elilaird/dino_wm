@@ -1695,7 +1695,8 @@ class DualAttentionSSMKeys(nn.Module):
         dropout=0.0,
         n_patches=1,
         n_frames=1,
-        fusion="sum",                 # 'sum' | 'diff' | 'mul' | 'gate'
+        fusion="sum",                 # 'sum' | 'diff' | 'mul' | 'gate' | 'logit_diff'
+        fusion_scale=0.1,
         bias=None
     ):
         super().__init__()
@@ -1708,6 +1709,7 @@ class DualAttentionSSMKeys(nn.Module):
         self.n_patches = n_patches
         self.n_frames = n_frames
         self.fusion = fusion
+        self.fusion_scale = fusion_scale
         self.ssm = MambaSSMCell(d_model=dim, n_state= dim // 2) # replace dt_rank eventually
 
         # projections
@@ -1799,42 +1801,47 @@ class DualAttentionSSMKeys(nn.Module):
         dots_beta = dots_beta.masked_fill(mask, float("-inf"))
         dots_alpha = dots_alpha.masked_fill(mask, float("-inf"))
 
-        # softmax maps
-        attn_beta = self.attend(dots_beta)    # [B,H,T,T]
-        attn_alpha = self.attend(dots_alpha)  # [B,H,T,T]
-
-        # optional dropout on maps
-        attn_beta = self.dropout(attn_beta)
-        attn_alpha = self.dropout(attn_alpha)
-
-        # ---- Fuse attentions / outputs
-        if self.fusion == "sum":
-            # (alphaV + betaV)
-            out = torch.matmul(attn_alpha, V) + torch.matmul(attn_beta, V)
-
-        elif self.fusion == "diff":
-            # (alphaV - betaV)  (differential attention)
-            out = torch.matmul(attn_alpha, V) - torch.matmul(attn_beta, V)
-
-        elif self.fusion == "mul":
-            # multiplicative agreement: softmax(alpha ⊙ beta)
-            attn_agree = attn_alpha * attn_beta
-            # renormalize per head
-            attn_agree = attn_agree / (attn_agree.sum(dim=-1, keepdim=True) + 1e-9)
-            out = torch.matmul(attn_agree, V)
-
-        elif self.fusion == "gate":
-            # token-wise gate g \in [0,1], shared across heads
-            # use the input x to predict gate; broadcast to heads
-            g = self.gate(x).clamp(0.0, 1.0)            # [B,T,1]
-            g = g.transpose(1, 2)                       # [B,1,T]
-            g = g.unsqueeze(-1)                         # [B,1,T,1]
-            out_alpha = torch.matmul(attn_alpha, V)
-            out_beta  = torch.matmul(attn_beta, V)
-            out = g * out_alpha + (1.0 - g) * out_beta  # broadcast over heads
-
+        # logit fusion 
+        if self.fusion == "logit_diff":
+            attn = self.attend(dots_beta - self.fusion_scale * dots_alpha)
+            attn = self.dropout(attn)
+            out = torch.matmul(attn, V)
+        
+        # value fusion
         else:
-            raise ValueError(f"Unknown fusion '{self.fusion}'")
+            # softmax maps
+            attn_beta = self.attend(dots_beta)    # [B,H,T,T]
+            attn_alpha = self.attend(dots_alpha)  # [B,H,T,T]
+
+            # optional dropout on maps
+            attn_beta = self.dropout(attn_beta)
+            attn_alpha = self.dropout(attn_alpha)
+
+            # ---- Fuse attentions / outputs
+            if self.fusion == "sum":
+                # (alphaV + betaV)
+                out = torch.matmul(attn_alpha, V) + torch.matmul(attn_beta, V)
+
+            elif self.fusion == "diff":
+                # (alphaV - betaV)  (differential attention)
+                out = torch.matmul(attn_alpha, V) - torch.matmul(attn_beta, V)
+
+            elif self.fusion == "mul":
+                # multiplicative agreement: softmax(alpha ⊙ beta)
+                attn_agree = attn_alpha * attn_beta
+                # renormalize per head
+                attn_agree = attn_agree / (attn_agree.sum(dim=-1, keepdim=True) + 1e-9)
+                out = torch.matmul(attn_agree, V)
+
+            elif self.fusion == "gate":
+                # token-wise gate g \in [0,1], shared across heads
+                # use the input x to predict gate; broadcast to heads
+                g = self.gate(x).clamp(0.0, 1.0)            # [B,T,1]
+                g = g.transpose(1, 2)                       # [B,1,T]
+                g = g.unsqueeze(-1)                         # [B,1,T,1]
+                out_alpha = torch.matmul(attn_alpha, V)
+                out_beta  = torch.matmul(attn_beta, V)
+                out = g * out_alpha + (1.0 - g) * out_beta  # broadcast over heads
 
         # ---- Merge heads and project out
         out = self._unheads(out)            # [B,T,Inner]
