@@ -1867,6 +1867,7 @@ class HybridTransformerLayer(nn.Module):
         n_frames,
         dropout=0.0,
         fusion="sum",
+        fusion_scale=0.1,
         bias=None
     ):
         super().__init__()
@@ -1878,6 +1879,7 @@ class HybridTransformerLayer(nn.Module):
             n_patches=n_patches,
             n_frames=n_frames,
             fusion=fusion,
+            fusion_scale=fusion_scale,
             bias=bias
         )
         self.ff = FeedForward(dim, mlp_dim, dropout=dropout)
@@ -1911,6 +1913,7 @@ class HybridTransformer(nn.Module):
         n_frames,
         dropout=0.0,
         fusion="sum",
+        fusion_scale=0.1,
         bias=None
     ):
         super().__init__()
@@ -1927,6 +1930,7 @@ class HybridTransformer(nn.Module):
                 n_frames=n_frames,
                 dropout=dropout,
                 fusion=fusion,
+                fusion_scale=fusion_scale,
                 bias=bias
             )
             self.layers.append(layer)
@@ -1964,6 +1968,7 @@ class HybridViTPredictor(nn.Module):
         dropout=0.0,
         emb_dropout=0.0,
         fusion="sum",
+        fusion_scale=0.1,
     ):
         super().__init__()
         assert pool in {
@@ -1990,6 +1995,7 @@ class HybridViTPredictor(nn.Module):
             n_frames=num_frames,
             dropout=dropout,
             fusion=fusion,
+            fusion_scale=fusion_scale,
         )
         self.pool = pool
 
