@@ -1798,17 +1798,19 @@ class DualAttentionSSMKeys(nn.Module):
 
         # apply same causal/structured mask
         mask = self.bias[:, :, :T, :T] == 0  # [1,1,T,T] -> bool
-        dots_beta = dots_beta.masked_fill(mask, float("-inf"))
-        dots_alpha = dots_alpha.masked_fill(mask, float("-inf"))
 
         # logit fusion 
         if self.fusion == "logit_diff":
-            attn = self.attend(dots_beta - self.fusion_scale * dots_alpha)
-            attn = self.dropout(attn)
+            diff = dots_beta - self.fusion_scale * dots_alpha  
+            diff = diff.masked_fill(mask, float("-inf"))
+            attn = self.dropout(self.attend(diff))
             out = torch.matmul(attn, V)
         
         # value fusion
         else:
+            dots_beta = dots_beta.masked_fill(mask, float("-inf"))
+            dots_alpha = dots_alpha.masked_fill(mask, float("-inf"))
+            
             # softmax maps
             attn_beta = self.attend(dots_beta)    # [B,H,T,T]
             attn_alpha = self.attend(dots_alpha)  # [B,H,T,T]
