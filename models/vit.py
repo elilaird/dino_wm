@@ -1846,12 +1846,12 @@ class DualAttentionSSMKeys(nn.Module):
 
             # ---- Fuse attentions / outputs
             if self.fusion == "sum":
-                # (alphaV + betaV)
-                out = torch.matmul(attn_alpha, V) + torch.matmul(attn_beta, V)
+                # (betaV + scale * alphaV)
+                out = torch.matmul(attn_beta, V) + self.fusion_scale * torch.matmul(attn_alpha, V)
 
             elif self.fusion == "diff":
-                # (alphaV - betaV)  (differential attention)
-                out = torch.matmul(attn_alpha, V) - torch.matmul(attn_beta, V)
+                # (betaV - scale * alphaV)  (differential attention)
+                out = torch.matmul(attn_beta, V) - self.fusion_scale * torch.matmul(attn_alpha, V)
 
             elif self.fusion == "mul":
                 # multiplicative agreement: softmax(alpha ⊙ beta)
@@ -1868,7 +1868,7 @@ class DualAttentionSSMKeys(nn.Module):
                 g = g.unsqueeze(-1)                         # [B,1,T,1]
                 out_alpha = torch.matmul(attn_alpha, V)
                 out_beta  = torch.matmul(attn_beta, V)
-                out = g * out_alpha + (1.0 - g) * out_beta  # broadcast over heads
+                out = g * out_beta + (1.0 - g) * self.fusion_scale * out_alpha  # broadcast over heads
 
         # ---- Merge heads and project out
         out = self._unheads(out)            # [B,T,Inner]
