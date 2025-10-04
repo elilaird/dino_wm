@@ -1877,6 +1877,9 @@ class DualAttentionSSMKeys(nn.Module):
     
     def reset_memory(self):
         self.H_buffer = None
+    
+    def set_step_size(self, step_size):
+        self.step_size = step_size
 
 
 class HybridTransformerLayer(nn.Module):
@@ -2051,3 +2054,201 @@ class HybridViTPredictor(nn.Module):
 
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)
+
+
+
+class PerTokenCLSMemoryBlock(nn.Module):
+    """
+    Per-token CLS memory (Mamba-style) with parallel training and streaming step.
+
+    Parallel mode:
+      - X_seq: [B, T, P, D]  (frames × patches)
+      - Build u_t from X_seq[:, t] (no future leakage)
+      - SSM.scan over {u_t} -> c_t, shift to tilde{c}_t = c_{t-1}
+      - Prepend tilde{c}_t as CLS to each frame, do masked attention once
+      - Drop CLS outputs, FFN
+
+    Streaming mode (step):
+      - Input single frame X_t: [B, P, D] and H_prev: [B, 1, S]
+      - Read with c_prev (from H_prev), attention, then write H_next with u_t
+    """
+
+    def __init__(
+        self,
+        dim,
+        heads,
+        dim_head,
+        mlp_dim,
+        n_patches,
+        step_size,
+        ssm_state=64,
+        dropout=0.0,
+        post_attn_write: bool = False,  # True: write u_t from post-attn tokens in streaming step
+    ):
+        super().__init__()
+        self.D = dim
+        self.P = n_patches
+        self.heads = heads
+        self.dim_head = dim_head
+        self.inner = heads * dim_head
+        self.scale = dim_head**-0.5
+        self.post_attn_write = post_attn_write
+        self.step_size = step_size
+
+        # norms
+        self.attn_norm = nn.LayerNorm(dim)
+        self.val_norm = nn.LayerNorm(dim)
+
+        # Q/K/V projections for attention over [CLS, tokens]
+        self.to_q = nn.Linear(dim, self.inner, bias=False)
+        self.to_k = nn.Linear(dim, self.inner, bias=False)
+        self.to_v = nn.Linear(dim, self.inner, bias=False)
+
+        # output projection
+        self.to_out = nn.Sequential(
+            nn.Linear(self.inner, dim), nn.Dropout(dropout)
+        )
+        self.drop = nn.Dropout(dropout)
+
+        # Mamba-like SSM and readout h_t -> c_t
+        self.ssm = MambaSSMCell(d_model=dim, n_state=ssm_state)
+        self.mem_readout = nn.Linear(ssm_state, dim, bias=False)
+
+        # simple write summary (mean). swap with AttnPool if you want.
+        self.write_norm = nn.LayerNorm(dim)
+
+        # FFN
+        self.ff = FeedForward(dim, mlp_dim, dropout=dropout)
+
+        self.H_buffer = None
+
+    # ---------- helpers ----------
+    def _heads(self, t):
+        return rearrange(t, "b n (h d) -> b h n d", h=self.heads)
+
+    def _unheads(self, t):
+        return rearrange(t, "b h n d -> b n (h d)")
+
+    def _mask_for(self, T, P_plus, device, dtype):
+        # build a block-causal mask for T frames with (P_plus) tokens per frame
+        # this matches your style: full within-frame, causal across frames
+        # generate_mask_matrix expects (npatch, nwindow), patch-major flattening.
+        bias = generate_mask_matrix(P_plus, T).to(
+            device=device, dtype=dtype
+        )  # [1,1,TP,TP]
+        return bias
+
+    # ---------- PARALLEL (training/inference in batch) ----------
+    def forward(self, X_seq, H0=None):
+        """
+        X_seq: [B, T, P, D]  (frames × patches)
+        H0   : [B, 1, S] initial memory state (zeros if None)
+        returns:
+          Y_seq: [B, T, P, D] (tokens updated)
+          H_T  : [B, 1, S] final memory state
+        """
+        B, T, P, D = X_seq.shape
+        assert P == self.P, f"Expected P={self.P}, got {P}"
+
+        # 1) ----- build per-frame summaries u_t -----
+        # use pre-attn tokens for summaries (stable, single pass)
+        U = self.write_norm(X_seq).mean(dim=2)  # [B, T, D]
+
+        # 2) ----- SSM scan over u_t -> h_t -> c_t -----
+        U_as_tp = U.unsqueeze(2)  # [B, T, 1, D] to fit MambaSSMCell.scan API
+
+        if self.H_buffer is None:
+            self.H_buffer = self.ssm.init_state(
+                B, 1, device=X_seq.device, dtype=X_seq.dtype
+            )  # [B,1,S]
+
+        H_seq, _, _ = self.ssm(U_as_tp, self.H_buffer, mode="scan")  # H_seq: [B,T,1,S]
+        C_seq = self.mem_readout(H_seq.squeeze(2))  # [B, T, D]
+        self.H_buffer = H_seq[:, min(self.step_size - 1, T - 1)].detach() # update buffer to carry over to next window 
+
+        # # 3) ----- shift memory so each frame sees c_{t-1} -----
+        # c_prev0 = self.mem_readout(self.H_buffer.squeeze(1))  # [B, D]
+        # C_shift = torch.cat(
+        #     [c_prev0.unsqueeze(1), C_seq[:, :-1]], dim=1
+        # )  # [B, T, D]
+
+        # 4) ----- prepend per-frame CLS and do a single masked attention -----
+        CLS = C_seq.unsqueeze(2)  # [B, T, 1, D]
+        X_plus = torch.cat([CLS, X_seq], dim=2)  # [B, T, 1+P, D]
+        TPp = (1 + P) * T
+
+        bias = self._mask_for(
+            T=T, P_plus=1 + P, device=X_seq.device, dtype=X_seq.dtype
+        )  # [1,1,TPp,TPp]
+
+        Xf = rearrange(
+            self.attn_norm(X_plus), "b t p d -> b (t p) d"
+        )  # [B, TPp, D]
+        Q = self._heads(self.to_q(Xf))  # [B,H,TPp,dh]
+        K = self._heads(self.to_k(Xf))  # [B,H,TPp,dh]
+        V = self._heads(self.to_v(self.val_norm(Xf)))  # [B,H,TPp,dh]
+
+        dots = torch.matmul(Q, K.transpose(-1, -2)) * (self.dim_head**-0.5)
+        dots = dots.masked_fill(bias == 0, float("-inf"))
+        A = torch.softmax(dots, dim=-1)
+        A = self.drop(A)
+
+        Y = torch.matmul(A, V)  # [B,H,TPp,dh]
+        Y = self._unheads(Y)  # [B,TPp,Inner]
+        Y = self.to_out(Y)  # [B,TPp,D]
+
+        Y_tp = rearrange(Y, "b (t p) d -> b t p d", t=T, p=(1 + P))
+        Y_tokens = Y_tp[:, :, 1:, :]  # drop CLS outputs -> [B,T,P,D]
+
+        # 5) ----- FFN on tokens -----
+        Y_tokens = Y_tokens + self.ff(Y_tokens)
+        return Y_tokens
+
+    # ---------- STREAMING (step-wise) ----------
+    @torch.no_grad()
+    def init_state(self, B, device=None, dtype=None):
+        return self.ssm.init_state(B, 1, device=device, dtype=dtype)  # [B,1,S]
+
+    def set_step_size(self, step_size):
+        self.step_size = step_size
+
+    # def step(self, X_t, H_prev):
+    #     """
+    #     X_t  : [B, P, D]  (one frame)
+    #     H_prev: [B, 1, S]
+    #     returns:
+    #       Y_t   : [B, P, D]  (updated tokens)
+    #       H_next: [B, 1, S]
+    #     """
+    #     B, P, D = X_t.shape
+    #     assert P == self.P
+
+    #     # READ with c_prev
+    #     c_prev = self.mem_readout(H_prev.squeeze(1))  # [B, D]
+    #     X_plus = torch.cat([c_prev.unsqueeze(1), X_t], dim=1)  # [B, 1+P, D]
+
+    #     # local masked attention within a single frame + CLS at same frame
+    #     # here the mask is trivial: CLS and tokens are all at same time, no future leakage within frame
+    #     # allow full within-frame attention (no temporal mask needed)
+    #     Xf = self.attn_norm(X_plus)  # [B,1+P,D]
+    #     Q = self._heads(self.to_q(Xf))
+    #     K = self._heads(self.to_k(Xf))
+    #     V = self._heads(self.to_v(self.val_norm(Xf)))
+    #     dots = torch.matmul(Q, K.transpose(-1, -2)) * (self.dim_head**-0.5)
+    #     A = torch.softmax(dots, dim=-1)
+    #     A = self.drop(A)
+    #     Y = torch.matmul(A, V)
+    #     Y = self._unheads(Y)
+    #     Y = self.to_out(Y)  # [B,1+P,D]
+    #     Y_tokens = Y[:, 1:, :]  # drop CLS
+
+    #     # WRITE: build u_t and update H
+    #     if self.post_attn_write:
+    #         U_t = self.write_norm(Y_tokens).mean(dim=1)  # [B, D]
+    #     else:
+    #         U_t = self.write_norm(X_t).mean(dim=1)
+
+    #     H_next, _ = self.ssm.step(
+    #         U_t.unsqueeze(1), H_prev
+    #     )  # reuse cell.step expects [B,P=1,D]
+    #     return Y_tokens, H_next
