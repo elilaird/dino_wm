@@ -1684,7 +1684,7 @@ class StateSpaceViTPredictor(nn.Module):
         self.transformer.set_step_size(step_size)
 
 
- ###### HYBRID ARCHITECTURES ######
+###### HYBRID ARCHITECTURES ######
 class DualAttentionSSMKeys(nn.Module):
     """
     Dual attention combining:
@@ -1708,6 +1708,7 @@ class DualAttentionSSMKeys(nn.Module):
     def __init__(
         self,
         dim,
+        step_size,
         heads=8,
         dim_head=64,
         dropout=0.0,
@@ -1720,6 +1721,7 @@ class DualAttentionSSMKeys(nn.Module):
         super().__init__()
 
         self.dim = dim
+        self.step_size = step_size
         self.heads = heads
         self.dim_head = dim_head
         self.inner = heads * dim_head
@@ -1802,12 +1804,13 @@ class DualAttentionSSMKeys(nn.Module):
         K_cnt = self._heads(self.to_k_cnt(x))# [B,H,T,dh]
         V = self._heads(self.to_v(x))        # [B,H,T,dh]
 
-        # ---- SSM trajectory to build K_mem = Proj(C_t ⊙ h_t)
-        X_win = self._reshape_for_ssm(x, num_frames=F)     # [B,F,P,D]
         if self.H_buffer is None:
             self.H_buffer = self.ssm.init_state(B, P, device=x.device, dtype=x.dtype)  # [B,P,S]
-        _, Y_seq, H_T = self.ssm(X_win, self.H_buffer, mode="scan")  # Y_seq: (B, F*P, D), H_T: (B, P, S)
-        self.H_buffer = H_T.detach() # update buffer to carry over to next window 
+
+        # ---- SSM trajectory to build K_mem = Proj(C_t ⊙ h_t)
+        X_win = self._reshape_for_ssm(x, num_frames=F)     # [B,F,P,D]
+        H, Y_seq, _ = self.ssm(X_win, self.H_buffer, mode="scan")  # Y_seq: (B, F*P, D), H_T: (B, P, S)
+        self.H_buffer = H[:, min(self.step_size - 1, F - 1)].detach() # update buffer to carry over to next window 
 
 
         # Project to key space per token, then flatten time*patch -> tokens
@@ -1870,7 +1873,7 @@ class DualAttentionSSMKeys(nn.Module):
         # ---- Merge heads and project out
         out = self._unheads(out)            # [B,T,Inner]
         y = self.to_out(out)                # [B,T,D]
-        return y, H_T
+        return y
     
     def reset_memory(self):
         self.H_buffer = None
@@ -1889,6 +1892,7 @@ class HybridTransformerLayer(nn.Module):
         mlp_dim,
         n_patches,
         n_frames,
+        step_size,
         dropout=0.0,
         fusion="sum",
         fusion_scale=0.1,
@@ -1897,6 +1901,7 @@ class HybridTransformerLayer(nn.Module):
         super().__init__()
         self.attn = DualAttentionSSMKeys(
             dim=dim,
+            step_size=step_size,
             heads=heads,
             dim_head=dim_head,
             dropout=dropout,
@@ -1910,14 +1915,17 @@ class HybridTransformerLayer(nn.Module):
 
     def forward(self, x, H0=None):
         # attention + residual
-        attn_out, H_T = self.attn(x, H0=H0)
+        attn_out = self.attn(x, H0=H0)
         x = x + attn_out
         # ff + residual
         x = x + self.ff(x)
-        return x, H_T
+        return x
     
     def reset_memory(self):
         self.attn.reset_memory()
+
+    def set_step_size(self, step_size):
+        self.attn.set_step_size(step_size)
 
 
 class HybridTransformer(nn.Module):
@@ -1935,6 +1943,7 @@ class HybridTransformer(nn.Module):
         mlp_dim,
         n_patches,
         n_frames,
+        step_size,
         dropout=0.0,
         fusion="sum",
         fusion_scale=0.1,
@@ -1952,6 +1961,7 @@ class HybridTransformer(nn.Module):
                 mlp_dim=mlp_dim,
                 n_patches=n_patches,
                 n_frames=n_frames,
+                step_size=step_size,
                 dropout=dropout,
                 fusion=fusion,
                 fusion_scale=fusion_scale,
@@ -1969,12 +1979,16 @@ class HybridTransformer(nn.Module):
         # Carry SSM state per-layer independently; thread H only within the layer.
         for i, layer in enumerate(self.layers):
             H0_i = H0 if (i == 0) else None
-            x, _ = layer(x, H0=H0_i)
+            x = layer(x, H0=H0_i)
         return self.norm(x)
     
     def reset_memory(self):
         for layer in self.layers:
             layer.reset_memory()
+    
+    def set_step_size(self, step_size):
+        for layer in self.layers:
+            layer.set_step_size(step_size)
 
 
 class HybridViTPredictor(nn.Module):
@@ -1987,6 +2001,7 @@ class HybridViTPredictor(nn.Module):
         depth,
         heads,
         mlp_dim,
+        step_size,
         pool="cls",
         dim_head=64,
         dropout=0.0,
@@ -2017,6 +2032,7 @@ class HybridViTPredictor(nn.Module):
             mlp_dim=mlp_dim,
             n_patches=num_patches,
             n_frames=num_frames,
+            step_size=step_size,
             dropout=dropout,
             fusion=fusion,
             fusion_scale=fusion_scale,
@@ -2029,6 +2045,9 @@ class HybridViTPredictor(nn.Module):
         x = self.dropout(x)
         x = self.transformer(x)
         return x
-    
+
     def reset_memory(self):
         self.transformer.reset_memory()
+
+    def set_step_size(self, step_size):
+        self.transformer.set_step_size(step_size)
