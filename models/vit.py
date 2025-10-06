@@ -2090,9 +2090,8 @@ class DualAttentionSSMKeys(nn.Module):
         return rearrange(t, "b h n d -> b n (h d)")
 
     def ssm_forward(self, x):
-        for layer, ff in self.ssm:
+        for layer in self.ssm:
             x = layer(x) + x
-            x = ff(x) + x
         return x
     
     def forward(self, x, H0=None):
