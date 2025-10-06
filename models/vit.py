@@ -16,6 +16,7 @@ from .memory_injection import (
     MemoryLoRAAdapter,
     MemoryLoRAProj,
 )
+from .rope import RoPEAttention, GlobalRoPEPositionalEncoding
 
 # helpers
 NUM_FRAMES = 1
@@ -1807,7 +1808,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
                 )
             )
             # Generate bias mask for cross-attention to prevent attending to future memory tokens
-            bias = generate_mask_matrix(self.num_patches, self.num_frames)
+            bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
             self.injection_layers.append(
                 CrossAttention(dim, heads, dim_head, dropout, bias=bias)
             )
