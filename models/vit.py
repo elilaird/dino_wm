@@ -91,7 +91,7 @@ class Attention(nn.Module):
 
 
 class CrossAttention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, bias=None):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
@@ -112,6 +112,10 @@ class CrossAttention(nn.Module):
             else nn.Identity()
         )
 
+        if bias is None:
+            bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
+        self.register_buffer("bias", bias)
+
     def forward(self, x, context):
         B, T, C = x.size()
         B_c, T_c, C_c = context.size()
@@ -127,6 +131,9 @@ class CrossAttention(nn.Module):
         v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        
+        # apply causal mask - prevent attending to future memory tokens
+        dots = dots.masked_fill(self.bias[:, :, :T, :T_c] == 0, float("-inf"))
 
         attn = self.attend(dots)
         attn = self.dropout(attn)
@@ -1799,8 +1806,10 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
                     ]
                 )
             )
+            # Generate bias mask for cross-attention to prevent attending to future memory tokens
+            bias = generate_mask_matrix(self.num_patches, self.num_frames)
             self.injection_layers.append(
-                CrossAttention(dim, heads, dim_head, dropout)
+                CrossAttention(dim, heads, dim_head, dropout, bias=bias)
             )
 
     def forward(self, x):

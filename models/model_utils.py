@@ -93,3 +93,32 @@ def generate_mac_mask_matrix(npatch, nwindow, n_persistent, n_retrieved):
 
     mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
     return mask
+
+
+def generate_diagonal_frame_mask(num_patches, num_frames, device=None, dtype=None):
+    """
+    Generate a diagonal mask for frame-level cross-attention.
+    Each frame's patches can only attend to that frame's memory tokens.
+    
+    Args:
+        num_patches: Number of patches per frame
+        num_frames: Number of frames
+        device: Device for the tensor
+        dtype: Data type for the tensor
+    
+    Returns:
+        mask: [num_frames * num_patches, num_frames * num_patches] boolean mask
+    """
+    total_tokens = num_frames * num_patches
+    mask = torch.zeros(total_tokens, total_tokens, device=device, dtype=torch.bool)
+    
+    for frame_idx in range(num_frames):
+        start_patch = frame_idx * num_patches
+        end_patch = (frame_idx + 1) * num_patches
+        start_mem = frame_idx * num_patches
+        end_mem = (frame_idx + 1) * num_patches
+        
+        # Allow all patches in this frame to attend to all memory tokens in this frame
+        mask[start_patch:end_patch, start_mem:end_mem] = True
+    
+    return mask
