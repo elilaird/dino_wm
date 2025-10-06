@@ -107,18 +107,15 @@ def generate_diagonal_frame_mask(num_patches, num_frames, device=None, dtype=Non
         dtype: Data type for the tensor
     
     Returns:
-        mask: [num_frames * num_patches, num_frames * num_patches] boolean mask
+        mask: [1, 1, num_frames * num_patches, num_frames * num_patches] boolean mask
     """
-    total_tokens = num_frames * num_patches
-    mask = torch.zeros(total_tokens, total_tokens, device=device, dtype=torch.bool)
+    zeros = torch.zeros(num_patches, num_patches, device=device, dtype=torch.bool)
+    ones = torch.ones(num_patches, num_patches, device=device, dtype=torch.bool)
+    rows = []
     
-    for frame_idx in range(num_frames):
-        start_patch = frame_idx * num_patches
-        end_patch = (frame_idx + 1) * num_patches
-        start_mem = frame_idx * num_patches
-        end_mem = (frame_idx + 1) * num_patches
-        
-        # Allow all patches in this frame to attend to all memory tokens in this frame
-        mask[start_patch:end_patch, start_mem:end_mem] = True
+    for i in range(num_frames):
+        row = torch.cat([zeros] * i + [ones] + [zeros] * (num_frames - i - 1), dim=1)
+        rows.append(row)
     
+    mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
     return mask
