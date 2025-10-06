@@ -75,7 +75,7 @@ proprio_emb_dim: 12
 num_proprio_repeat: 1
 
 overlap_size: 6
-step_size: 4
+step_size: 10
 num_frames: 500
 num_hist: 9
 num_pred: 1 

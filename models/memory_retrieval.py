@@ -347,7 +347,7 @@ class MambaSSMCell(nn.Module):
         Y_seq = self.readout((C_t * H_seq).reshape(B * T, P, self.S)).view(
             B, T, P, self.D
         )
-        Y_seq = rearrange(Y_seq, "b t p d -> b (t p) d")
+        # Y_seq = rearrange(Y_seq, "b t p d -> b (t p) d")
 
         H_T = H_seq[:, -1, :, :]  # [B,P,S]
         return H_seq, Y_seq, H_T
@@ -391,14 +391,14 @@ class MambaLayer(nn.Module):
         self.gelu = nn.GELU()
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(d_model)
-        self.linear = nn.Linear(d_model, d_model)
+        self.linear_pre_glu = nn.Linear(d_model, d_model*2)
         self.glu = nn.GLU()
 
         self.H_cache = None
 
     def forward(self, x):
         if self.H_cache is None:
-            self.H_cache = self.init_state(x.size(0))
+            self.H_cache = self.init_state(x.size(0), device=x.device)
 
         y = self.layer_norm(x)
         H_new, y, _ = self.ssm(y, self.H_cache, mode="scan")
@@ -406,14 +406,14 @@ class MambaLayer(nn.Module):
 
         y = self.gelu(y)
         y = self.dropout(y)
-        y = self.linear(y)
+        y = self.linear_pre_glu(y)
         y = self.glu(y)
         y = self.dropout(y)
 
         return x + y
 
-    def init_state(self, B: int):
-        return self.ssm.init_state(B, self.num_patches, self.n_state)
+    def init_state(self, B: int, device=None):
+        return self.ssm.init_state(B, self.num_patches, self.n_state, device=device)
 
     def reset_memory(self):
         self.H_cache = None

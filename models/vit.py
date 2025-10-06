@@ -1341,7 +1341,7 @@ class StateSpaceTransformer(nn.Module):
     def _build_mem_blocks(
         self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
     ):
-        self.mem_blocks = []
+        self.mem_blocks = nn.ModuleList([])
         for _ in range(n_mem_blocks):
             self.mem_blocks.append(
                 nn.ModuleList(
@@ -1428,10 +1428,12 @@ class StateSpaceTransformer(nn.Module):
     #     return M_new
 
     def _mem_blocks_forward(self, x):
+        B, T, D = x.shape
+        x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
         for mem_block, ff in self.mem_blocks:
             x = mem_block(x)
             x = x + ff(x)
-        return x
+        return rearrange(x, "b t p d -> b (t p) d")
 
     def forward(self, x, H=None):
         B, T, D = x.shape
@@ -1457,18 +1459,18 @@ class StateSpaceTransformer(nn.Module):
 
         return self.ln_out(ctx)
 
-    @torch.no_grad()
-    def init_state(self, B: int, device=None):
-        return self.ssm_cell.init_state(
-            B, self.num_patches, self.state_dim, device=device
-        )
+    # @torch.no_grad()
+    # def init_state(self, B: int, device=None):
+    #     return self.ssm_cell.init_state(
+    #         B, self.num_patches, self.state_dim, device=device
+    #     )
 
     def reset_memory(self):
-        for mem_block in self.mem_blocks:
+        for mem_block, _ in self.mem_blocks:
             mem_block.reset_memory()
 
     def set_step_size(self, step_size):
-        for mem_block in self.mem_blocks:
+        for mem_block, _ in self.mem_blocks:
             mem_block.set_step_size(step_size)
 
 
