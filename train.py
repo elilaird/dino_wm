@@ -1097,6 +1097,14 @@ class Trainer:
                             f"val_{k}": [v] for k, v in context_recall_logs.items()
                         }
                         self.logs_update(context_recall_logs)
+                    
+                    # recent memory recall
+                    if OmegaConf.select(self.cfg, "eval_recent_memory_recall", default=False):
+                        recent_memory_recall_logs = self.recent_memory_recall_rollout(self.val_traj_dset, num_rollouts=self.cfg.num_eval_samples)
+                        recent_memory_recall_logs = {
+                            f"val_{k}": [v] for k, v in recent_memory_recall_logs.items()
+                        }
+                        self.logs_update(recent_memory_recall_logs)
 
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
@@ -1107,12 +1115,6 @@ class Trainer:
             B, N = obs["visual"].shape[:2]
             num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
 
-            # if hasattr(self.model.predictor, "reset_memory"):
-            #     self.model.predictor.reset_memory()
-            # elif hasattr(self.model.predictor, "module") and hasattr(
-            #     self.model.predictor.module, "reset_memory"
-            # ):
-            #     self.model.predictor.module.reset_memory()
             self.model.reset_predictor_memory()
 
             for window_idx in range(num_windows):
@@ -1297,6 +1299,18 @@ class Trainer:
                         f"test_{k}": [v] for k, v in context_recall_logs.items()
                     }
                     self.logs_update(context_recall_logs)
+                
+                # recent memory recall
+                if OmegaConf.select(self.cfg, "eval_recent_memory_recall", default=False):
+                    recent_memory_recall_logs = self.recent_memory_recall_rollout(
+                        self.test_traj_dset, 
+                        num_rollouts=self.cfg.num_eval_samples, 
+                        plotting_dir=f"test_results/e{self.epoch}_recent_memory_recall"
+                    )
+                    recent_memory_recall_logs = {
+                        f"test_{k}": [v] for k, v in recent_memory_recall_logs.items()
+                    }
+                    self.logs_update(recent_memory_recall_logs)
 
         self.accelerator.wait_for_everyone()
 
@@ -1814,6 +1828,7 @@ class Trainer:
             os.makedirs(plotting_dir, exist_ok=True)
         self.accelerator.wait_for_everyone()
         logs = {}
+        self.model.eval()
 
         if num_rollout is None:
             num_rollout = len(dset)
@@ -1823,6 +1838,8 @@ class Trainer:
             obs, actions, _, _ = dset[idx]
             obs = {k:v.unsqueeze(0).to(self.device) for k, v in obs.items()}
             actions = actions.unsqueeze(0).to(self.device)
+
+            self.model.reset_predictor_memory()
 
             # context phase
             num_ctx_windows = 1 + (query_phase_start_idx - self.window_size) // self.step_size
@@ -1897,6 +1914,7 @@ class Trainer:
         self.accelerator.wait_for_everyone()
         logs = {}
         burn_in_steps = [0, 5, 10, 15, 20]
+        self.model.eval()
 
         if num_rollout is None:
             num_rollout = len(dset)
@@ -1909,6 +1927,8 @@ class Trainer:
                 obs, actions, _, _ = dset[idx]
                 obs = {k:v.unsqueeze(0).to(self.device) for k, v in obs.items()}
                 actions = actions.unsqueeze(0).to(self.device)
+
+                self.model.reset_predictor_memory()
 
                 # context phase
                 num_ctx_windows = 1 + (local_query_phase_start_idx - self.window_size) // self.step_size
@@ -1982,6 +2002,7 @@ class Trainer:
             os.makedirs(plotting_dir, exist_ok=True)
         self.accelerator.wait_for_everyone()
         logs = {}
+        self.model.eval()
 
         # for a given context length, burn in num_hist context frames
         # encode next window of frames as the memory latents
@@ -1994,6 +2015,8 @@ class Trainer:
             obs, actions, _, _ = dset[idx]
             obs = {k:v.unsqueeze(0).to(self.device) for k, v in obs.items()}
             actions = actions.unsqueeze(0).to(self.device)
+
+            self.model.reset_predictor_memory()
 
             errors = []
             # loop through trajectory using windows
@@ -2032,6 +2055,101 @@ class Trainer:
                 )
                 if self.accelerator.is_main_process:
                     self.plot_imgs(imgs, half_hist, f"{plotting_dir}/e{self.epoch}_{idx}_oracle_{oracle_mode}.png")
+                
+
+    def recent_memory_recall_rollout(self, dset, num_rollouts=10, plotting_dir=None, rand_start_end=True):
+        if plotting_dir is None:
+            plotting_dir = f"recent_memory_recall_plots/e{self.epoch}_recent_memory_recall"
+        if self.accelerator.is_main_process:
+            os.makedirs(plotting_dir, exist_ok=True)
+        self.accelerator.wait_for_everyone()
+        logs = {}
+        self.model.eval()
+        horizons = [5, 10, 20, 50]
+        
+        for idx in range(num_rollouts):
+            local_logs = defaultdict(list)
+
+            # sample random starting point
+            valid_traj = False
+            while not valid_traj:
+                traj_idx = np.random.randint(0, len(dset))
+                obs, act, _, _ = dset[traj_idx]
+                act = act.to(self.device)
+                if rand_start_end:
+                    if (
+                        obs["visual"].shape[0]
+                        > horizons[-1] + 1
+                    ):
+                        start = np.random.randint(
+                            self.window_size,
+                            obs["visual"].shape[0] - self.window_size
+                            - horizons[-1] - 1,
+                        )
+                    else:
+                        start = self.window_size
+
+                    max_horizon = (
+                        obs["visual"].shape[0] - start - self.window_size
+                    )
+                    if max_horizon > horizons[-1]:
+                        valid_traj = True
+                else:
+                    valid_traj = True
+                    start = self.window_size
+           
+            # loop through horizon lengths
+            for horizon in horizons:
+                
+                obs_0 = {}
+                for k in obs.keys():
+                    obs_0[k] = obs[k][(start-self.window_size):(start+horizon)].unsqueeze(0).to(self.device)
+                act_0 = act[(start-self.window_size):(start+horizon)].unsqueeze(0).to(self.device)
+
+                # context phase
+                self.model.set_predictor_step_size(1)
+                self.model.reset_predictor_memory()
+                for start_idx in range(horizon):
+                    end_idx = min(start_idx + self.window_size, self.window_size + horizon)
+                    obs_window = {
+                        k: v[:, start_idx:end_idx] for k, v in obs_0.items()
+                    }
+                    act_window = act_0[:, start_idx:end_idx]
+
+                    # burn in for context phase
+                    self.model(obs_window, act_window) # no tracking until query phase
+
+                # rollout same sequence
+                z_obses, _ = self.model.rollout(obs_0, act_0, bypass_memory_reset=True)
+                z_obses = {k: v[:, -(horizon+1):-1] for k, v in z_obses.items()} # offset by 1 to exclude the last predicted frame which has no gt
+                decoded_pred = self.model.decode_obs(z_obses)[0]
+
+                obs_tgt = {k: v[:, -horizon:] for k, v in obs_0.items()}
+                z_tgts = self.model.encode_obs(obs_tgt)
+                decoded_tgt = self.model.decode_obs(z_tgts)[0]
+
+                # save plots
+                imgs = torch.cat(
+                    [
+                        obs_tgt["visual"][0].cpu(),
+                        decoded_tgt["visual"][0].cpu(),
+                        decoded_pred["visual"][0].cpu(),
+                    ],
+                    dim=0,
+                )
+                if self.accelerator.is_main_process:
+                    self.plot_imgs(imgs, horizon, f"{plotting_dir}/e{self.epoch}_{idx}_recent_memory_recall_h{horizon}.png")
+                
+                z_cycle = self.model.encode_obs({"visual": decoded_pred["visual"], "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
+                div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": decoded_pred["visual"], "proprio": obs_tgt["proprio"]}, z_cycle)
+                for k in div_loss.keys():
+                    local_logs[f"{k}_err_recent_memory_recall_h{horizon}"].append(div_loss[k].cpu().numpy())
+                
+        # aggregate over rollouts
+        for k, v in local_logs.items():
+            logs[k] = np.mean(v)
+
+        return logs
                 
 
     def save_horizon_results_to_file(self, horizon_logs, filepath):
