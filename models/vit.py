@@ -2089,6 +2089,12 @@ class DualAttentionSSMKeys(nn.Module):
     def _unheads(self, t):
         return rearrange(t, "b h n d -> b n (h d)")
 
+    def ssm_forward(self, x):
+        for layer, ff in self.ssm:
+            x = layer(x) + x
+            x = ff(x) + x
+        return x
+    
     def forward(self, x, H0=None):
         """
         x:  [B, T, D]
@@ -2105,10 +2111,8 @@ class DualAttentionSSMKeys(nn.Module):
         K_cnt = self._heads(self.to_k_cnt(x))  # [B,H,T,dh]
         V = self._heads(self.to_v(x))  # [B,H,T,dh]
 
-        # ---- SSM trajectory to build K_mem = Proj(C_t ⊙ h_t)
-        X_win = self._reshape_for_ssm(x, num_frames=F)  # [B,F,P,D]
-        Y_seq = self.ssm(X_win).reshape(B, F*P, D)  # Y_seq: (B, F*P, D)
-
+        Y_seq = self._reshape_for_ssm(x, num_frames=F)  # [B,F,P,D]
+        Y_seq = self.ssm_forward(Y_seq).reshape(B, F*P, D)
 
         # Project to key space per token, then flatten time*patch -> tokens
         K_mem_tokens = self.proj_k_mem(Y_seq)  # [B,T,Inner]
