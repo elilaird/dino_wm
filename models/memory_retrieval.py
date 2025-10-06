@@ -1,3 +1,4 @@
+from tkinter.constants import Y
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -352,7 +353,7 @@ class MambaSSMCell(nn.Module):
         return H_seq, Y_seq, H_T
 
     # ---------- Backward-compatible forward ----------
-    def forward(self, X_t, H_t=None, dt: float = 1.0, mode: str = "step"):
+    def forward(self, X_t, H_t=None, mode: str = "scan"):
         """
         mode == "step":   X_t: [B,P,D], H_t:[B,P,S] -> (H_{t+1}, Y_{t+1})
         mode == "scan":   X_t: [B,T,P,D], H_t:[B,P,S] -> (H_seq, Y_seq, H_T)
@@ -373,3 +374,49 @@ class MambaSSMCell(nn.Module):
             return self.scan(X_t, H_t)
         else:
             raise ValueError("mode must be 'step' or 'scan'")
+
+class MambaLayer(nn.Module):
+    # ssm block following: Facing off World Model Backbones paper
+
+    def __init__(self, d_model: int, n_state: int, step_size: int, num_patches: int, dt_rank: int = 4, dropout: float = 0.0):
+        super().__init__()
+        self.d_model = d_model
+        self.n_state = n_state
+        self.step_size = step_size
+        self.dt_rank = dt_rank
+        self.dropout = dropout
+        self.num_patches = num_patches
+
+        self.ssm = MambaSSMCell(d_model, n_state, dt_rank)
+        self.gelu = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.linear = nn.Linear(d_model, d_model)
+        self.glu = nn.GLU()
+
+        self.H_cache = None
+
+    def forward(self, x):
+        if self.H_cache is None:
+            self.H_cache = self.init_state(x.size(0))
+
+        y = self.layer_norm(x)
+        H_new, y, _ = self.ssm(y, self.H_cache, mode="scan")
+        self.H_cache = H_new[:, min(self.step_size - 1, y.size(1) - 1)].detach()
+
+        y = self.gelu(y)
+        y = self.dropout(y)
+        y = self.linear(y)
+        y = self.glu(y)
+        y = self.dropout(y)
+
+        return x + y
+
+    def init_state(self, B: int):
+        return self.ssm.init_state(B, self.num_patches, self.n_state)
+
+    def reset_memory(self):
+        self.H_cache = None
+
+    def set_step_size(self, step_size):
+        self.step_size = step_size

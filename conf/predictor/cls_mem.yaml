@@ -1,11 +1,9 @@
-_target_: models.vit.HybridViTPredictor
+_target_: models.vit.CLSMemoryPredictor
 depth: 6
 heads: 16
 mlp_dim: 2048
 dropout: 0.1
 emb_dropout: 0
 pool: 'mean'
-fusion: 'sum'
-fusion_scale: 0.1
 step_size: ${step_size}
 n_mem_blocks: ${n_mem_blocks}

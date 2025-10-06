@@ -4,10 +4,10 @@ heads: 16
 mlp_dim: 2048
 dropout: 0.1
 emb_dropout: 0
-state_size: 256
+state_dim: 256
 use_gate: False
-dt: 1.0
+dt_rank: 16
 alpha_init: 0.1
-ssm_type: "lti"
 injection_type: "misst"
 step_size: ${step_size}
+n_mem_blocks: ${n_mem_blocks}

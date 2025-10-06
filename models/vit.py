@@ -5,12 +5,22 @@ from einops import rearrange
 from torch.nn import functional as F
 
 from .model_utils import *
-from .memory_retrieval import NeuralMemory, LookupMemory, SSMCell, MambaSSMCell
-from .memory_injection import AdaptiveLayerNorm, MemoryLoRAAdapter, MemoryLoRAProj
+from .memory_retrieval import (
+    NeuralMemory,
+    LookupMemory,
+    MambaLayer,
+    MambaSSMCell,
+)
+from .memory_injection import (
+    AdaptiveLayerNorm,
+    MemoryLoRAAdapter,
+    MemoryLoRAProj,
+)
 
 # helpers
 NUM_FRAMES = 1
 NUM_PATCHES = 1
+
 
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):
@@ -127,8 +137,18 @@ class CrossAttention(nn.Module):
 
 
 class AttentionWithLoRA(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, bias=None,
-                 lora_rank=16, lora_alpha=8.0, zero_init=True, lora_on_out=False):
+    def __init__(
+        self,
+        dim,
+        heads=8,
+        dim_head=64,
+        dropout=0.0,
+        bias=None,
+        lora_rank=16,
+        lora_alpha=8.0,
+        zero_init=True,
+        lora_on_out=False,
+    ):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
@@ -147,7 +167,8 @@ class AttentionWithLoRA(nn.Module):
         # optional out proj
         self.to_out = (
             nn.Sequential(nn.Linear(inner_dim, dim), nn.Dropout(dropout))
-            if project_out else nn.Identity()
+            if project_out
+            else nn.Identity()
         )
 
         if bias is None:
@@ -155,14 +176,38 @@ class AttentionWithLoRA(nn.Module):
         self.register_buffer("bias", bias)
 
         # ---- LoRA: memory-conditioned adapters on Q, K, V (and optionally out) ----
-        # We’ll treat the packed qkv as three separate augmented linears.
-        self.q_lora = MemoryLoRAProj(in_dim=dim, out_dim=inner_dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
-        self.k_lora = MemoryLoRAProj(in_dim=dim, out_dim=inner_dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
-        self.v_lora = MemoryLoRAProj(in_dim=dim, out_dim=inner_dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
+        # We'll treat the packed qkv as three separate augmented linears.
+        self.q_lora = MemoryLoRAProj(
+            in_dim=dim,
+            out_dim=inner_dim,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            zero_init=zero_init,
+        )
+        self.k_lora = MemoryLoRAProj(
+            in_dim=dim,
+            out_dim=inner_dim,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            zero_init=zero_init,
+        )
+        self.v_lora = MemoryLoRAProj(
+            in_dim=dim,
+            out_dim=inner_dim,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            zero_init=zero_init,
+        )
 
         self.lora_on_out = lora_on_out
         if lora_on_out and project_out:
-            self.out_lora = MemoryLoRAProj(in_dim=inner_dim, out_dim=dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
+            self.out_lora = MemoryLoRAProj(
+                in_dim=inner_dim,
+                out_dim=dim,
+                rank=lora_rank,
+                alpha=lora_alpha,
+                zero_init=zero_init,
+            )
         else:
             self.out_lora = None
 
@@ -200,13 +245,23 @@ class AttentionWithLoRA(nn.Module):
 
         out = self.to_out(out)
         if self.out_lora is not None and memory_tokens is not None:
-            out = out + self.out_lora(rearrange(out, "b n c -> b n c"), memory_tokens)
+            out = out + self.out_lora(
+                rearrange(out, "b n c -> b n c"), memory_tokens
+            )
 
         return out
 
+
 class FeedForwardWithLoRA(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout=0.0,
-                 lora_rank=16, lora_alpha=8.0, zero_init=True):
+    def __init__(
+        self,
+        dim,
+        hidden_dim,
+        dropout=0.0,
+        lora_rank=16,
+        lora_alpha=8.0,
+        zero_init=True,
+    ):
         super().__init__()
         self.ln = nn.LayerNorm(dim)
 
@@ -218,8 +273,20 @@ class FeedForwardWithLoRA(nn.Module):
         self.do2 = nn.Dropout(dropout)
 
         # LoRA adapters for both projections
-        self.lora1 = MemoryLoRAProj(in_dim=dim,       out_dim=hidden_dim, rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
-        self.lora2 = MemoryLoRAProj(in_dim=hidden_dim,out_dim=dim,        rank=lora_rank, alpha=lora_alpha, zero_init=zero_init)
+        self.lora1 = MemoryLoRAProj(
+            in_dim=dim,
+            out_dim=hidden_dim,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            zero_init=zero_init,
+        )
+        self.lora2 = MemoryLoRAProj(
+            in_dim=hidden_dim,
+            out_dim=dim,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            zero_init=zero_init,
+        )
 
     def forward(self, x, memory_tokens=None):
         x = self.ln(x)
@@ -510,7 +577,7 @@ class MAGTransformerBlock(nn.Module):
         if self.gate_type == "sigmoid":
             gate = torch.sigmoid(self.W_y(x)) * self.W_m(
                 self.mem.retrieve(self.W_Q(x))
-            ) 
+            )
         elif self.gate_type == "sigmoid_convex":
             g = torch.sigmoid(self.W_y(x))
             y = self.V_y(x)
@@ -749,8 +816,8 @@ class MACTransformerBlock(nn.Module):
 
         # prepend persistent tokens and retrieved memory slots
         if self.n_persistent > 0:
-            P = (
-                self.P.unsqueeze(0).expand(B, -1, -1)
+            P = self.P.unsqueeze(0).expand(
+                B, -1, -1
             )  # [B, n_persistent, d_model]
             x_aug = torch.cat(
                 [P, h, x_seg], dim=1
@@ -787,11 +854,7 @@ class MACTransformerBlock(nn.Module):
                 assert (
                     out.shape[1] == memory_tokens.shape[1]
                 ), f"out.shape[1] ({out.shape[1]}) != memory_tokens.shape[1] ({memory_tokens.shape[1]})"
-                k = (
-                    self.mem_W_Q(out)
-                    if self.proj_k_eq_q
-                    else out
-                )
+                k = self.mem_W_Q(out) if self.proj_k_eq_q else out
                 self.mem.update_from_batch(
                     k.detach(),
                     memory_tokens.detach(),
@@ -1228,17 +1291,17 @@ class LookupViTPredictor(nn.Module):
 class StateSpaceTransformer(nn.Module):
     def __init__(
         self,
-        ssm_type,
         dim,
-        state_size,
         num_patches,
         depth,
         heads,
         mlp_dim,
+        state_dim,
         step_size,
+        n_mem_blocks,
         dropout=0.0,
         dim_head=64,
-        dt: float = 1.0,  # could change to frameskip
+        dt_rank: int = 16,
         use_gate: bool = False,
         **kwargs,
     ):
@@ -1249,35 +1312,63 @@ class StateSpaceTransformer(nn.Module):
         self.mlp_dim = mlp_dim
         self.dropout = dropout
         self.dim_head = dim_head
-        self.state_size = state_size
         self.use_gate = use_gate
-        self.dt = dt
+        self.dt_rank = dt_rank
         self.num_patches = num_patches
-        self.ssm_type = ssm_type
+        self.state_dim = state_dim
         self.step_size = step_size
-        assert ssm_type in {"lti", "mamba"}, "Invalid SSM type"
-        print(f"Step size: {step_size}")
+        self.n_mem_blocks = n_mem_blocks
 
         if use_gate:
             self.gate = nn.Linear(dim, dim)
         else:
             self.gate = None
 
-        if ssm_type == "lti":
-            self.ssm_cell = SSMCell(dim, state_size)
-        elif ssm_type == "mamba":
-            self.ssm_cell = MambaSSMCell(dim, state_size, dt_rank=8)
-        else:
-            raise ValueError(f"Invalid SSM cell type: {ssm_type}")
-
         self.ln_in = nn.LayerNorm(dim)
         self.ln_out = nn.LayerNorm(dim)
 
-        self.H_buffer = None # keep track of hidden memory state w/o passing around
+        self.H_buffer = (
+            None  # keep track of hidden memory state w/o passing around
+        )
 
-        self._build_transformer(depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs)
+        self._build_transformer(
+            depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+        )
+        self._build_mem_blocks(
+            n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
+        )
 
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+    def _build_mem_blocks(
+        self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
+    ):
+        self.mem_blocks = []
+        for _ in range(n_mem_blocks):
+            self.mem_blocks.append(
+                nn.ModuleList(
+                    [
+                        MambaLayer(
+                            d_model=dim,
+                            n_state=state_dim,
+                            step_size=self.step_size,
+                            num_patches=self.num_patches,
+                            dt_rank=dt_rank,
+                            dropout=dropout,
+                        ),
+                        nn.Sequential(
+                            nn.LayerNorm(dim),
+                            nn.Linear(dim, mlp_dim),
+                            nn.GELU(),
+                            nn.Dropout(dropout),
+                            nn.Linear(mlp_dim, dim),
+                            nn.Dropout(dropout),
+                        ),
+                    ]
+                )
+            )
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
         self.ln_fuse = nn.LayerNorm(dim)
         self.layers = nn.ModuleList([])
         for _ in range(depth):
@@ -1289,50 +1380,64 @@ class StateSpaceTransformer(nn.Module):
                             heads,
                             dim_head,
                             dropout,
-                            bias=generate_mask_with_memory(
-                                NUM_PATCHES, NUM_FRAMES
-                            ) if not kwargs.get("use_gate", False) else None,
+                            bias=(
+                                generate_mask_with_memory(
+                                    NUM_PATCHES, NUM_FRAMES
+                                )
+                                if not kwargs.get("use_gate", False)
+                                else None
+                            ),
                         ),
                         FeedForward(dim, mlp_dim, dropout),
                     ]
                 )
             )
 
-    def _ssm_forward(self, x, mode: str = "step"):
-        B, T, D = x.shape
-        n_frames = T // self.num_patches
+    # def _ssm_forward(self, x, mode: str = "scan"):
+    #     B, T, D = x.shape
+    #     n_frames = T // self.num_patches
 
-        if self.H_buffer is None:
-            self.H_buffer = self.init_state(B, x.device)
+    #     if self.H_buffer is None:
+    #         self.H_buffer = self.init_state(B, x.device)
 
-        if mode == "step":  
-            # iterate through frames to aggregate memory
-            M_new = []
-            hs = []
-            h_new = self.H_buffer
-            for i in range(n_frames):
-                x_i = x[:, i * self.num_patches : (i + 1) * self.num_patches, :]
-                h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)
-                M_new.append(m_i)
-                hs.append(h_new.detach())
+    #     if mode == "step":
+    #         # iterate through frames to aggregate memory
+    #         M_new = []
+    #         hs = []
+    #         h_new = self.H_buffer
+    #         for i in range(n_frames):
+    #             x_i = x[
+    #                 :, i * self.num_patches : (i + 1) * self.num_patches, :
+    #             ]
+    #             h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)
+    #             M_new.append(m_i)
+    #             hs.append(h_new.detach())
 
-            M_new = torch.cat(M_new, dim=1)
+    #         M_new = torch.cat(M_new, dim=1)
 
-            # this is to handle difference step sizes (autoregressive vs windowed training)
-            self.H_buffer = hs[min(self.step_size - 1, n_frames - 1)]
+    #         # this is to handle difference step sizes (autoregressive vs windowed training)
+    #         self.H_buffer = hs[min(self.step_size - 1, n_frames - 1)]
 
-        elif mode == "scan":
-            x = rearrange(x, "b (t p) d -> b t p d", t=T//self.num_patches)
-            H, M_new, _ = self.ssm_cell(x, self.H_buffer, mode="scan")
-            self.H_buffer = H[:, min(self.step_size - 1, n_frames - 1)].detach()
+    #     elif mode == "scan":
+    #         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
+    #         H, M_new, _ = self.ssm_cell(x, self.H_buffer, mode="scan")
+    #         self.H_buffer = H[
+    #             :, min(self.step_size - 1, n_frames - 1)
+    #         ].detach()
 
-        return M_new
+    #     return M_new
+
+    def _mem_blocks_forward(self, x):
+        for mem_block, ff in self.mem_blocks:
+            x = mem_block(x)
+            x = x + ff(x)
+        return x
 
     def forward(self, x, H=None):
         B, T, D = x.shape
-        x = self.ln_in(x)
 
-        M_new = self._ssm_forward(x)
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
 
         if self.use_gate:
             G = torch.sigmoid(self.gate(x))
@@ -1354,37 +1459,61 @@ class StateSpaceTransformer(nn.Module):
 
     @torch.no_grad()
     def init_state(self, B: int, device=None):
-        return self.ssm_cell.init_state(B, self.num_patches, self.state_size, device=device)
+        return self.ssm_cell.init_state(
+            B, self.num_patches, self.state_dim, device=device
+        )
 
     def reset_memory(self):
-        self.H_buffer = None
-    
+        for mem_block in self.mem_blocks:
+            mem_block.reset_memory()
+
     def set_step_size(self, step_size):
-        self.step_size = step_size
+        for mem_block in self.mem_blocks:
+            mem_block.set_step_size(step_size)
+
 
 class MemoryInjectionSSMTransformer(StateSpaceTransformer):
     def __init__(
         self,
-        ssm_type,
         dim,
-        state_size,
         num_patches,
         depth,
         heads,
         mlp_dim,
+        state_dim,
         step_size,
+        n_mem_blocks,
         dropout=0.0,
         dim_head=64,
-        dt: float = 1.0, # could change to frameskip
+        dt_rank: int = 16,
         alpha_init: float = 0.1,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init, **kwargs)
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            state_dim,
+            step_size,
+            n_mem_blocks,
+            dropout,
+            dim_head,
+            dt_rank,
+            alpha_init=alpha_init,
+            **kwargs,
+        )
 
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
-        self.alphas = nn.ParameterList([
-            nn.Parameter(torch.ones(1) * kwargs.get("alpha_init", 0.1)) for _ in range(depth)
-        ])
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.alphas = nn.ParameterList(
+            [
+                nn.Parameter(torch.ones(1) * kwargs.get("alpha_init", 0.1))
+                for _ in range(depth)
+            ]
+        )
 
         self.layers = nn.ModuleList([])
         self.injection_layers = nn.ModuleList([])
@@ -1402,72 +1531,100 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
                     ]
                 )
             )
-            self.injection_layers.append(
-                nn.Linear(dim, dim)
-            )
-    
+            self.injection_layers.append(nn.Linear(dim, dim))
+
     def forward(self, x):
         B, T, D = x.shape
+        M_new = self._mem_blocks_forward(x)
         x = self.ln_in(x)
-
-        M_new = self._ssm_forward(x)
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             x = x + ff(x)
             x = x + self.injection_layers[i](M_new) * self.alphas[i]
-            
+
         return self.ln_out(x)
+
 
 class MemoryInjectionPreSSMTransformer(MemoryInjectionSSMTransformer):
     def __init__(
         self,
-        ssm_type,
         dim,
-        state_size,
         num_patches,
         depth,
         heads,
         mlp_dim,
+        state_dim,
         step_size,
+        n_mem_blocks,
         dropout=0.0,
         dim_head=64,
-        dt: float = 1.0, # could change to frameskip
+        dt_rank: int = 16,
         alpha_init: float = 0.1,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init, **kwargs)
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            state_dim,
+            step_size,
+            n_mem_blocks,
+            dropout,
+            dim_head,
+            dt_rank,
+            alpha_init=alpha_init,
+            **kwargs,
+        )
 
     def forward(self, x):
+        M_new = self._mem_blocks_forward(x)
         x = self.ln_in(x)
-        M_new = self._ssm_forward(x)
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             x = x + self.injection_layers[i](M_new) * self.alphas[i]
             x = x + ff(x)
         return self.ln_out(x)
 
+
 class AdaMemSSMTransformer(StateSpaceTransformer):
     def __init__(
         self,
-        ssm_type,
         dim,
-        state_size,
         num_patches,
         depth,
         heads,
         mlp_dim,
+        state_dim,
         step_size,
+        n_mem_blocks,
         dropout=0.0,
         dim_head=64,
-        dt: float = 1.0, # could change to frameskip
+        dt_rank: int = 16,
         zero_init: bool = False,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, zero_init=zero_init, **kwargs)
-        
-    
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            state_dim,
+            step_size,
+            n_mem_blocks,
+            dropout,
+            dim_head,
+            dt_rank,
+            zero_init=zero_init,
+            **kwargs,
+        )
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
         self.layers = nn.ModuleList([])
         self.injection_layers = nn.ModuleList([])
         for _ in range(depth):
@@ -1485,13 +1642,14 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
                 )
             )
             self.injection_layers.append(
-                AdaptiveLayerNorm(dim, dim, zero_init=kwargs.get("zero_init", False))
+                AdaptiveLayerNorm(
+                    dim, dim, zero_init=kwargs.get("zero_init", False)
+                )
             )
 
     def forward(self, x):
+        M_new = self._mem_blocks_forward(x)
         x = self.ln_in(x)
-
-        M_new = self._ssm_forward(x)
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
@@ -1500,29 +1658,49 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
 
         return self.ln_out(x)
 
+
 class LoRAMemSSMTransformer(StateSpaceTransformer):
     def __init__(
         self,
-        ssm_type,
         dim,
-        state_size,
         num_patches,
         depth,
         heads,
         mlp_dim,
+        state_dim,
         step_size,
+        n_mem_blocks,
         dropout=0.0,
         dim_head=64,
-        dt: float = 1.0,
-        zero_init: bool = True,    # zero-init LoRA branch so it starts as a no-op
+        dt_rank: int = 16,
+        zero_init: bool = True,  # zero-init LoRA branch so it starts as a no-op
         lora_rank: int = 128,
         lora_alpha: float = 8.0,
         lora_dropout: float = 0.0,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout, **kwargs)
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            state_dim,
+            step_size,
+            n_mem_blocks,
+            dropout,
+            dim_head,
+            dt_rank,
+            zero_init=zero_init,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            **kwargs,
+        )
 
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
         self.layers = nn.ModuleList([])
         self.lora_post_attn = nn.ModuleList([])
         self.lora_post_ff = nn.ModuleList([])
@@ -1556,12 +1734,13 @@ class LoRAMemSSMTransformer(StateSpaceTransformer):
             )
 
     def forward(self, x):
+        M_new = self._mem_blocks_forward(x)
         x = self.ln_in(x)
 
-        M_new = self._ssm_forward(x)
-
         # --- transformer blocks with LoRA memory adapters ---
-        for (attn, ff), lora_attn, lora_ff in zip(self.layers, self.lora_post_attn, self.lora_post_ff):
+        for (attn, ff), lora_attn, lora_ff in zip(
+            self.layers, self.lora_post_attn, self.lora_post_ff
+        ):
             x = x + attn(x)
             # LoRA after attention
             x = x + lora_attn(x, M_new)
@@ -1576,22 +1755,37 @@ class LoRAMemSSMTransformer(StateSpaceTransformer):
 class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
     def __init__(
         self,
-        ssm_type,
         dim,
-        state_size,
         num_patches,
         depth,
         heads,
         mlp_dim,
+        state_dim,
         step_size,
+        n_mem_blocks,
         dropout=0.0,
         dim_head=64,
-        dt: float = 1.0,
+        dt_rank: int = 16,
         **kwargs,
     ):
-        super().__init__(ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, **kwargs)
-    
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            state_dim,
+            step_size,
+            n_mem_blocks,
+            dropout,
+            dim_head,
+            dt_rank,
+            **kwargs,
+        )
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
         self.layers = nn.ModuleList([])
         self.injection_layers = nn.ModuleList([])
         for _ in range(depth):
@@ -1608,23 +1802,45 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
             )
 
     def forward(self, x):
+        M_new = self._mem_blocks_forward(x)
         x = self.ln_in(x)
-
-        M_new = self._ssm_forward(x)
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             x = x + ff(x)
             x = x + self.injection_layers[i](x, M_new)
-            
+
         return self.ln_out(x)
 
 
 class StateSpaceViTPredictor(nn.Module):
-    def __init__(self, *, num_patches, num_frames, dim, state_size, depth, heads, mlp_dim, ssm_type, injection_type, step_size, alpha_init: float = 0.1, dropout=0.0, emb_dropout=0.0, dim_head=64, use_gate: bool = False, dt: float = 1.0, zero_init: bool = False, lora_rank: int = 64, lora_alpha: float = 1.0, lora_dropout: float = 0.0):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        state_dim,
+        depth,
+        heads,
+        mlp_dim,
+        injection_type,
+        step_size,
+        n_mem_blocks,
+        alpha_init: float = 0.1,
+        dropout=0.0,
+        emb_dropout=0.0,
+        dim_head=64,
+        use_gate: bool = False,
+        dt_rank: int = 16,
+        zero_init: bool = False,
+        lora_rank: int = 64,
+        lora_alpha: float = 1.0,
+        lora_dropout: float = 0.0,
+    ):
         super().__init__()
         self.dim = dim
-        self.state_size = state_size
+        self.state_dim = state_dim
         self.depth = depth
         self.heads = heads
         self.mlp_dim = mlp_dim
@@ -1646,27 +1862,97 @@ class StateSpaceViTPredictor(nn.Module):
 
         if injection_type == "sst":
             self.transformer = StateSpaceTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, use_gate=use_gate
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
+                use_gate=use_gate,
             )
         elif injection_type == "misst":
             self.transformer = MemoryInjectionSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
+                alpha_init=alpha_init,
             )
         elif injection_type == "misst_pre":
             self.transformer = MemoryInjectionPreSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
+                alpha_init=alpha_init,
             )
         elif injection_type == "adamem":
             self.transformer = AdaMemSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init, zero_init=zero_init
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
+                zero_init=zero_init,
             )
+                
         elif injection_type == "loramem_post":
             self.transformer = LoRAMemSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt, alpha_init=alpha_init, zero_init=zero_init, lora_rank=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
+                zero_init=zero_init,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
             )
+        
         elif injection_type == "ssm_ca":
             self.transformer = MemCrossAttentionSSMTransformer(
-                ssm_type, dim, state_size, num_patches, depth, heads, mlp_dim, step_size, dropout, dim_head, dt
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
             )
         else:
             raise ValueError(f"Invalid injection type: {injection_type}")
@@ -1679,7 +1965,7 @@ class StateSpaceViTPredictor(nn.Module):
 
     def reset_memory(self):
         self.transformer.reset_memory()
-    
+
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)
 
@@ -1714,9 +2000,9 @@ class DualAttentionSSMKeys(nn.Module):
         dropout=0.0,
         n_patches=1,
         n_frames=1,
-        fusion="sum",                 # 'sum' | 'diff' | 'mul' | 'gate' | 'logit_diff'
+        fusion="sum",  # 'sum' | 'diff' | 'mul' | 'gate' | 'logit_diff'
         fusion_scale=0.1,
-        bias=None
+        bias=None,
     ):
         super().__init__()
 
@@ -1725,12 +2011,14 @@ class DualAttentionSSMKeys(nn.Module):
         self.heads = heads
         self.dim_head = dim_head
         self.inner = heads * dim_head
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head**-0.5
         self.n_patches = n_patches
         self.n_frames = n_frames
         self.fusion = fusion
         self.fusion_scale = fusion_scale
-        self.ssm = MambaSSMCell(d_model=dim, n_state= dim // 2) # replace dt_rank eventually
+        self.ssm = MambaSSMCell(
+            d_model=dim, n_state=dim // 2
+        )  # replace dt_rank eventually
 
         # projections
         self.norm = nn.LayerNorm(dim)
@@ -1743,7 +2031,9 @@ class DualAttentionSSMKeys(nn.Module):
         self.proj_k_mem = nn.Linear(dim, self.inner, bias=False)
 
         # output projection
-        self.to_out = nn.Sequential(nn.Linear(self.inner, dim), nn.Dropout(dropout))
+        self.to_out = nn.Sequential(
+            nn.Linear(self.inner, dim), nn.Dropout(dropout)
+        )
 
         # attention bits
         self.attend = nn.Softmax(dim=-1)
@@ -1756,7 +2046,7 @@ class DualAttentionSSMKeys(nn.Module):
                 nn.Linear(dim, dim),
                 nn.GELU(),
                 nn.Linear(dim, 1),
-                nn.Sigmoid()
+                nn.Sigmoid(),
             )
 
         # mask (expects T = n_frames * n_patches)
@@ -1800,44 +2090,51 @@ class DualAttentionSSMKeys(nn.Module):
         x = self.norm(x)
 
         # ---- Q, K_content, V from raw features
-        Q = self._heads(self.to_q(x))        # [B,H,T,dh]
-        K_cnt = self._heads(self.to_k_cnt(x))# [B,H,T,dh]
-        V = self._heads(self.to_v(x))        # [B,H,T,dh]
+        Q = self._heads(self.to_q(x))  # [B,H,T,dh]
+        K_cnt = self._heads(self.to_k_cnt(x))  # [B,H,T,dh]
+        V = self._heads(self.to_v(x))  # [B,H,T,dh]
 
         if self.H_buffer is None:
-            self.H_buffer = self.ssm.init_state(B, P, device=x.device, dtype=x.dtype)  # [B,P,S]
+            self.H_buffer = self.ssm.init_state(
+                B, P, device=x.device, dtype=x.dtype
+            )  # [B,P,S]
 
         # ---- SSM trajectory to build K_mem = Proj(C_t ⊙ h_t)
-        X_win = self._reshape_for_ssm(x, num_frames=F)     # [B,F,P,D]
-        H, Y_seq, _ = self.ssm(X_win, self.H_buffer, mode="scan")  # Y_seq: (B, F*P, D), H_T: (B, P, S)
-        self.H_buffer = H[:, min(self.step_size - 1, F - 1)].detach() # update buffer to carry over to next window 
-
+        X_win = self._reshape_for_ssm(x, num_frames=F)  # [B,F,P,D]
+        H, Y_seq, _ = self.ssm(
+            X_win, self.H_buffer, mode="scan"
+        )  # Y_seq: (B, F*P, D), H_T: (B, P, S)
+        self.H_buffer = H[
+            :, min(self.step_size - 1, F - 1)
+        ].detach()  # update buffer to carry over to next window
 
         # Project to key space per token, then flatten time*patch -> tokens
-        K_mem_tokens = self.proj_k_mem(Y_seq)   # [B,T,Inner]
-        K_mem = self._heads(K_mem_tokens)       # [B,H,T,dh]
+        K_mem_tokens = self.proj_k_mem(Y_seq)  # [B,T,Inner]
+        K_mem = self._heads(K_mem_tokens)  # [B,H,T,dh]
 
         # ---- Two attention maps (beta: content, alpha: memory)
-        dots_beta = torch.matmul(Q, K_cnt.transpose(-1, -2)) * self.scale  # [B,H,T,T]
+        dots_beta = (
+            torch.matmul(Q, K_cnt.transpose(-1, -2)) * self.scale
+        )  # [B,H,T,T]
         dots_alpha = torch.matmul(Q, K_mem.transpose(-1, -2)) * self.scale
 
         # apply same causal/structured mask
         mask = self.bias[:, :, :T, :T] == 0  # [1,1,T,T] -> bool
 
-        # logit fusion 
+        # logit fusion
         if self.fusion == "logit_diff":
-            diff = dots_beta - self.fusion_scale * dots_alpha  
+            diff = dots_beta - self.fusion_scale * dots_alpha
             diff = diff.masked_fill(mask, float("-inf"))
             attn = self.dropout(self.attend(diff))
             out = torch.matmul(attn, V)
-        
+
         # value fusion
         else:
             dots_beta = dots_beta.masked_fill(mask, float("-inf"))
             dots_alpha = dots_alpha.masked_fill(mask, float("-inf"))
-            
+
             # softmax maps
-            attn_beta = self.attend(dots_beta)    # [B,H,T,T]
+            attn_beta = self.attend(dots_beta)  # [B,H,T,T]
             attn_alpha = self.attend(dots_alpha)  # [B,H,T,T]
 
             # optional dropout on maps
@@ -1847,37 +2144,45 @@ class DualAttentionSSMKeys(nn.Module):
             # ---- Fuse attentions / outputs
             if self.fusion == "sum":
                 # (betaV + scale * alphaV)
-                out = torch.matmul(attn_beta, V) + self.fusion_scale * torch.matmul(attn_alpha, V)
+                out = torch.matmul(
+                    attn_beta, V
+                ) + self.fusion_scale * torch.matmul(attn_alpha, V)
 
             elif self.fusion == "diff":
                 # (betaV - scale * alphaV)  (differential attention)
-                out = torch.matmul(attn_beta, V) - self.fusion_scale * torch.matmul(attn_alpha, V)
+                out = torch.matmul(
+                    attn_beta, V
+                ) - self.fusion_scale * torch.matmul(attn_alpha, V)
 
             elif self.fusion == "mul":
                 # multiplicative agreement: softmax(alpha ⊙ beta)
                 attn_agree = attn_alpha * attn_beta
                 # renormalize per head
-                attn_agree = attn_agree / (attn_agree.sum(dim=-1, keepdim=True) + 1e-9)
+                attn_agree = attn_agree / (
+                    attn_agree.sum(dim=-1, keepdim=True) + 1e-9
+                )
                 out = torch.matmul(attn_agree, V)
 
             elif self.fusion == "gate":
                 # token-wise gate g \in [0,1], shared across heads
                 # use the input x to predict gate; broadcast to heads
-                g = self.gate(x).clamp(0.0, 1.0)            # [B,T,1]
-                g = g.transpose(1, 2)                       # [B,1,T]
-                g = g.unsqueeze(-1)                         # [B,1,T,1]
+                g = self.gate(x).clamp(0.0, 1.0)  # [B,T,1]
+                g = g.transpose(1, 2)  # [B,1,T]
+                g = g.unsqueeze(-1)  # [B,1,T,1]
                 out_alpha = torch.matmul(attn_alpha, V)
-                out_beta  = torch.matmul(attn_beta, V)
-                out = g * out_beta + (1.0 - g) * self.fusion_scale * out_alpha  # broadcast over heads
+                out_beta = torch.matmul(attn_beta, V)
+                out = (
+                    g * out_beta + (1.0 - g) * self.fusion_scale * out_alpha
+                )  # broadcast over heads
 
         # ---- Merge heads and project out
-        out = self._unheads(out)            # [B,T,Inner]
-        y = self.to_out(out)                # [B,T,D]
+        out = self._unheads(out)  # [B,T,Inner]
+        y = self.to_out(out)  # [B,T,D]
         return y
-    
+
     def reset_memory(self):
         self.H_buffer = None
-    
+
     def set_step_size(self, step_size):
         self.step_size = step_size
 
@@ -1887,6 +2192,7 @@ class HybridTransformerLayer(nn.Module):
     A single Transformer layer where the attention sublayer is replaced
     by DualAttentionSSMKeys. Residual + FFN preserved.
     """
+
     def __init__(
         self,
         dim,
@@ -1899,7 +2205,7 @@ class HybridTransformerLayer(nn.Module):
         dropout=0.0,
         fusion="sum",
         fusion_scale=0.1,
-        bias=None
+        bias=None,
     ):
         super().__init__()
         self.attn = DualAttentionSSMKeys(
@@ -1912,7 +2218,7 @@ class HybridTransformerLayer(nn.Module):
             n_frames=n_frames,
             fusion=fusion,
             fusion_scale=fusion_scale,
-            bias=bias
+            bias=bias,
         )
         self.ff = FeedForward(dim, mlp_dim, dropout=dropout)
 
@@ -1923,7 +2229,7 @@ class HybridTransformerLayer(nn.Module):
         # ff + residual
         x = x + self.ff(x)
         return x
-    
+
     def reset_memory(self):
         self.attn.reset_memory()
 
@@ -1937,6 +2243,7 @@ class HybridTransformer(nn.Module):
     OR re-init per layer. Here we carry within each layer (common pattern:
     one SSM per layer). You can also share one SSM across layers if desired.
     """
+
     def __init__(
         self,
         dim,
@@ -1950,7 +2257,7 @@ class HybridTransformer(nn.Module):
         dropout=0.0,
         fusion="sum",
         fusion_scale=0.1,
-        bias=None
+        bias=None,
     ):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
@@ -1968,7 +2275,7 @@ class HybridTransformer(nn.Module):
                 dropout=dropout,
                 fusion=fusion,
                 fusion_scale=fusion_scale,
-                bias=bias
+                bias=bias,
             )
             self.layers.append(layer)
 
@@ -1984,11 +2291,11 @@ class HybridTransformer(nn.Module):
             H0_i = H0 if (i == 0) else None
             x = layer(x, H0=H0_i)
         return self.norm(x)
-    
+
     def reset_memory(self):
         for layer in self.layers:
             layer.reset_memory()
-    
+
     def set_step_size(self, step_size):
         for layer in self.layers:
             layer.set_step_size(step_size)
@@ -2056,7 +2363,6 @@ class HybridViTPredictor(nn.Module):
         self.transformer.set_step_size(step_size)
 
 
-
 class PerTokenCLSMemoryBlock(nn.Module):
     """
     Per-token CLS memory (Mamba-style) with parallel training and streaming step.
@@ -2081,9 +2387,7 @@ class PerTokenCLSMemoryBlock(nn.Module):
         mlp_dim,
         n_patches,
         step_size,
-        ssm_state=64,
         dropout=0.0,
-        post_attn_write: bool = False,  # True: write u_t from post-attn tokens in streaming step
     ):
         super().__init__()
         self.D = dim
@@ -2092,8 +2396,8 @@ class PerTokenCLSMemoryBlock(nn.Module):
         self.dim_head = dim_head
         self.inner = heads * dim_head
         self.scale = dim_head**-0.5
-        self.post_attn_write = post_attn_write
         self.step_size = step_size
+        self.ssm_state = dim // 2
 
         # norms
         self.attn_norm = nn.LayerNorm(dim)
@@ -2111,10 +2415,9 @@ class PerTokenCLSMemoryBlock(nn.Module):
         self.drop = nn.Dropout(dropout)
 
         # Mamba-like SSM and readout h_t -> c_t
-        self.ssm = MambaSSMCell(d_model=dim, n_state=ssm_state)
-        self.mem_readout = nn.Linear(ssm_state, dim, bias=False)
+        self.ssm = MambaSSMCell(d_model=dim, n_state=self.ssm_state)
+        self.mem_readout = nn.Linear(self.ssm_state, dim, bias=False)
 
-        # simple write summary (mean). swap with AttnPool if you want.
         self.write_norm = nn.LayerNorm(dim)
 
         # FFN
@@ -2139,51 +2442,62 @@ class PerTokenCLSMemoryBlock(nn.Module):
         return bias
 
     # ---------- PARALLEL (training/inference in batch) ----------
-    def forward(self, X_seq, H0=None):
+    def forward(self, X_seq):
         """
-        X_seq: [B, T, P, D]  (frames × patches)
+        X_seq: [B, (T * P), D]  (frames × patches)
         H0   : [B, 1, S] initial memory state (zeros if None)
         returns:
           Y_seq: [B, T, P, D] (tokens updated)
           H_T  : [B, 1, S] final memory state
         """
-        B, T, P, D = X_seq.shape
-        assert P == self.P, f"Expected P={self.P}, got {P}"
+        B, T_P, D = X_seq.shape
+        T, P = T_P // self.P, self.P
 
         # 1) ----- build per-frame summaries u_t -----
         # use pre-attn tokens for summaries (stable, single pass)
-        U = self.write_norm(X_seq).mean(dim=2)  # [B, T, D]
+        X_norm = self.write_norm(X_seq)  # [B, T*P, D]
+        X_reshaped = rearrange(
+            X_norm, "b (t p) d -> b t p d", t=T, p=P
+        )  # [B, T, P, D]
+        U = X_reshaped.mean(
+            dim=2
+        )  # [B, T, D] - average over patches per timestep
 
         # 2) ----- SSM scan over u_t -> h_t -> c_t -----
-        U_as_tp = U.unsqueeze(2)  # [B, T, 1, D] to fit MambaSSMCell.scan API
+        U = U.unsqueeze(2)  # [B, T, 1, D] to fit MambaSSMCell.scan API
 
         if self.H_buffer is None:
             self.H_buffer = self.ssm.init_state(
                 B, 1, device=X_seq.device, dtype=X_seq.dtype
             )  # [B,1,S]
-
-        H_seq, _, _ = self.ssm(U_as_tp, self.H_buffer, mode="scan")  # H_seq: [B,T,1,S]
-        C_seq = self.mem_readout(H_seq.squeeze(2))  # [B, T, D]
-        self.H_buffer = H_seq[:, min(self.step_size - 1, T - 1)].detach() # update buffer to carry over to next window 
-
-        # # 3) ----- shift memory so each frame sees c_{t-1} -----
-        # c_prev0 = self.mem_readout(self.H_buffer.squeeze(1))  # [B, D]
-        # C_shift = torch.cat(
-        #     [c_prev0.unsqueeze(1), C_seq[:, :-1]], dim=1
-        # )  # [B, T, D]
+        H_seq, _, _ = self.ssm(
+            U, self.H_buffer, mode="scan"
+        )  # H_seq: [B,T,1,S]
+        C_seq = self.mem_readout(
+            H_seq.squeeze(2)
+        )  # [B, T, D] - one CLS per timestep
+        self.H_buffer = H_seq[
+            :, min(self.step_size - 1, T - 1)
+        ].detach()  # update buffer to carry over to next window
 
         # 4) ----- prepend per-frame CLS and do a single masked attention -----
-        CLS = C_seq.unsqueeze(2)  # [B, T, 1, D]
-        X_plus = torch.cat([CLS, X_seq], dim=2)  # [B, T, 1+P, D]
-        TPp = (1 + P) * T
+        # Interleave CLS tokens with patches: [CLS1, patch1_1, patch1_2, ..., CLS2, patch2_1, ...]
+        X_plus = []
+        for t in range(T):
+            X_plus.append(
+                C_seq[:, t : t + 1, :]
+            )  # [B, 1, D] - CLS for timestep t
+            X_plus.append(
+                X_seq[:, t * P : (t + 1) * P, :]
+            )  # [B, P, D] - patches for timestep t
+        X_plus = torch.cat(X_plus, dim=1)  # [B, T*(1+P), D]
+        TPp = T * (1 + P)  # Total tokens: T CLS + T*P patches
 
         bias = self._mask_for(
             T=T, P_plus=1 + P, device=X_seq.device, dtype=X_seq.dtype
         )  # [1,1,TPp,TPp]
 
-        Xf = rearrange(
-            self.attn_norm(X_plus), "b t p d -> b (t p) d"
-        )  # [B, TPp, D]
+        Xf = self.attn_norm(X_plus)  # [B, TPp, D] - already in correct shape
         Q = self._heads(self.to_q(Xf))  # [B,H,TPp,dh]
         K = self._heads(self.to_k(Xf))  # [B,H,TPp,dh]
         V = self._heads(self.to_v(self.val_norm(Xf)))  # [B,H,TPp,dh]
@@ -2193,18 +2507,23 @@ class PerTokenCLSMemoryBlock(nn.Module):
         A = torch.softmax(dots, dim=-1)
         A = self.drop(A)
 
-        Y = torch.matmul(A, V)  # [B,H,TPp,dh]
-        Y = self._unheads(Y)  # [B,TPp,Inner]
-        Y = self.to_out(Y)  # [B,TPp,D]
+        attn_out = torch.matmul(A, V)  # [B,H,TPp,dh]
+        attn_out = self._unheads(attn_out)  # [B,TPp,Inner]
+        attn_out = self.to_out(attn_out)  # [B,TPp,D]
 
-        Y_tp = rearrange(Y, "b (t p) d -> b t p d", t=T, p=(1 + P))
-        Y_tokens = Y_tp[:, :, 1:, :]  # drop CLS outputs -> [B,T,P,D]
+        # Extract only the patch tokens from attention output (skip CLS tokens)
+        attn_out_patches = []
+        for t in range(T):
+            # Skip CLS token at position t*(1+P), take patches at positions t*(1+P)+1 to (t+1)*(1+P)
+            attn_out_patches.append(
+                attn_out[:, t * (1 + P) + 1 : (t + 1) * (1 + P), :]
+            )
+        attn_out = torch.cat(attn_out_patches, dim=1)  # [B, T*P, D]
 
-        # 5) ----- FFN on tokens -----
-        Y_tokens = Y_tokens + self.ff(Y_tokens)
-        return Y_tokens
+        X_seq = X_seq + attn_out
 
-    # ---------- STREAMING (step-wise) ----------
+        return X_seq + self.ff(X_seq)
+
     @torch.no_grad()
     def init_state(self, B, device=None, dtype=None):
         return self.ssm.init_state(B, 1, device=device, dtype=dtype)  # [B,1,S]
@@ -2212,43 +2531,101 @@ class PerTokenCLSMemoryBlock(nn.Module):
     def set_step_size(self, step_size):
         self.step_size = step_size
 
-    # def step(self, X_t, H_prev):
-    #     """
-    #     X_t  : [B, P, D]  (one frame)
-    #     H_prev: [B, 1, S]
-    #     returns:
-    #       Y_t   : [B, P, D]  (updated tokens)
-    #       H_next: [B, 1, S]
-    #     """
-    #     B, P, D = X_t.shape
-    #     assert P == self.P
+    def reset_memory(self):
+        self.H_buffer = None
 
-    #     # READ with c_prev
-    #     c_prev = self.mem_readout(H_prev.squeeze(1))  # [B, D]
-    #     X_plus = torch.cat([c_prev.unsqueeze(1), X_t], dim=1)  # [B, 1+P, D]
 
-    #     # local masked attention within a single frame + CLS at same frame
-    #     # here the mask is trivial: CLS and tokens are all at same time, no future leakage within frame
-    #     # allow full within-frame attention (no temporal mask needed)
-    #     Xf = self.attn_norm(X_plus)  # [B,1+P,D]
-    #     Q = self._heads(self.to_q(Xf))
-    #     K = self._heads(self.to_k(Xf))
-    #     V = self._heads(self.to_v(self.val_norm(Xf)))
-    #     dots = torch.matmul(Q, K.transpose(-1, -2)) * (self.dim_head**-0.5)
-    #     A = torch.softmax(dots, dim=-1)
-    #     A = self.drop(A)
-    #     Y = torch.matmul(A, V)
-    #     Y = self._unheads(Y)
-    #     Y = self.to_out(Y)  # [B,1+P,D]
-    #     Y_tokens = Y[:, 1:, :]  # drop CLS
+class CLSMemoryTransformer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        depth,
+        heads,
+        dim_head,
+        mlp_dim,
+        n_patches,
+        n_frames,
+        step_size,
+        dropout=0.0,
+        bias=None,
+    ):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                PerTokenCLSMemoryBlock(
+                    dim=dim,
+                    heads=heads,
+                    dim_head=dim_head,
+                    mlp_dim=mlp_dim,
+                    n_patches=n_patches,
+                    step_size=step_size,
+                    dropout=dropout,
+                )
+            )
 
-    #     # WRITE: build u_t and update H
-    #     if self.post_attn_write:
-    #         U_t = self.write_norm(Y_tokens).mean(dim=1)  # [B, D]
-    #     else:
-    #         U_t = self.write_norm(X_t).mean(dim=1)
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return self.norm(x)
 
-    #     H_next, _ = self.ssm.step(
-    #         U_t.unsqueeze(1), H_prev
-    #     )  # reuse cell.step expects [B,P=1,D]
-    #     return Y_tokens, H_next
+    def set_step_size(self, step_size):
+        for layer in self.layers:
+            layer.set_step_size(step_size)
+
+    def reset_memory(self):
+        for layer in self.layers:
+            layer.reset_memory()
+
+
+class CLSMemoryPredictor(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        step_size,
+        pool="cls",
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+    ):
+        super().__init__()
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.dim = dim
+        self.pool = pool
+
+        self.transformer = CLSMemoryTransformer(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            dim_head=dim_head,
+            mlp_dim=mlp_dim,
+            n_patches=num_patches,
+            n_frames=num_frames,
+            step_size=step_size,
+            dropout=dropout,
+        )
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
+
+    def reset_memory(self):
+        self.transformer.reset_memory()
+
+    def set_step_size(self, step_size):
+        self.transformer.set_step_size(step_size)
