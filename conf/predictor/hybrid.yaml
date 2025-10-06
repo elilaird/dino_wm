@@ -8,4 +8,3 @@ pool: 'mean'
 fusion: 'sum'
 fusion_scale: 0.1
 step_size: ${step_size}
-n_mem_blocks: ${n_mem_blocks}
