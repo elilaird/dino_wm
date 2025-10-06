@@ -2018,9 +2018,20 @@ class DualAttentionSSMKeys(nn.Module):
         self.n_frames = n_frames
         self.fusion = fusion
         self.fusion_scale = fusion_scale
-        self.ssm = MambaSSMCell(
-            d_model=dim, n_state=dim // 2
-        )  # replace dt_rank eventually
+        self.ssm = nn.ModuleList([
+            MambaLayer(
+                d_model=dim, n_state=dim // 2, step_size=step_size, num_patches=n_patches, dt_rank=16, dropout=dropout
+            ),
+            nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, dim*2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim*2, dim),
+                nn.Dropout(dropout),
+            )
+        ])
+        
 
         # projections
         self.norm = nn.LayerNorm(dim)
@@ -2055,8 +2066,6 @@ class DualAttentionSSMKeys(nn.Module):
         if bias is None:
             bias = generate_mask_matrix(self.n_patches, self.n_frames)
         self.register_buffer("bias", bias)  # [1,1,T,T]
-
-        self.H_buffer = None
 
     def _reshape_for_ssm(self, x, num_frames=None):
         """
@@ -2096,19 +2105,10 @@ class DualAttentionSSMKeys(nn.Module):
         K_cnt = self._heads(self.to_k_cnt(x))  # [B,H,T,dh]
         V = self._heads(self.to_v(x))  # [B,H,T,dh]
 
-        if self.H_buffer is None:
-            self.H_buffer = self.ssm.init_state(
-                B, P, device=x.device, dtype=x.dtype
-            )  # [B,P,S]
-
         # ---- SSM trajectory to build K_mem = Proj(C_t ⊙ h_t)
         X_win = self._reshape_for_ssm(x, num_frames=F)  # [B,F,P,D]
-        H, Y_seq, _ = self.ssm(
-            X_win, self.H_buffer, mode="scan"
-        )  # Y_seq: (B, F*P, D), H_T: (B, P, S)
-        self.H_buffer = H[
-            :, min(self.step_size - 1, F - 1)
-        ].detach()  # update buffer to carry over to next window
+        Y_seq = self.ssm(X_win).reshape(B, F*P, D)  # Y_seq: (B, F*P, D)
+
 
         # Project to key space per token, then flatten time*patch -> tokens
         K_mem_tokens = self.proj_k_mem(Y_seq)  # [B,T,Inner]
@@ -2183,10 +2183,10 @@ class DualAttentionSSMKeys(nn.Module):
         return y
 
     def reset_memory(self):
-        self.H_buffer = None
+        self.ssm[0].reset_memory()
 
     def set_step_size(self, step_size):
-        self.step_size = step_size
+        self.ssm[0].set_step_size(step_size)
 
 
 class HybridTransformerLayer(nn.Module):
@@ -2281,17 +2281,15 @@ class HybridTransformer(nn.Module):
             )
             self.layers.append(layer)
 
-    def forward(self, x, H0=None):
+    def forward(self, x):
         """
         x:  [B, T, D]  with T = n_frames * n_patches
         H0: Optional initial SSM state for the FIRST layer.
             If provided, it will be used for the first layer; subsequent
             layers will init zeros unless you choose to thread H across.
         """
-        # Carry SSM state per-layer independently; thread H only within the layer.
-        for i, layer in enumerate(self.layers):
-            H0_i = H0 if (i == 0) else None
-            x = layer(x, H0=H0_i)
+        for layer in self.layers:
+            x = layer(x)
         return self.norm(x)
 
     def reset_memory(self):
