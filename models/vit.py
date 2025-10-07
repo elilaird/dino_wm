@@ -13,6 +13,7 @@ from .memory_retrieval import (
 )
 from .memory_injection import (
     AdaptiveLayerNorm,
+    DynamicLoRALinear,
     MemoryLoRAAdapter,
     MemoryLoRAProj,
 )
@@ -2642,3 +2643,135 @@ class CLSMemoryPredictor(nn.Module):
 
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)
+
+
+########### Dynamic Lora Injection ###########
+
+
+class DynamicLoRAAttention(nn.Module):
+    """
+    Multi-head attention with per-token DynamicLoRALinear injections:
+      - QK injection (query & key)
+      - VO injection (value & output)
+    Each site can choose its own type: "mm" / "xm" / "mx".
+    """
+
+    def __init__(
+        self,
+        dim,
+        heads=8,
+        dim_head=64,
+        r=8,
+        alpha=1.0,
+        use_qk=True,
+        use_vo=False,
+        gen_type="mm",
+        dropout=0.0,
+        bias=None,
+    ):
+        super().__init__()
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == dim)
+        
+        self.dim_head = dim_head
+        self.heads = heads
+        self.scale = dim_head**-0.5
+        self.use_qk = use_qk
+        self.use_vo = use_vo
+
+        self.norm = nn.LayerNorm(dim)
+        self.mem_norm = nn.LayerNorm(dim)
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+
+        if use_qk:
+            self.q_proj = DynamicLoRALinear(
+                dim,
+                inner_dim,
+                r,
+                alpha=alpha,
+                type=gen_type,
+                use_bias=False,
+            )
+            self.k_proj = DynamicLoRALinear(
+                dim,
+                inner_dim,
+                r,
+                alpha=alpha,
+                type=gen_type,
+                use_bias=False,
+            )
+        else:
+            self.q_proj = nn.Linear(dim, inner_dim, bias=False)
+            self.k_proj = nn.Linear(dim, inner_dim, bias=False)
+
+        if use_vo and project_out:
+            self.v_proj = DynamicLoRALinear(
+                dim,
+                inner_dim,
+                r,
+                alpha=alpha,
+                type=gen_type,
+                use_bias=False,
+            )
+            self.o_proj = DynamicLoRALinear(
+                inner_dim,
+                dim,
+                r,
+                alpha=alpha,
+                type=gen_type,
+                use_bias=False,
+            )
+        else:
+            self.v_proj = nn.Linear(dim, inner_dim, bias=False)
+            self.o_proj = nn.Linear(inner_dim, dim, bias=False)
+
+        if bias is None:
+            bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
+        self.register_buffer("bias", bias)
+
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        # [B,T,D] -> [B,h,T,dh]
+        B, T, D = x.shape
+        return x.view(B, T, self.heads, self.dim_head).transpose(1, 2)
+
+    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+        # [B,h,T,dh] -> [B,T,D]
+        B, H, T, Dh = x.shape
+        return x.transpose(1, 2).contiguous().view(B, T, H * Dh)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        m_tok: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        x:     [B,T,d_model]
+        m_tok: [B,T,d_model]  (project your memory to d_model if needed before calling)
+        """
+        B, T, D = x.shape
+
+        x = self.norm(x)
+        m_tok = self.mem_norm(m_tok)
+
+        q = self.q_proj(x, m_tok) if self.use_qk else self.q_proj(x)  # [B,T,D]
+        k = self.k_proj(x, m_tok) if self.use_qk else self.k_proj(x)
+        v = self.v_proj(x, m_tok) if self.use_vo else self.v_proj(x)
+
+        q = self._split_heads(q)  # [B,h,T,dh]
+        k = self._split_heads(k)
+        v = self._split_heads(v)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+    
+        dots = dots.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+
+        attn = self.attend(dots)
+        attn = self.dropout(attn)
+
+        out = torch.matmul(attn, v)
+        out = self._merge_heads(out)
+        
+        out = self.o_proj(out, m_tok) if self.use_vo else self.o_proj(out)
+
+        return self.dropout(out)
