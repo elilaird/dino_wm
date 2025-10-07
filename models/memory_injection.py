@@ -393,17 +393,17 @@ class FFNMemGenerator(nn.Module):
     """
 
     def __init__(
-        self, in_features: int, out_features: int, r: int, hidden: Optional[int] = None
+        self, in_features: int, out_features: int, r: int, hidden_mul=2,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.r = r
-        hidden = hidden or max(4 * in_features, 256)
+        hidden = hidden_mul * in_features
 
         # total params per token
-        self.sz_W1 = (2 * r) * out_features
-        self.sz_W2 = r * (2 * r)
+        self.sz_W1 = r * out_features
+        self.sz_W2 = r * out_features
         self.sz_W3 = out_features * r
         total = self.sz_W1 + self.sz_W2 + self.sz_W3
 
@@ -438,8 +438,8 @@ class FFNMemGenerator(nn.Module):
         """
         m_tok: [B,T,in_features]
         returns:
-          W1m: [B,T,2r,out_features]
-          W2m: [B,T,r,2r]
+          W1m: [B,T,r,out_features]
+          W2m: [B,T,r,out_features]
           W3m: [B,T,out_features,r]
         """
         B, T, _ = m_tok.shape
@@ -452,8 +452,8 @@ class FFNMemGenerator(nn.Module):
         v2 = vec[..., i1:i2]
         v3 = vec[..., i2:]
 
-        W1m = v1.view(B, T, 2 * self.r, self.out_features)
-        W2m = v2.view(B, T, self.r, 2 * self.r)
+        W1m = v1.view(B, T, self.r, self.out_features)
+        W2m = v2.view(B, T, self.r, self.out_features)
         W3m = v3.view(B, T, self.out_features, self.r)
 
         # gated/scaled output (start ~0; train to increase)

@@ -1403,40 +1403,6 @@ class StateSpaceTransformer(nn.Module):
                 )
             )
 
-    # def _ssm_forward(self, x, mode: str = "scan"):
-    #     B, T, D = x.shape
-    #     n_frames = T // self.num_patches
-
-    #     if self.H_buffer is None:
-    #         self.H_buffer = self.init_state(B, x.device)
-
-    #     if mode == "step":
-    #         # iterate through frames to aggregate memory
-    #         M_new = []
-    #         hs = []
-    #         h_new = self.H_buffer
-    #         for i in range(n_frames):
-    #             x_i = x[
-    #                 :, i * self.num_patches : (i + 1) * self.num_patches, :
-    #             ]
-    #             h_new, m_i = self.ssm_cell(x_i, h_new, self.dt)
-    #             M_new.append(m_i)
-    #             hs.append(h_new.detach())
-
-    #         M_new = torch.cat(M_new, dim=1)
-
-    #         # this is to handle difference step sizes (autoregressive vs windowed training)
-    #         self.H_buffer = hs[min(self.step_size - 1, n_frames - 1)]
-
-    #     elif mode == "scan":
-    #         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
-    #         H, M_new, _ = self.ssm_cell(x, self.H_buffer, mode="scan")
-    #         self.H_buffer = H[
-    #             :, min(self.step_size - 1, n_frames - 1)
-    #         ].detach()
-
-    #     return M_new
-
     def _mem_blocks_forward(self, x):
         B, T, D = x.shape
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
@@ -2786,52 +2752,101 @@ class SwiGLU(nn.Module):
 class DynamicLoRAFFN(nn.Module):
     """
     SwiGLU FFN with three linears, each using DynamicLoRALinear:
-      W1: d_model -> 2*d_ff (gated)
-      W2: 2*d_ff  -> d_ff
-      W3: d_ff    -> d_model
     All per-token with memory-driven LoRA ("mm" by default).
     """
     def __init__(self, dim: int, hidden_dim: int, r: int = 16, alpha: float = 2.0,
                  gen_type: str = "mm", dropout: float = 0.0):
         super().__init__()
-        self.W1 = DynamicLoRALinear(dim, 2 * hidden_dim, r, alpha=alpha, gen_type=gen_type)
-        self.W2 = DynamicLoRALinear(2 * hidden_dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
+        self.W1 = DynamicLoRALinear(dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
+        self.W2 = DynamicLoRALinear(dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
         self.W3 = DynamicLoRALinear(hidden_dim, dim, r, alpha=alpha, gen_type=gen_type)
 
-        self.act = SwiGLU()
+        self.silu = nn.SiLU()
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
-        h = self.W1(x, m_tok)     # [B,T,2*hidden_dim]
-        h = self.act(h)           # [B,T,hidden_dim]
-        h = self.W2(h, m_tok)     # [B,T,hidden_dim]
-        h = self.drop(h)
-        y = self.W3(h, m_tok)     # [B,T,dim]
-        return y
+        x1 = self.W1(x, m_tok)
+        x2 = self.W2(x, m_tok) 
+        return self.W3(self.dropout(self.silu(x1) * x2))
 
 
-class FFNMemoriesDynamic(nn.Module):
+
+class LoRAFFNTransformer(StateSpaceTransformer):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        state_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        dim_head=64,
+        dt_rank: int = 16,
+        lora_rank: int = 16,
+        lora_alpha: float = 2.0,
+        gen_type: str = "mm",
+        **kwargs,
+    ):
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.gen_type = gen_type
+        
+        super().__init__(
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            state_dim=state_dim,
+            step_size=step_size,
+            n_mem_blocks=n_mem_blocks,
+            dropout=dropout,
+            dim_head=dim_head,
+            dt_rank=dt_rank,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            gen_type=gen_type,
+            **kwargs,
+        )
+
+    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList([
+                    Attention(dim, heads, dim_head, dropout, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)),
+                    DynamicLoRAFFN(
+                        dim=dim,
+                        hidden_dim=mlp_dim,
+                        r=self.lora_rank,
+                        alpha=self.lora_alpha,
+                        gen_type=self.gen_type,
+                        dropout=dropout,
+                    )       
+                ])
+            )
+
+########### Dynamic FFN with Memory ###########
+
+class FFNDynamicMemories(nn.Module):
     """
-    Base Apple-style FFN (SwiGLU with 3 linears) + dynamic FFN-Memories branch.
-
-    Base path (trainable as usual):
-      W1: d_model -> 2*d_ff  (SwiGLU)
-      W2: 2*d_ff  -> d_ff
-      W3: d_ff    -> d_model
-
-    Memory path (width r), generated per token by F(m):
-      W1m: d_model -> 2*r     (SwiGLU)
-      W2m: 2*r     -> r
-      W3m: r       -> d_model
-
-    Forward: y = base_ffn(x) + mem_ffn(x; W1m,W2m,W3m)
+    Dynamic FFN with Memory.
+    W1: d_model -> hidden_dim
+    W2: hidden_dim -> d_model
+    W3: hidden_dim -> d_model
+    W1_m: d_model -> r (generated by FFNMemGenerator)
+    W2_m: r -> d_model (generated by FFNMemGenerator)
+    W3_m: d_model -> r (generated by FFNMemGenerator)
     """
     def __init__(self,
                  dim: int,
                  hidden_dim: int,
-                 d_m: int,            # memory token dim (project your Mamba/SSM state to this)
+                 d_m: int,            # memory token dim
                  r: int = 64,         # memory width
-                 mem_hidden = None,
+                 gen_hidden_mul = 2,
                  dropout: float = 0.0,
                  alpha_mem: float = 1.0):
         super().__init__()
@@ -2840,52 +2855,134 @@ class FFNMemoriesDynamic(nn.Module):
         self.r = r
         self.alpha_mem = alpha_mem
 
-        # Base FFN (owned, trainable)
-        self.W1 = nn.Linear(dim, 2 * hidden_dim, bias=False)
-        self.W2 = nn.Linear(2 * hidden_dim, hidden_dim, bias=False)
-        self.W3 = nn.Linear(hidden_dim, dim, bias=False)
-        self.act = SwiGLU()
+        # Base FFN
+        self.W1 = nn.Parameter(torch.empty(hidden_dim, dim))
+        self.W2 = nn.Parameter(torch.empty(hidden_dim, dim))
+        self.W3 = nn.Parameter(torch.empty(dim, hidden_dim))
+        self.b1 = nn.Parameter(torch.empty(hidden_dim))
+        self.b2 = nn.Parameter(torch.empty(hidden_dim))
+        self.b3 = nn.Parameter(torch.empty(dim))
+        self.silu = nn.SiLU()
         self.drop = nn.Dropout(dropout)
 
         # Memory generator F(m): produces per-token matrices
-        self.mem_gen = FFNMemGenerator(d_m=d_m, d_model=dim, r=r, hidden=mem_hidden)
+        self.mem_gen = FFNMemGenerator(in_features=d_m, out_features=dim, r=r, hidden_mul=gen_hidden_mul)
 
-        # (Optional) small regularizer gates
+        # small regularizer gates
         self.mem_gate = nn.Parameter(torch.tensor(0.0))  # sigmoid gate for entire mem branch
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.W1.weight, a=5**0.5)
-        nn.init.kaiming_uniform_(self.W2.weight, a=5**0.5)
-        nn.init.kaiming_uniform_(self.W3.weight, a=5**0.5)
+        # Initialize base FFN parameters
+        nn.init.kaiming_uniform_(self.W1, a=5**0.5)
+        nn.init.kaiming_uniform_(self.W2, a=5**0.5)
+        nn.init.kaiming_uniform_(self.W3, a=5**0.5)
+        nn.init.zeros_(self.b1)
+        nn.init.zeros_(self.b2)
+        nn.init.zeros_(self.b3)
+        
+        # Initialize memory generator parameters
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, a=5**0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        
 
     def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
         """
         x:     [B,T,dim]
         m_tok: [B,T,d_m]  (per-token memory embeddings)
         """
+        
         # ----- Base FFN -----
-        h = self.W1(x)            # [B,T,2*hidden_dim]
-        h = self.act(h)           # [B,T,hidden_dim]
-        h = self.W2(h)            # [B,T,hidden_dim]
-        h = self.drop(h)
-        y_base = self.W3(h)       # [B,T,dim]
+        x1 = torch.einsum("od,btd->bto", self.W1, x) + self.b1.view(1, 1, -1)  # [B,T,hidden_dim]
+        x2 = torch.einsum("od,btd->bto", self.W2, x) + self.b2.view(1, 1, -1)  # [B,T,hidden_dim]
+        h_base = self.drop(self.silu(x1) * x2)  # [B,T,hidden_dim]
+        y_base = torch.einsum("do,bto->btd", self.W3, h_base) + self.b3.view(1, 1, -1)  # [B,T,dim]
 
         # ----- Memory FFN (dynamic, per token) -----
-        W1m, W2m, W3m = self.mem_gen(m_tok)   # shapes as returned above
+        W1_m, W2_m, W3_m = self.mem_gen(m_tok)  # TODO: should cache generated AB matrices
 
-        # u1 = W1m @ x   → [B,T,2*r]
-        u1 = torch.einsum("btkd,btd->btk", W1m, x)
-        u1 = self.act(u1)  # SwiGLU: [B,T,r]
+        # Memory FFN forward pass
+        u1 = torch.einsum("btod,btd->bto", W1_m, x)  # [B,T,r]
+        u2 = torch.einsum("btod,btd->bto", W2_m, x)  # [B,T,r]
+        h_mem = self.drop(self.silu(u1) * u2)  # [B,T,r]
+        y_mem = torch.einsum("btdo,bto->btd", W3_m, h_mem)  # [B,T,dim]
 
-        # u2 = W2m @ u1   → [B,T,r]
-        u2 = torch.einsum("btrp,btp->btr", W2m, u1)
-
-        # y_mem = W3m @ u2  → [B,T,dim]
-        y_mem = torch.einsum("btdr,btr->btd", W3m, u2)
-
-        # global gate for the memory branch (starts off; learns to open)
+        # Combine base and memory outputs
         g = torch.sigmoid(self.mem_gate)
         y = y_base + g * self.alpha_mem * y_mem
         return y
+
+class DynamicFFNTransformer(StateSpaceTransformer):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        state_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        dim_head=64,
+        dt_rank: int = 16,
+        gen_hidden_mul: int = 2,
+        alpha_mem: float = 1.0,
+        ffn_r: int = 64,
+        **kwargs,
+    ):
+        self.gen_hidden_mul = gen_hidden_mul
+        self.alpha_mem = alpha_mem
+        self.ffn_r = ffn_r
+        
+        super().__init__(
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            state_dim=state_dim,
+            step_size=step_size,
+            n_mem_blocks=n_mem_blocks,
+            dropout=dropout,
+            dim_head=dim_head,
+            dt_rank=dt_rank,
+            gen_hidden_mul=gen_hidden_mul,
+            alpha_mem=alpha_mem,
+            ffn_r=ffn_r,
+            **kwargs,
+        )
+    
+    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList([
+                    Attention(dim, heads, dim_head, dropout, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)),
+                    FFNDynamicMemories(
+                        dim=dim,
+                        hidden_dim=mlp_dim,
+                        d_m=dim,
+                        r=self.ffn_r,
+                        gen_hidden_mul=self.gen_hidden_mul,
+                        alpha_mem=self.alpha_mem,
+                        dropout=dropout,
+
+                    )
+                ])
+            )
+
+    def forward(self, x):
+        B, T, D = x.shape
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
+
+        for attn, ff in self.layers:
+            x = x + attn(x)
+            x = x + ff(x, M_new) # could cache generated AB matrices
+
+        return self.ln_out(x)
