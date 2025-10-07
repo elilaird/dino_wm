@@ -1,3 +1,5 @@
+from ast import Tuple
+from typing import Optional
 import torch
 import torch.nn as nn
 
@@ -243,7 +245,6 @@ class MemoryLoRAAdapter(nn.Module):
         ), f"LoRA dim mismatch: got {D}, expected {self.dim}"
 
         # Summarize memory tokens -> [B, D]
-        # (Swap to attention pooling if you prefer selective recall)
         m_summary = self.mem_ln(memory_tokens.mean(dim=1))  # [B, D]
 
         # Generate A(m): [B, r, d]
@@ -257,3 +258,121 @@ class MemoryLoRAAdapter(nn.Module):
         delta = torch.einsum("btr,brd->btd", xB, A)
 
         return self.dropout(delta * self.scale)
+
+
+class LoRAGenerator(nn.Module):
+    """
+    Generates token-wise A,B from per-token memory m:
+      m: [B, T, d_m]
+      A: [B, T, r, d_in]
+      B: [B, T, d_out, r]
+    """
+
+    def __init__(
+        self,
+        d_m: int,
+        d_in: int,
+        d_out: int,
+        r: int,
+        hidden: Optional[int] = None,
+    ):
+        super().__init__()
+        hidden = hidden or max(4 * d_m, 256)
+        self.fc = nn.Sequential(
+            nn.Linear(d_m, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, r * (d_in + d_out), bias=False),
+        )
+        self.d_in, self.d_out, self.r = d_in, d_out, r
+
+        # Stability gates (start near identity: no LoRA effect)
+        self.gate_A = nn.Parameter(torch.tensor(1e-3), requires_grad=True)
+        self.gate_B = nn.Parameter(torch.tensor(0.0), requires_grad=True)
+
+    def forward(self, m: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # m: [B,T,d_m]
+        Bsz, T, _ = m.shape
+        vec = self.fc(m)  # [B,T, r*(d_in + d_out)]
+
+        a_sz = self.r * self.d_in
+        Avec, Bvec = vec[..., :a_sz], vec[..., a_sz:]
+        A = Avec.view(Bsz, T, self.r, self.d_in)  # [B,T,r,d_in]
+        B = Bvec.view(Bsz, T, self.d_out, self.r)  # [B,T,d_out,r]
+
+        # Apply small gates
+        A = self.gate_A * A
+        B = self.gate_B * B
+        return A, B
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.gate_A, a=5**0.5)
+        nn.init.zeros_(self.gate_B)
+
+
+class DynamicLoRALinear(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        r: int,
+        alpha: float = 1.0,
+        gen_hidden: Optional[int] = None,
+        use_bias: bool = False,
+        dropout: float = 0.0,
+        type: str = "mm", # "mm": B(m) @ A(m), "xm": B(x) @ A(m), "mx": B(m) @ A(x)
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.type = type
+        assert type in {"mm", "xm", "mx"}, "Invalid type"
+
+        self.W0 = nn.Parameter(torch.empty(out_features, in_features), requires_grad=True)
+        if use_bias:
+            self.b0 = nn.Parameter(torch.empty(out_features), requires_grad=True)
+        else:
+            self.b0 = None
+
+        self.gen = LoRAGenerator(
+            d_m=in_features, d_in=in_features, d_out=out_features, r=r, hidden=gen_hidden
+        )
+        self.scale = alpha / float(r)
+        self.r = r
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+
+    def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B,T,in_features]
+        m_tok: [B,T, in_features] (per-token memory)
+        """
+        # generate A and B (CURRENTLY ONLY SUPPORTS mm)
+        A, B = self.gen(
+            self.dropout(m_tok)
+        )  # A: [B,T,r,in_features], B: [B,T,out_features,r]
+
+        # y = W0 @ x + (alpha/r) * B @ (A @ x)
+        base = torch.einsum("od,btd->bto", self.W0, x)  # [B,T,out_features]
+
+        # LoRA contribution: B @ (A @ x)
+        Ax = torch.einsum("btrd,btd->btr", A, x)  # [B,T,r]
+        lora_contrib = torch.einsum(
+            "btor,btr->bto", B, Ax
+        )  # [B,T,out_features]
+
+        y = base + self.scale * lora_contrib  # [B,T,out_features]
+
+        if self.b0 is not None:
+            y = y + self.b0.view(1, 1, -1)
+
+        return y
+
+    def reset_parameters(self):
+        # Base weight/bias init
+        nn.init.kaiming_uniform_(self.W0, a=5**0.5)
+        if self.b0 is not None:
+            fan_in = self.in_features
+            bound = 1 / fan_in**0.5
+            nn.init.uniform_(self.b0, -bound, bound)
+
+        self.gen.reset_parameters()
