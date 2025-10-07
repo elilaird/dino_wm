@@ -288,6 +288,7 @@ class LoRAGenerator(nn.Module):
         # Stability gates (start near identity: no LoRA effect)
         self.gate_A = nn.Parameter(torch.tensor(1e-3), requires_grad=True)
         self.gate_B = nn.Parameter(torch.tensor(0.0), requires_grad=True)
+        self.reset_parameters()
 
     def forward(self, m: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # m: [B,T,d_m]
@@ -308,6 +309,12 @@ class LoRAGenerator(nn.Module):
         nn.init.kaiming_uniform_(self.gate_A, a=5**0.5)
         nn.init.zeros_(self.gate_B)
 
+        for m in self.fc:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, a=5**0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
 
 class DynamicLoRALinear(nn.Module):
     def __init__(
@@ -315,17 +322,17 @@ class DynamicLoRALinear(nn.Module):
         in_features: int,
         out_features: int,
         r: int,
-        alpha: float = 1.0,
+        alpha: float = 2.0,
         gen_hidden: Optional[int] = None,
-        use_bias: bool = False,
+        use_bias: bool = True,
         dropout: float = 0.0,
-        type: str = "mm", # "mm": B(m) @ A(m), "xm": B(x) @ A(m), "mx": B(m) @ A(x)
+        gen_type: str = "mm", # "mm": B(m) @ A(m), "xm": B(x) @ A(m), "mx": B(m) @ A(x)
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.type = type
-        assert type in {"mm", "xm", "mx"}, "Invalid type"
+        self.gen_type = gen_type
+        assert gen_type in {"mm", "xm", "mx"}, "Invalid type"
 
         self.W0 = nn.Parameter(torch.empty(out_features, in_features), requires_grad=True)
         if use_bias:
@@ -339,7 +346,7 @@ class DynamicLoRALinear(nn.Module):
         self.scale = alpha / float(r)
         self.r = r
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
+        self.reset_parameters()
 
     def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
         """
@@ -376,3 +383,83 @@ class DynamicLoRALinear(nn.Module):
             nn.init.uniform_(self.b0, -bound, bound)
 
         self.gen.reset_parameters()
+
+
+class FFNMemGenerator(nn.Module):
+    """
+    F(m): [B,T,in_features] → flattened params for memory FFN:
+      W1m: (2r, out_features),  W2m: (r, 2r),  W3m: (out_features, r)
+    We output a single big vector per token and split/reshape.
+    """
+
+    def __init__(
+        self, in_features: int, out_features: int, r: int, hidden: Optional[int] = None
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.r = r
+        hidden = hidden or max(4 * in_features, 256)
+
+        # total params per token
+        self.sz_W1 = (2 * r) * out_features
+        self.sz_W2 = r * (2 * r)
+        self.sz_W3 = out_features * r
+        total = self.sz_W1 + self.sz_W2 + self.sz_W3
+
+        self.net = nn.Sequential(
+            nn.Linear(in_features, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, total, bias=False),
+        )
+
+        # Stability gates: start the memory path near zero
+        # (paper: W3_mem often zero-init; here we softly gate all)
+        self.gate_all = nn.Parameter(
+            torch.tensor(0.0)
+        )  # 0 → no effect initially
+        self.scale_W1 = nn.Parameter(torch.tensor(1e-3))  # tiny slope at start
+        self.scale_W2 = nn.Parameter(torch.tensor(1e-3))
+        self.scale_W3 = nn.Parameter(torch.tensor(1e-3))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for m in self.net:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, a=5**0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        # keep gates as set in __init__
+
+    def forward(
+        self, m_tok: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        m_tok: [B,T,in_features]
+        returns:
+          W1m: [B,T,2r,out_features]
+          W2m: [B,T,r,2r]
+          W3m: [B,T,out_features,r]
+        """
+        B, T, _ = m_tok.shape
+        vec = self.net(m_tok)  # [B,T,total]
+
+        # split
+        i1 = self.sz_W1
+        i2 = i1 + self.sz_W2
+        v1 = vec[..., :i1]
+        v2 = vec[..., i1:i2]
+        v3 = vec[..., i2:]
+
+        W1m = v1.view(B, T, 2 * self.r, self.out_features)
+        W2m = v2.view(B, T, self.r, 2 * self.r)
+        W3m = v3.view(B, T, self.out_features, self.r)
+
+        # gated/scaled output (start ~0; train to increase)
+        g = torch.sigmoid(self.gate_all)  # [scalar in (0,1)]
+        W1m = g * self.scale_W1 * W1m
+        W2m = g * self.scale_W2 * W2m
+        W3m = g * self.scale_W3 * W3m
+
+        return W1m, W2m, W3m

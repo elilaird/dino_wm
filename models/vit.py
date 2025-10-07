@@ -14,6 +14,7 @@ from .memory_retrieval import (
 from .memory_injection import (
     AdaptiveLayerNorm,
     DynamicLoRALinear,
+    FFNMemGenerator,
     MemoryLoRAAdapter,
     MemoryLoRAProj,
 )
@@ -2662,7 +2663,7 @@ class DynamicLoRAAttention(nn.Module):
         heads=8,
         dim_head=64,
         r=8,
-        alpha=1.0,
+        alpha=2.0,
         use_qk=True,
         use_vo=False,
         gen_type="mm",
@@ -2775,3 +2776,116 @@ class DynamicLoRAAttention(nn.Module):
         out = self.o_proj(out, m_tok) if self.use_vo else self.o_proj(out)
 
         return self.dropout(out)
+
+
+class SwiGLU(nn.Module):
+    def forward(self, x):
+        xg, xl = x.chunk(2, dim=-1)
+        return torch.nn.functional.silu(xg) * xl
+
+class DynamicLoRAFFN(nn.Module):
+    """
+    SwiGLU FFN with three linears, each using DynamicLoRALinear:
+      W1: d_model -> 2*d_ff (gated)
+      W2: 2*d_ff  -> d_ff
+      W3: d_ff    -> d_model
+    All per-token with memory-driven LoRA ("mm" by default).
+    """
+    def __init__(self, dim: int, hidden_dim: int, r: int = 16, alpha: float = 2.0,
+                 gen_type: str = "mm", dropout: float = 0.0):
+        super().__init__()
+        self.W1 = DynamicLoRALinear(dim, 2 * hidden_dim, r, alpha=alpha, gen_type=gen_type)
+        self.W2 = DynamicLoRALinear(2 * hidden_dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
+        self.W3 = DynamicLoRALinear(hidden_dim, dim, r, alpha=alpha, gen_type=gen_type)
+
+        self.act = SwiGLU()
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
+        h = self.W1(x, m_tok)     # [B,T,2*hidden_dim]
+        h = self.act(h)           # [B,T,hidden_dim]
+        h = self.W2(h, m_tok)     # [B,T,hidden_dim]
+        h = self.drop(h)
+        y = self.W3(h, m_tok)     # [B,T,dim]
+        return y
+
+
+class FFNMemoriesDynamic(nn.Module):
+    """
+    Base Apple-style FFN (SwiGLU with 3 linears) + dynamic FFN-Memories branch.
+
+    Base path (trainable as usual):
+      W1: d_model -> 2*d_ff  (SwiGLU)
+      W2: 2*d_ff  -> d_ff
+      W3: d_ff    -> d_model
+
+    Memory path (width r), generated per token by F(m):
+      W1m: d_model -> 2*r     (SwiGLU)
+      W2m: 2*r     -> r
+      W3m: r       -> d_model
+
+    Forward: y = base_ffn(x) + mem_ffn(x; W1m,W2m,W3m)
+    """
+    def __init__(self,
+                 dim: int,
+                 hidden_dim: int,
+                 d_m: int,            # memory token dim (project your Mamba/SSM state to this)
+                 r: int = 64,         # memory width
+                 mem_hidden = None,
+                 dropout: float = 0.0,
+                 alpha_mem: float = 1.0):
+        super().__init__()
+        self.dim = dim
+        self.hidden_dim = hidden_dim
+        self.r = r
+        self.alpha_mem = alpha_mem
+
+        # Base FFN (owned, trainable)
+        self.W1 = nn.Linear(dim, 2 * hidden_dim, bias=False)
+        self.W2 = nn.Linear(2 * hidden_dim, hidden_dim, bias=False)
+        self.W3 = nn.Linear(hidden_dim, dim, bias=False)
+        self.act = SwiGLU()
+        self.drop = nn.Dropout(dropout)
+
+        # Memory generator F(m): produces per-token matrices
+        self.mem_gen = FFNMemGenerator(d_m=d_m, d_model=dim, r=r, hidden=mem_hidden)
+
+        # (Optional) small regularizer gates
+        self.mem_gate = nn.Parameter(torch.tensor(0.0))  # sigmoid gate for entire mem branch
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.W1.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.W2.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.W3.weight, a=5**0.5)
+
+    def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
+        """
+        x:     [B,T,dim]
+        m_tok: [B,T,d_m]  (per-token memory embeddings)
+        """
+        # ----- Base FFN -----
+        h = self.W1(x)            # [B,T,2*hidden_dim]
+        h = self.act(h)           # [B,T,hidden_dim]
+        h = self.W2(h)            # [B,T,hidden_dim]
+        h = self.drop(h)
+        y_base = self.W3(h)       # [B,T,dim]
+
+        # ----- Memory FFN (dynamic, per token) -----
+        W1m, W2m, W3m = self.mem_gen(m_tok)   # shapes as returned above
+
+        # u1 = W1m @ x   → [B,T,2*r]
+        u1 = torch.einsum("btkd,btd->btk", W1m, x)
+        u1 = self.act(u1)  # SwiGLU: [B,T,r]
+
+        # u2 = W2m @ u1   → [B,T,r]
+        u2 = torch.einsum("btrp,btp->btr", W2m, u1)
+
+        # y_mem = W3m @ u2  → [B,T,dim]
+        y_mem = torch.einsum("btdr,btr->btd", W3m, u2)
+
+        # global gate for the memory branch (starts off; learns to open)
+        g = torch.sigmoid(self.mem_gate)
+        y = y_base + g * self.alpha_mem * y_mem
+        return y
