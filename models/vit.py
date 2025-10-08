@@ -184,8 +184,7 @@ class AttentionWithLoRA(nn.Module):
             bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
         self.register_buffer("bias", bias)
 
-        # ---- LoRA: memory-conditioned adapters on Q, K, V (and optionally out) ----
-        # We'll treat the packed qkv as three separate augmented linears.
+
         self.q_lora = MemoryLoRAProj(
             in_dim=dim,
             out_dim=inner_dim,

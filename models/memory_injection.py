@@ -165,7 +165,6 @@ class MemoryLoRAProj(nn.Module):
         nn.init.zeros_(self.A_gen[-1].weight)
         nn.init.zeros_(self.A_gen[-1].bias)
 
-        # the base (frozen or trainable) linear we augment lives outside this class
 
     def forward(
         self, x: torch.Tensor, memory_tokens: torch.Tensor
@@ -276,11 +275,11 @@ class LoRAGenerator(nn.Module):
         hidden: Optional[int] = None,
     ):
         super().__init__()
-        hidden = hidden or 2 * d_m
+        gen_size = r * (d_in + d_out)
         self.fc = nn.Sequential(
-            nn.Linear(d_m, hidden),
+            nn.Linear(d_m, gen_size * 2),
             nn.GELU(),
-            nn.Linear(hidden, r * (d_in + d_out), bias=False),
+            nn.Linear(gen_size * 2, gen_size, bias=False),
         )
         self.d_in, self.d_out, self.r = d_in, d_out, r
 
@@ -390,7 +389,7 @@ class DynamicLoRALinear(nn.Module):
             # A: [B,T,r,in_features//n_heads], B: [B,T,out_features,r]
             
             # Compute LoRA contribution: B @ (A @ x)
-            Ax = torch.einsum("btrd,btd->btr", A, x)  # [B,T,r]
+            Ax = torch.einsum("btrd,btd->btr", A, x)  # [B,T,r] #TODO: fix shape mismatch on heads
             lora_contrib = torch.einsum(
                 "btor,btr->bto", B, Ax
             )  # [B,T,out_features]
