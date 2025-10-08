@@ -6,7 +6,7 @@ dropout: 0.1
 emb_dropout: 0
 state_dim: 256
 dt_rank: 16
-ffn_rank: 16
+ffn_rank: 64
 gen_hidden_mul: 2
 alpha_mem: 1.0
 step_size: ${step_size}

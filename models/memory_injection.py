@@ -424,13 +424,14 @@ class FFNMemGenerator(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.r = r
-        hidden = hidden_mul * in_features
+        # hidden = hidden_mul * in_features
 
         # total params per token
         self.sz_W1 = r * out_features
         self.sz_W2 = r * out_features
         self.sz_W3 = out_features * r
         total = self.sz_W1 + self.sz_W2 + self.sz_W3
+        hidden = total * hidden_mul
 
         self.net = nn.Sequential(
             nn.Linear(in_features, hidden),
