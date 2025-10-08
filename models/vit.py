@@ -18,7 +18,6 @@ from .memory_injection import (
     MemoryLoRAAdapter,
     MemoryLoRAProj,
 )
-from .rope import RoPEAttention, GlobalRoPEPositionalEncoding
 
 # helpers
 NUM_FRAMES = 1
@@ -2657,16 +2656,18 @@ class DynamicLoRAAttention(nn.Module):
                 inner_dim,
                 r,
                 alpha=alpha,
-                type=gen_type,
+                gen_type=gen_type,
                 use_bias=False,
+                n_heads=heads,
             )
             self.k_proj = DynamicLoRALinear(
                 dim,
                 inner_dim,
                 r,
                 alpha=alpha,
-                type=gen_type,
+                gen_type=gen_type,
                 use_bias=False,
+                n_heads=heads,
             )
         else:
             self.q_proj = nn.Linear(dim, inner_dim, bias=False)
@@ -2678,16 +2679,19 @@ class DynamicLoRAAttention(nn.Module):
                 inner_dim,
                 r,
                 alpha=alpha,
-                type=gen_type,
+                gen_type=gen_type,
                 use_bias=False,
+                n_heads=heads,
             )
             self.o_proj = DynamicLoRALinear(
                 inner_dim,
                 dim,
                 r,
                 alpha=alpha,
-                type=gen_type,
+                gen_type=gen_type,
                 use_bias=False,
+                n_heads=heads,
+                heads_is_input=True,
             )
         else:
             self.v_proj = nn.Linear(dim, inner_dim, bias=False)
@@ -2744,7 +2748,7 @@ class DynamicLoRAAttention(nn.Module):
         return self.dropout(out)
 
 
-class LoRAAttentionTransformer(nn.Module):
+class LoRAAttentionTransformer(StateSpaceTransformer):
     def __init__(
         self,
         dim,

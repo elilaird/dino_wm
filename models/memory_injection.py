@@ -1,5 +1,4 @@
-from ast import Tuple
-from typing import Optional
+from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
@@ -306,8 +305,8 @@ class LoRAGenerator(nn.Module):
         return A, B
 
     def reset_parameters(self):
-        nn.init.kaiming_uniform_(self.gate_A, a=5**0.5)
-        nn.init.zeros_(self.gate_B)
+        nn.init.constant_(self.gate_A, 1e-3)
+        nn.init.constant_(self.gate_B, 0.0)
 
         for m in self.fc:
             if isinstance(m, nn.Linear):
@@ -327,12 +326,16 @@ class DynamicLoRALinear(nn.Module):
         use_bias: bool = True,
         dropout: float = 0.0,
         gen_type: str = "mm", # "mm": B(m) @ A(m), "xm": B(x) @ A(m), "mx": B(m) @ A(x)
+        n_heads: int = 1,
+        heads_is_input: bool = False,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.gen_type = gen_type
         assert gen_type in {"mm", "xm", "mx"}, "Invalid type"
+        self.n_heads = n_heads
+        self.heads_is_input = heads_is_input
 
         self.W0 = nn.Parameter(torch.empty(out_features, in_features), requires_grad=True)
         if use_bias:
@@ -340,8 +343,17 @@ class DynamicLoRALinear(nn.Module):
         else:
             self.b0 = None
 
+        if not heads_is_input:
+            gen_out = out_features // n_heads # share BA across heads
+            gen_in = in_features
+            mem_in = in_features
+        else:
+            gen_out = out_features
+            gen_in = in_features // n_heads
+            mem_in = out_features
+
         self.gen = LoRAGenerator(
-            d_m=in_features, d_in=in_features, d_out=out_features, r=r, hidden=gen_hidden
+            d_m=mem_in, d_in=gen_in, d_out=gen_out, r=r, hidden=gen_hidden
         )
         self.scale = alpha / float(r)
         self.r = r
@@ -350,22 +362,38 @@ class DynamicLoRALinear(nn.Module):
 
     def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
         """
-        x: [B,T,in_features]
+        x: [B,T,in_features] where in_features = D*H (heads flattened)
         m_tok: [B,T, in_features] (per-token memory)
         """
-        # generate A and B (CURRENTLY ONLY SUPPORTS mm)
+        # generate A and B
         A, B = self.gen(
             self.dropout(m_tok)
-        )  # A: [B,T,r,in_features], B: [B,T,out_features,r]
+        )  # A: [B,T,r,gen_in], B: [B,T,gen_out,r]
 
         # y = W0 @ x + (alpha/r) * B @ (A @ x)
         base = torch.einsum("od,btd->bto", self.W0, x)  # [B,T,out_features]
 
-        # LoRA contribution: B @ (A @ x)
-        Ax = torch.einsum("btrd,btd->btr", A, x)  # [B,T,r]
-        lora_contrib = torch.einsum(
-            "btor,btr->bto", B, Ax
-        )  # [B,T,out_features]
+        if not self.heads_is_input:
+            # QKV case: heads are in output dimension
+            # A: [B,T,r,in_features], B: [B,T,out_features//n_heads,r]
+            
+            # Compute LoRA contribution for one head
+            Ax = torch.einsum("btrd,btd->btr", A, x)  # [B,T,r]
+            lora_contrib_single = torch.einsum(
+                "btor,btr->bto", B, Ax
+            )  # [B,T,out_features//n_heads]
+            
+            # Stack the full BA for each head
+            lora_contrib = lora_contrib_single.repeat(1, 1, self.n_heads)  # [B,T,out_features]
+        else:
+            # Output projection case: heads are in input dimension
+            # A: [B,T,r,in_features//n_heads], B: [B,T,out_features,r]
+            
+            # Compute LoRA contribution: B @ (A @ x)
+            Ax = torch.einsum("btrd,btd->btr", A, x)  # [B,T,r]
+            lora_contrib = torch.einsum(
+                "btor,btr->bto", B, Ax
+            )  # [B,T,out_features]
 
         y = base + self.scale * lora_contrib  # [B,T,out_features]
 
@@ -378,9 +406,7 @@ class DynamicLoRALinear(nn.Module):
         # Base weight/bias init
         nn.init.kaiming_uniform_(self.W0, a=5**0.5)
         if self.b0 is not None:
-            fan_in = self.in_features
-            bound = 1 / fan_in**0.5
-            nn.init.uniform_(self.b0, -bound, bound)
+            nn.init.zeros_(self.b0)
 
         self.gen.reset_parameters()
 
@@ -424,14 +450,6 @@ class FFNMemGenerator(nn.Module):
 
         self.reset_parameters()
 
-    def reset_parameters(self):
-        for m in self.net:
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, a=5**0.5)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-        # keep gates as set in __init__
-
     def forward(
         self, m_tok: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -463,3 +481,15 @@ class FFNMemGenerator(nn.Module):
         W3m = g * self.scale_W3 * W3m
 
         return W1m, W2m, W3m
+
+    def reset_parameters(self):
+        for m in self.net:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, a=5**0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        nn.init.constant_(self.gate_all, 0.0)
+        nn.init.constant_(self.scale_W1, 1e-3)
+        nn.init.constant_(self.scale_W2, 1e-3)
+        nn.init.constant_(self.scale_W3, 1e-3)
