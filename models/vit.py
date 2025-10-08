@@ -3169,3 +3169,78 @@ class DynamicFFNTransformer(StateSpaceTransformer):
             x = x + ff(x, M_new) # could cache generated AB matrices
 
         return self.ln_out(x)
+
+
+class DynamicFFNVitPredictor(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        state_dim,
+        depth,
+        heads,
+        mlp_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        emb_dropout=0.0,
+        dim_head=64,
+        dt_rank: int = 16,
+        ffn_rank: int = 64,
+        gen_hidden_mul: int = 2,
+        alpha_mem: float = 1.0,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.state_dim = state_dim
+        self.depth = depth
+        self.heads = heads
+        self.mlp_dim = mlp_dim
+        self.dropout = dropout
+        self.dim_head = dim_head
+        self.ffn_rank = ffn_rank
+        self.gen_hidden_mul = gen_hidden_mul
+        self.alpha_mem = alpha_mem
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.transformer = DynamicFFNTransformer(
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            state_dim=state_dim,
+            step_size=step_size,
+            n_mem_blocks=n_mem_blocks,
+            dropout=dropout,
+            dim_head=dim_head,
+            dt_rank=dt_rank,
+            gen_hidden_mul=gen_hidden_mul,
+            alpha_mem=alpha_mem,
+            ffn_r=ffn_rank,
+        )
+    
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
+    
+    def reset_memory(self):
+        self.transformer.reset_memory()
+    
+    def set_step_size(self, step_size):
+        self.transformer.set_step_size(step_size)
