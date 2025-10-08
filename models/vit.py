@@ -2612,7 +2612,7 @@ class CLSMemoryPredictor(nn.Module):
         self.transformer.set_step_size(step_size)
 
 
-########### Dynamic Lora Injection ###########
+########### Dynamic Lora Attention Injection ###########
 
 
 class DynamicLoRAAttention(nn.Module):
@@ -2713,15 +2713,15 @@ class DynamicLoRAAttention(nn.Module):
         m_tok: torch.Tensor,
     ) -> torch.Tensor:
         """
-        x:     [B,T,d_model]
-        m_tok: [B,T,d_model]  (project your memory to d_model if needed before calling)
+        x:     [B,T, dim]
+        m_tok: [B,T, dim] 
         """
         B, T, D = x.shape
 
         x = self.norm(x)
         m_tok = self.mem_norm(m_tok)
 
-        q = self.q_proj(x, m_tok) if self.use_qk else self.q_proj(x)  # [B,T,D]
+        q = self.q_proj(x, m_tok) if self.use_qk else self.q_proj(x) 
         k = self.k_proj(x, m_tok) if self.use_qk else self.k_proj(x)
         v = self.v_proj(x, m_tok) if self.use_vo else self.v_proj(x)
 
@@ -2744,10 +2744,83 @@ class DynamicLoRAAttention(nn.Module):
         return self.dropout(out)
 
 
-class SwiGLU(nn.Module):
+class LoRAAttentionTransformer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        state_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        dim_head=64,
+        dt_rank: int = 16,
+        lora_rank: int = 16,
+        lora_alpha: float = 2.0,
+        use_qk: bool = True,
+        use_vo: bool = False,
+        gen_type: str = "mm",
+        **kwargs,
+    ):
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.gen_type = gen_type
+        self.use_qk = use_qk
+        self.use_vo = use_vo
+        
+        super().__init__(
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            state_dim=state_dim,
+            step_size=step_size,
+            n_mem_blocks=n_mem_blocks,
+            dropout=dropout,
+            dim_head=dim_head,
+            dt_rank=dt_rank,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            gen_type=gen_type,
+            use_qk=use_qk,
+            use_vo=use_vo,
+            **kwargs,
+        )
+
+    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList([
+                    DynamicLoRAAttention(
+                        dim=dim, 
+                        heads=heads, 
+                        dim_head=dim_head,
+                        r=self.lora_rank, 
+                        alpha=self.lora_alpha,
+                        gen_type=self.gen_type,
+                        use_qk=self.use_qk,
+                        use_vo=self.use_vo,
+                        dropout=dropout, 
+                        bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES),
+                    ),
+                    FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout),
+                ])
+            )
     def forward(self, x):
-        xg, xl = x.chunk(2, dim=-1)
-        return torch.nn.functional.silu(xg) * xl
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
+        for attn, ff in self.layers:
+            x = x + attn(x, M_new)
+            x = x + ff(x)
+        return self.ln_out(x)
+
+
+########### LoRA FFN with Memory ###########
 
 class DynamicLoRAFFN(nn.Module):
     """
@@ -2828,6 +2901,116 @@ class LoRAFFNTransformer(StateSpaceTransformer):
                     )       
                 ])
             )
+
+    def forward(self, x):
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
+        for attn, ff in self.layers:
+            x = x + attn(x)
+            x = x + ff(x, M_new)
+        return self.ln_out(x)
+
+
+class LoRAInjectionViTPredictor(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        state_dim,
+        depth,
+        heads,
+        mlp_dim,
+        injection_type,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        emb_dropout=0.0,
+        dim_head=64,
+        dt_rank: int = 16,
+        lora_rank: int = 16,
+        lora_alpha: float = 2.0,
+        gen_type: str = "mm",
+    ):
+        super().__init__()
+        self.dim = dim
+        self.state_dim = state_dim
+        self.depth = depth
+        self.heads = heads
+        self.mlp_dim = mlp_dim
+        self.dropout = dropout
+        self.dim_head = dim_head
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.gen_type = gen_type
+
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+
+        if injection_type in ["lora_qk", "lora_vo", "lora_qkvo"]:
+            use_qk = injection_type == "lora_qk" or injection_type == "lora_qkvo"
+            use_vo = injection_type == "lora_vo" or injection_type == "lora_qkvo"
+            
+            self.transformer = LoRAAttentionTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                gen_type=gen_type,
+                use_qk=use_qk,
+                use_vo=use_vo,
+            )
+        elif injection_type == "lora_ffn":
+            self.transformer = LoRAFFNTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                gen_type=gen_type,
+            )
+        else:
+            raise ValueError(f"Invalid injection type: {injection_type}")
+    
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
+    
+    def reset_memory(self):
+        self.transformer.reset_memory()
+
+    def set_step_size(self, step_size):
+        self.transformer.set_step_size(step_size)
+
 
 ########### Dynamic FFN with Memory ###########
 

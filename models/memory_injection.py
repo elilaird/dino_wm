@@ -277,7 +277,7 @@ class LoRAGenerator(nn.Module):
         hidden: Optional[int] = None,
     ):
         super().__init__()
-        hidden = hidden or max(4 * d_m, 256)
+        hidden = hidden or 2 * d_m
         self.fc = nn.Sequential(
             nn.Linear(d_m, hidden),
             nn.GELU(),
