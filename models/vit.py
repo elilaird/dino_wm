@@ -3067,14 +3067,10 @@ class FFNDynamicMemories(nn.Module):
         nn.init.zeros_(self.b1)
         nn.init.zeros_(self.b2)
         nn.init.zeros_(self.b3)
+
+        nn.init.constant_(self.mem_gate, 0.0)
         
-        # Initialize memory generator parameters
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, a=5**0.5)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-        
+        self.mem_gen.reset_parameters()
 
     def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
         """
