@@ -2630,7 +2630,7 @@ class DynamicLoRAAttention(nn.Module):
         alpha=2.0,
         use_qk=True,
         use_vo=False,
-        gen_type="mm",
+        gen_type="A",
         dropout=0.0,
         bias=None,
     ):
@@ -2657,7 +2657,6 @@ class DynamicLoRAAttention(nn.Module):
                 alpha=alpha,
                 gen_type=gen_type,
                 use_bias=False,
-                n_heads=heads,
             )
             self.k_proj = DynamicLoRALinear(
                 dim,
@@ -2666,7 +2665,6 @@ class DynamicLoRAAttention(nn.Module):
                 alpha=alpha,
                 gen_type=gen_type,
                 use_bias=False,
-                n_heads=heads,
             )
         else:
             self.q_proj = nn.Linear(dim, inner_dim, bias=False)
@@ -2680,7 +2678,6 @@ class DynamicLoRAAttention(nn.Module):
                 alpha=alpha,
                 gen_type=gen_type,
                 use_bias=False,
-                n_heads=heads,
             )
             self.o_proj = DynamicLoRALinear(
                 inner_dim,
@@ -2689,8 +2686,6 @@ class DynamicLoRAAttention(nn.Module):
                 alpha=alpha,
                 gen_type=gen_type,
                 use_bias=False,
-                n_heads=heads,
-                heads_is_input=True,
             )
         else:
             self.v_proj = nn.Linear(dim, inner_dim, bias=False)
@@ -2765,7 +2760,7 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
         lora_alpha: float = 2.0,
         use_qk: bool = True,
         use_vo: bool = False,
-        gen_type: str = "mm",
+        gen_type: str = "A",
         **kwargs,
     ):
         self.lora_rank = lora_rank
@@ -2831,7 +2826,7 @@ class DynamicLoRAFFN(nn.Module):
     All per-token with memory-driven LoRA ("mm" by default).
     """
     def __init__(self, dim: int, hidden_dim: int, r: int = 16, alpha: float = 2.0,
-                 gen_type: str = "mm", dropout: float = 0.0):
+                 gen_type: str = "A", dropout: float = 0.0):
         super().__init__()
         self.W1 = DynamicLoRALinear(dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
         self.W2 = DynamicLoRALinear(dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
@@ -2863,7 +2858,7 @@ class LoRAFFNTransformer(StateSpaceTransformer):
         dt_rank: int = 16,
         lora_rank: int = 16,
         lora_alpha: float = 2.0,
-        gen_type: str = "mm",
+        gen_type: str = "A",
         **kwargs,
     ):
         self.lora_rank = lora_rank
@@ -2934,7 +2929,7 @@ class LoRAInjectionViTPredictor(nn.Module):
         dt_rank: int = 16,
         lora_rank: int = 16,
         lora_alpha: float = 2.0,
-        gen_type: str = "mm",
+        gen_type: str = "A",
     ):
         super().__init__()
         self.dim = dim

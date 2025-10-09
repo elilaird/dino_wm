@@ -313,8 +313,36 @@ class LoRAGenerator(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
+class LowRankGenerator(nn.Module):
+    "Generates only one low-rank matrix such as A or B"
+    def __init__(self, in_features: int, out_features: int, r: int):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.r = r
+        gen_size = r * out_features
+        self.fc = nn.Sequential(
+            nn.Linear(in_features, gen_size * 2),
+            nn.GELU(),
+            nn.Linear(gen_size * 2, gen_size, bias=False),
+        )
+        self.gate = nn.Parameter(torch.tensor(0.0), requires_grad=True)
+        self.reset_parameters()
 
-class DynamicLoRALinear(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.gate * self.fc(x)
+
+    def reset_parameters(self):
+        nn.init.constant_(self.gate, 0.0)
+        for m in self.fc:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, a=5**0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+
+# DEPRECATED
+class DynamicLoRALinearDEPRECATED(nn.Module):
     def __init__(
         self,
         in_features: int,
@@ -375,19 +403,19 @@ class DynamicLoRALinear(nn.Module):
         if not self.heads_is_input:
             # QKV case: heads are in output dimension
             # A: [B,T,r,in_features], B: [B,T,out_features//n_heads,r]
-            
+
             # Compute LoRA contribution for one head
             Ax = torch.einsum("btrd,btd->btr", A, x)  # [B,T,r]
             lora_contrib_single = torch.einsum(
                 "btor,btr->bto", B, Ax
             )  # [B,T,out_features//n_heads]
-            
+
             # Stack the full BA for each head
             lora_contrib = lora_contrib_single.repeat(1, 1, self.n_heads)  # [B,T,out_features]
         else:
             # Output projection case: heads are in input dimension
             # A: [B,T,r,in_features//n_heads], B: [B,T,out_features,r]
-            
+
             # Compute LoRA contribution: B @ (A @ x)
             Ax = torch.einsum("btrd,btd->btr", A, x)  # [B,T,r] #TODO: fix shape mismatch on heads
             lora_contrib = torch.einsum(
@@ -406,6 +434,90 @@ class DynamicLoRALinear(nn.Module):
         nn.init.kaiming_uniform_(self.W0, a=5**0.5)
         if self.b0 is not None:
             nn.init.zeros_(self.b0)
+
+        self.gen.reset_parameters()
+
+
+class DynamicLoRALinear(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        r: int,
+        alpha: float = 2.0,
+        use_bias: bool = True,
+        gen_type: str = "A", 
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.gen_type = gen_type
+        assert gen_type in {"A", "B", "AB"}, "Invalid type"
+   
+        # base linear parameters
+        self.W0 = nn.Parameter(
+            torch.empty(out_features, in_features), requires_grad=True
+        )
+        self.b0 = nn.Parameter(
+            torch.empty(out_features), requires_grad=True
+        ) if use_bias else None
+        
+        if gen_type == "A":
+            gen_out = in_features # A: r x in_features
+            self.B = nn.Parameter(torch.empty(r, out_features), requires_grad=True)
+        elif gen_type == "B":
+            gen_out = out_features # B: r x out_features (will transpose in forward)
+            self.A = nn.Parameter(torch.empty(r, in_features), requires_grad=True)
+        elif gen_type == "AB":
+            # gen both AB
+            gen_out = out_features # AB: r x in_features
+            
+        self.gen = LowRankGenerator(in_features, gen_out, r) if not gen_type == "AB" else LoRAGenerator(in_features, in_features, gen_out, r)
+        self.scale = alpha / float(r)
+        self.r = r
+        self.reset_parameters()
+    
+    def generate_weights(self, m_tok: torch.Tensor) -> torch.Tensor:
+        if self.gen_type == "A":
+            return self.gen(m_tok), self.B
+        elif self.gen_type == "B":
+            return self.A, self.gen(m_tok)
+        elif self.gen_type == "AB":
+            return self.gen(m_tok)
+
+    def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B,T,in_features] where in_features = D*H (heads flattened)
+        m_tok: [B,T, in_features] (per-token memory)
+        """
+
+        # y = W0 @ x
+        base = torch.einsum("od,btd->bto", self.W0, x)  # [B,T,out_features]
+
+        # generate A and B
+        A, B = self.generate_weights(m_tok)
+
+        Am = torch.einsum("btrd,btd->btr", A, m_tok)  # [B,T,r]
+
+        BAm = torch.einsum("btro,btr->bto", B, Am)  # [B,T,out_features]
+
+        y = base + self.scale * BAm  # [B,T,out_features]
+
+        if self.b0 is not None:
+            y = y + self.b0.view(1, 1, -1)
+
+        return y
+
+    def reset_parameters(self):
+        # Base weight/bias init
+        nn.init.kaiming_uniform_(self.W0, a=5**0.5)
+        if self.b0 is not None:
+            nn.init.zeros_(self.b0)
+        
+        if self.gen_type == "A":
+            nn.init.zeros_(self.B) # B init with zeros to start
+        elif self.gen_type == "B":
+            nn.init.constant_(self.A, 1e-3) # A init with small near identity weights
 
         self.gen.reset_parameters()
 
