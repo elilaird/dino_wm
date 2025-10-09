@@ -289,14 +289,14 @@ class LoRAGenerator(nn.Module):
         self.reset_parameters()
 
     def forward(self, m: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # m: [B,T,d_m]
-        Bsz, T, _ = m.shape
+        # m: [B,d_m]
+        Bsz, _ = m.shape
         vec = self.fc(m)  # [B,T, r*(d_in + d_out)]
 
         a_sz = self.r * self.d_in
         Avec, Bvec = vec[..., :a_sz], vec[..., a_sz:]
-        A = Avec.view(Bsz, T, self.r, self.d_in)  # [B,T,r,d_in]
-        B = Bvec.view(Bsz, T, self.d_out, self.r)  # [B,T,d_out,r]
+        A = Avec.view(Bsz, self.r, self.d_in)  # [B,r,d_in]
+        B = Bvec.view(Bsz, self.r, self.d_out)  # [B,r,d_out]
 
         # Apply small gates
         A = self.gate_A * A
@@ -329,7 +329,7 @@ class LowRankGenerator(nn.Module):
         self.gate = nn.Parameter(torch.tensor(0.0), requires_grad=True)
         self.reset_parameters()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:        
         return self.gate * self.fc(x)
 
     def reset_parameters(self):
@@ -479,9 +479,9 @@ class DynamicLoRALinear(nn.Module):
     
     def generate_weights(self, m_tok: torch.Tensor) -> torch.Tensor:
         if self.gen_type == "A":
-            return self.gen(m_tok), self.B
+            return self.gen(m_tok).view(-1, self.r, self.in_features), self.B
         elif self.gen_type == "B":
-            return self.A, self.gen(m_tok)
+            return self.A, self.gen(m_tok).view(-1, self.r, self.out_features)
         elif self.gen_type == "AB":
             return self.gen(m_tok)
 
@@ -494,12 +494,15 @@ class DynamicLoRALinear(nn.Module):
         # y = W0 @ x
         base = torch.einsum("od,btd->bto", self.W0, x)  # [B,T,out_features]
 
+        # pool memory tokens over time
+        m_tok_pooled = m_tok.mean(dim=1)
+
         # generate A and B
-        A, B = self.generate_weights(m_tok)
+        A, B = self.generate_weights(m_tok_pooled)
 
-        Am = torch.einsum("btrd,btd->btr", A, m_tok)  # [B,T,r]
+        Am = torch.einsum("...rd,btd->...tr", A, m_tok)  # [B,T,r]
 
-        BAm = torch.einsum("btro,btr->bto", B, Am)  # [B,T,out_features]
+        BAm = torch.einsum("...ro,btr->...to", B, Am)  # [B,T,out_features]
 
         y = base + self.scale * BAm  # [B,T,out_features]
 
