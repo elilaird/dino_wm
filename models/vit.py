@@ -1433,12 +1433,6 @@ class StateSpaceTransformer(nn.Module):
 
         return self.ln_out(ctx)
 
-    # @torch.no_grad()
-    # def init_state(self, B: int, device=None):
-    #     return self.ssm_cell.init_state(
-    #         B, self.num_patches, self.state_dim, device=device
-    #     )
-
     def reset_memory(self):
         for mem_block, _ in self.mem_blocks:
             mem_block.reset_memory()
@@ -1516,54 +1510,10 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
-            x = x + ff(x)
-            x = x + self.injection_layers[i](M_new) * self.alphas[i]
-
-        return self.ln_out(x)
-
-
-class MemoryInjectionPreSSMTransformer(MemoryInjectionSSMTransformer):
-    def __init__(
-        self,
-        dim,
-        num_patches,
-        depth,
-        heads,
-        mlp_dim,
-        state_dim,
-        step_size,
-        n_mem_blocks,
-        dropout=0.0,
-        dim_head=64,
-        dt_rank: int = 16,
-        alpha_init: float = 0.1,
-        **kwargs,
-    ):
-        super().__init__(
-            dim,
-            num_patches,
-            depth,
-            heads,
-            mlp_dim,
-            state_dim,
-            step_size,
-            n_mem_blocks,
-            dropout,
-            dim_head,
-            dt_rank,
-            alpha_init=alpha_init,
-            **kwargs,
-        )
-
-    def forward(self, x):
-        M_new = self._mem_blocks_forward(x)
-        x = self.ln_in(x)
-        for i, (attn, ff) in enumerate(self.layers):
-            x = x + attn(x)
             x = x + self.injection_layers[i](M_new) * self.alphas[i]
             x = x + ff(x)
-        return self.ln_out(x)
 
+        return self.ln_out(x)
 
 class AdaMemSSMTransformer(StateSpaceTransformer):
     def __init__(
@@ -1629,101 +1579,8 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
-            x = x + ff(x)
             x = self.injection_layers[i](x, M_new)
-
-        return self.ln_out(x)
-
-
-class LoRAMemSSMTransformer(StateSpaceTransformer):
-    def __init__(
-        self,
-        dim,
-        num_patches,
-        depth,
-        heads,
-        mlp_dim,
-        state_dim,
-        step_size,
-        n_mem_blocks,
-        dropout=0.0,
-        dim_head=64,
-        dt_rank: int = 16,
-        zero_init: bool = True,  # zero-init LoRA branch so it starts as a no-op
-        lora_rank: int = 128,
-        lora_alpha: float = 8.0,
-        lora_dropout: float = 0.0,
-        **kwargs,
-    ):
-        super().__init__(
-            dim,
-            num_patches,
-            depth,
-            heads,
-            mlp_dim,
-            state_dim,
-            step_size,
-            n_mem_blocks,
-            dropout,
-            dim_head,
-            dt_rank,
-            zero_init=zero_init,
-            lora_rank=lora_rank,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            **kwargs,
-        )
-
-    def _build_transformer(
-        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
-    ):
-        self.layers = nn.ModuleList([])
-        self.lora_post_attn = nn.ModuleList([])
-        self.lora_post_ff = nn.ModuleList([])
-
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList(
-                    [
-                        Attention(dim, heads, dim_head, dropout),
-                        FeedForward(dim, mlp_dim, dropout),
-                    ]
-                )
-            )
-            self.lora_post_attn.append(
-                MemoryLoRAAdapter(
-                    dim=dim,
-                    rank=kwargs.get("lora_rank"),
-                    lora_alpha=kwargs.get("lora_alpha"),
-                    dropout=kwargs.get("lora_dropout"),
-                    zero_init=kwargs.get("zero_init"),
-                )
-            )
-            self.lora_post_ff.append(
-                MemoryLoRAAdapter(
-                    dim=dim,
-                    rank=kwargs.get("lora_rank"),
-                    lora_alpha=kwargs.get("lora_alpha"),
-                    dropout=kwargs.get("lora_dropout"),
-                    zero_init=kwargs.get("zero_init"),
-                )
-            )
-
-    def forward(self, x):
-        M_new = self._mem_blocks_forward(x)
-        x = self.ln_in(x)
-
-        # --- transformer blocks with LoRA memory adapters ---
-        for (attn, ff), lora_attn, lora_ff in zip(
-            self.layers, self.lora_post_attn, self.lora_post_ff
-        ):
-            x = x + attn(x)
-            # LoRA after attention
-            x = x + lora_attn(x, M_new)
-
             x = x + ff(x)
-            # LoRA after feedforward
-            x = x + lora_ff(x, M_new)
 
         return self.ln_out(x)
 
@@ -1785,8 +1642,8 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
-            x = x + ff(x)
             x = x + self.injection_layers[i](x, M_new)
+            x = x + ff(x)
 
         return self.ln_out(x)
 
@@ -1868,21 +1725,6 @@ class StateSpaceViTPredictor(nn.Module):
                 dt_rank=dt_rank,
                 alpha_init=alpha_init,
             )
-        elif injection_type == "misst_pre":
-            self.transformer = MemoryInjectionPreSSMTransformer(
-                dim=dim,
-                num_patches=num_patches,
-                depth=depth,
-                heads=heads,
-                mlp_dim=mlp_dim,
-                state_dim=state_dim,
-                step_size=step_size,
-                n_mem_blocks=n_mem_blocks,
-                dropout=dropout,
-                dim_head=dim_head,
-                dt_rank=dt_rank,
-                alpha_init=alpha_init,
-            )
         elif injection_type == "adamem":
             self.transformer = AdaMemSSMTransformer(
                 dim=dim,
@@ -1897,25 +1739,6 @@ class StateSpaceViTPredictor(nn.Module):
                 dim_head=dim_head,
                 dt_rank=dt_rank,
                 zero_init=zero_init,
-            )
-                
-        elif injection_type == "loramem_post":
-            self.transformer = LoRAMemSSMTransformer(
-                dim=dim,
-                num_patches=num_patches,
-                depth=depth,
-                heads=heads,
-                mlp_dim=mlp_dim,
-                state_dim=state_dim,
-                step_size=step_size,
-                n_mem_blocks=n_mem_blocks,
-                dropout=dropout,
-                dim_head=dim_head,
-                dt_rank=dt_rank,
-                zero_init=zero_init,
-                lora_rank=lora_rank,
-                lora_alpha=lora_alpha,
-                lora_dropout=lora_dropout,
             )
         
         elif injection_type == "ssm_ca":
@@ -2839,7 +2662,6 @@ class DynamicLoRAFFN(nn.Module):
         x1 = self.W1(x, m_tok)
         x2 = self.W2(x, m_tok) 
         return self.W3(self.dropout(self.silu(x1) * x2))
-
 
 
 class LoRAFFNTransformer(StateSpaceTransformer):
