@@ -2120,7 +2120,8 @@ class Trainer:
                     self.model(obs_window, act_window) # no tracking until query phase
 
                 # rollout same sequence
-                z_obses, _ = self.model.rollout(obs_0, act_0, bypass_memory_reset=True)
+                obs_hist = {k: v[:, :self.window_size] for k, v in obs_0.items()}
+                z_obses, _ = self.model.rollout(obs_hist, act_0, bypass_memory_reset=True)
                 z_obses = {k: v[:, -(horizon+1):-1] for k, v in z_obses.items()} # offset by 1 to exclude the last predicted frame which has no gt
                 decoded_pred = self.model.decode_obs(z_obses)[0]
 
