@@ -5,7 +5,6 @@ mlp_dim: 2048
 dropout: 0.1
 emb_dropout: 0
 n_persistent: 4
-n_retrieved: 4
 hidden_scale: 2
 mem_depth: 3
 mem_eta: 0.9 # prev surprise decay
@@ -15,6 +14,5 @@ max_grad_norm: 1.0
 momentum_clip: 1.0     
 weight_clip: 5.0
 update_steps: 1
-use_slots: True
 update_type: "selfattention"
 proj_k_eq_q: False

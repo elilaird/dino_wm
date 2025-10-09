@@ -743,51 +743,29 @@ class MACTransformerBlock(nn.Module):
         n_heads: int,
         d_ff: int,
         n_persistent: int = 4,  # number of persistent tokens P
-        n_retrieved: int = 4,  # number of memory "slots" to prepend (learned projection of M*(Q))
         dropout: float = 0.0,
         dim_head: int = 64,
-        use_slots: bool = True,
         update_type: str = "selfattention",  # "selfattention" or "crossattention"
         proj_k_eq_q: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
         self.mem = mem
-        self.use_slots = use_slots
         self.n_persistent = n_persistent
-        self.n_retrieved = (
-            n_retrieved if self.use_slots else num_frames * num_patches
-        )
         self.num_patches = num_patches
         self.num_frames = num_frames
         self.update_type = update_type
         self.proj_k_eq_q = proj_k_eq_q
 
-        if self.update_type == "crossattention":
-            assert (
-                not self.use_slots
-            ), "use_slots must be False for crossattention"
-
-        # self.h_norm = nn.LayerNorm(d_model, eps=1e-5)
-        # self.h_norm = F.normalize(x, p=2, dim=-1)
-        # self.q_norm = nn.LayerNorm(d_model, eps=1e-5)
-        # self.q_norm = lambda x: torch.nn.functional.normalize(x, p=2, dim=-1)
-
         if self.n_persistent > 0:
             self.P = nn.Parameter(torch.randn(n_persistent, d_model))
-            # self.p_norm = nn.LayerNorm(d_model, eps=1e-5)
-            # self.p_norm = lambda x: torch.nn.functional.normalize(x, p=2, dim=-1)
 
         self.mem_W_Q = nn.Linear(d_model, d_model)
 
-        if self.use_slots:
-            self.mem_slots = nn.Linear(d_model, n_retrieved * d_model)
-
         bias = generate_mac_mask_matrix(
-            num_patches, num_frames, n_persistent, n_retrieved
+            num_patches, num_frames, n_persistent, num_frames
         )
-        self.attention = Attention(d_model, n_heads, dim_head, dropout)
-        self.attention.register_buffer("bias", bias)
+        self.attention = Attention(d_model, n_heads, dim_head, dropout, bias=bias)
 
         self.norm1 = nn.LayerNorm(d_model)
         self.ff = nn.Sequential(
@@ -813,15 +791,6 @@ class MACTransformerBlock(nn.Module):
         q_t = self.mem_W_Q(x_seg)  # [B, T, d_model]
         h = self.mem.retrieve(q_t)  # [B, T, d_model]
 
-        if self.use_slots:
-            # compress retrieved "per-token" memory into a fixed number of slots
-            h = self.mem_slots(h)  # [B, T, n_retrieved*d_model]
-            h = h.mean(dim=1).view(  # TODO: try different pooling
-                B, self.n_retrieved, self.d_model
-            )  # [B, n_retrieved, d_model] (pool over time in segment)
-        else:
-            self.n_retrieved = T
-
         # prepend persistent tokens and retrieved memory slots
         if self.n_persistent > 0:
             P = self.P.unsqueeze(0).expand(
@@ -829,11 +798,11 @@ class MACTransformerBlock(nn.Module):
             )  # [B, n_persistent, d_model]
             x_aug = torch.cat(
                 [P, h, x_seg], dim=1
-            )  # [B, n_persistent + n_retrieved + T, d_model]
+            )  # [B, n_persistent + T, d_model]
         else:
             x_aug = torch.cat(
                 [h, x_seg], dim=1
-            )  # [B, n_retrieved + T, d_model]
+            )  # [B, T, d_model]
 
         x_aug = self.norm1(x_aug)
         x_aug = x_aug + self.attention(x_aug)
@@ -841,12 +810,12 @@ class MACTransformerBlock(nn.Module):
         y2 = self.norm2(x_aug)
         x_aug = x_aug + self.ff(y2)
 
-        out = x_aug[:, self.n_persistent + self.n_retrieved :, :]  # [B, T, d]
+        out = x_aug[:, self.n_persistent + T :, :]  # [B, T, d]
 
         #  update memory online
         if update_memory:
             memory_tokens = x_aug[
-                :, self.n_persistent : self.n_persistent + self.n_retrieved, :
+                :, self.n_persistent : self.n_persistent + T, :
             ]
             if self.update_type == "selfattention":
                 k = (
@@ -885,9 +854,7 @@ class MACTransformer(nn.Module):
         mlp_dim,
         dropout=0.0,
         n_persistent=4,
-        n_retrieved=4,
         dim_head=64,
-        use_slots=True,
         update_type="selfattention",
         proj_k_eq_q=False,
     ):
@@ -905,10 +872,8 @@ class MACTransformer(nn.Module):
                     n_heads=heads,
                     d_ff=mlp_dim,
                     n_persistent=n_persistent,
-                    n_retrieved=n_retrieved,
                     dropout=dropout,
                     dim_head=dim_head,
-                    use_slots=use_slots,
                     update_type=update_type,
                     proj_k_eq_q=proj_k_eq_q,
                 )
@@ -934,7 +899,6 @@ class MACViTPredictor(nn.Module):
         dropout=0.0,
         emb_dropout=0.0,
         n_persistent=4,
-        n_retrieved=4,
         dim_head=64,
         hidden_scale=2,
         mem_depth=2,
@@ -945,7 +909,6 @@ class MACViTPredictor(nn.Module):
         momentum_clip=1.0,
         weight_clip=5.0,
         update_steps=1,
-        use_slots=True,
         update_type="selfattention",
         proj_k_eq_q=False,
     ):
@@ -987,9 +950,7 @@ class MACViTPredictor(nn.Module):
             mlp_dim,
             dropout,
             n_persistent,
-            n_retrieved,
             dim_head,
-            use_slots,
             update_type,
             proj_k_eq_q,
         )
