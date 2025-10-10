@@ -24,6 +24,7 @@ class VWorldModel(nn.Module):
         train_decoder=True,
         decoder_loss_type='mse',
         step_size=1,
+        use_cls_token=False,
     ):
         super().__init__()
         self.num_hist = num_hist
@@ -42,7 +43,8 @@ class VWorldModel(nn.Module):
         self.action_dim = action_dim * num_action_repeat
         self.decoder_loss_type = decoder_loss_type 
         self.step_size = step_size
-
+        self.use_cls_token = use_cls_token
+        
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
             encoder_patch_size = self.encoder.module.patch_size
@@ -178,6 +180,9 @@ class VWorldModel(nn.Module):
         output: obs: (b, num_frames, 3, img_size, img_size)
         """
         b, num_frames, num_patches, emb_dim = z_obs["visual"].shape
+        if self.encoder.use_cls_token:
+            # remove cls token
+            z_obs["visual"] = z_obs["visual"][:, :, 1:, :]
         visual, diff = self.decoder(z_obs["visual"])  # (b*num_frames, 3, 224, 224)
         visual = rearrange(visual, "(b t) c h w -> b t c h w", t=num_frames)
         obs = {

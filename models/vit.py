@@ -1272,6 +1272,7 @@ class StateSpaceTransformer(nn.Module):
         dim_head=64,
         dt_rank: int = 16,
         use_gate: bool = False,
+        use_cls_token: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -1287,6 +1288,7 @@ class StateSpaceTransformer(nn.Module):
         self.state_dim = state_dim
         self.step_size = step_size
         self.n_mem_blocks = n_mem_blocks
+        self.use_cls_token = use_cls_token
 
         if use_gate:
             self.gate = nn.Linear(dim, dim)
@@ -1319,7 +1321,7 @@ class StateSpaceTransformer(nn.Module):
                             d_model=dim,
                             n_state=state_dim,
                             step_size=self.step_size,
-                            num_patches=self.num_patches,
+                            num_patches=self.num_patches if not self.use_cls_token else 1,
                             dt_rank=dt_rank,
                             dropout=dropout,
                         ),
@@ -1365,9 +1367,15 @@ class StateSpaceTransformer(nn.Module):
     def _mem_blocks_forward(self, x):
         B, T, D = x.shape
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
+        if self.use_cls_token:
+            x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
         for mem_block, ff in self.mem_blocks:
             x = mem_block(x)
             x = x + ff(x)
+        
+        if self.use_cls_token:
+            # repeat the cls token to the number of patches
+            x = x.repeat(1, 1, self.num_patches, 1)
         return rearrange(x, "b t p d -> b (t p) d")
 
     def forward(self, x, H=None):
@@ -1418,6 +1426,7 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
         dim_head=64,
         dt_rank: int = 16,
         alpha_init: float = 0.1,
+        use_cls_token: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1433,6 +1442,7 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
             dim_head,
             dt_rank,
             alpha_init=alpha_init,
+            use_cls_token=use_cls_token,
             **kwargs,
         )
 
@@ -1491,6 +1501,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
         dim_head=64,
         dt_rank: int = 16,
         zero_init: bool = False,
+        use_cls_token: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1506,6 +1517,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
             dim_head,
             dt_rank,
             zero_init=zero_init,
+            use_cls_token=use_cls_token,
             **kwargs,
         )
 
@@ -1560,6 +1572,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
         dropout=0.0,
         dim_head=64,
         dt_rank: int = 16,
+        use_cls_token: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1574,6 +1587,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
             dropout,
             dim_head,
             dt_rank,
+            use_cls_token=use_cls_token,
             **kwargs,
         )
 
@@ -1633,6 +1647,7 @@ class StateSpaceViTPredictor(nn.Module):
         lora_rank: int = 64,
         lora_alpha: float = 1.0,
         lora_dropout: float = 0.0,
+        use_cls_token: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -1670,6 +1685,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dim_head=dim_head,
                 dt_rank=dt_rank,
                 use_gate=use_gate,
+                use_cls_token=use_cls_token,
             )
         elif injection_type == "misst":
             self.transformer = MemoryInjectionSSMTransformer(
@@ -1685,6 +1701,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dim_head=dim_head,
                 dt_rank=dt_rank,
                 alpha_init=alpha_init,
+                use_cls_token=use_cls_token,
             )
         elif injection_type == "adamem":
             self.transformer = AdaMemSSMTransformer(
@@ -1700,6 +1717,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dim_head=dim_head,
                 dt_rank=dt_rank,
                 zero_init=zero_init,
+                use_cls_token=use_cls_token,
             )
         
         elif injection_type == "ssm_ca":
@@ -1715,6 +1733,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dropout=dropout,
                 dim_head=dim_head,
                 dt_rank=dt_rank,
+                use_cls_token=use_cls_token,
             )
         else:
             raise ValueError(f"Invalid injection type: {injection_type}")
@@ -2545,6 +2564,7 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
         use_qk: bool = True,
         use_vo: bool = False,
         gen_type: str = "A",
+        use_cls_token: bool = False,
         **kwargs,
     ):
         self.lora_rank = lora_rank
@@ -2570,6 +2590,7 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
             gen_type=gen_type,
             use_qk=use_qk,
             use_vo=use_vo,
+            use_cls_token=use_cls_token,
             **kwargs,
         )
 
@@ -2642,6 +2663,7 @@ class LoRAFFNTransformer(StateSpaceTransformer):
         lora_rank: int = 16,
         lora_alpha: float = 2.0,
         gen_type: str = "A",
+        use_cls_token: bool = False,
         **kwargs,
     ):
         self.lora_rank = lora_rank
@@ -2663,6 +2685,7 @@ class LoRAFFNTransformer(StateSpaceTransformer):
             lora_rank=lora_rank,
             lora_alpha=lora_alpha,
             gen_type=gen_type,
+            use_cls_token=use_cls_token,
             **kwargs,
         )
 

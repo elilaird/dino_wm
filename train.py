@@ -554,6 +554,9 @@ class Trainer:
         if self.cfg.concat_dim == 0:
             num_patches += 2
 
+        if self.cfg.use_cls_token:
+            num_patches += 1
+
         if self.cfg.has_predictor:
             if self.predictor is None:
                 dim = self.encoder.emb_dim + (
