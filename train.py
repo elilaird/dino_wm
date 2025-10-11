@@ -316,7 +316,8 @@ class Trainer:
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
-
+        self._keys_to_save += ["aux_predictor", "aux_predictor_optimizer"] if self.cfg.train_aux_predictor else []
+        
         self.init_models()
         self.init_optimizers()
         
@@ -420,6 +421,7 @@ class Trainer:
                 "proprio_encoder",
                 "action_encoder",
                 "decoder",
+                "aux_predictor"
             ]
         ):
             # This is a state dict format checkpoint
@@ -557,9 +559,10 @@ class Trainer:
         if self.cfg.use_cls_token:
             num_patches += 1
 
+        predictor_dim = None
         if self.cfg.has_predictor:
             if self.predictor is None:
-                dim = self.encoder.emb_dim + (
+                predictor_dim = self.encoder.emb_dim + (
                     proprio_emb_dim * self.cfg.num_proprio_repeat
                     + action_emb_dim * self.cfg.num_action_repeat
                 ) * (self.cfg.concat_dim)
@@ -567,11 +570,11 @@ class Trainer:
                     self.cfg.predictor,
                     num_patches=num_patches,
                     num_frames=self.cfg.num_hist,
-                    dim=dim,
+                    dim=predictor_dim,
                 )
                 # update cfg for saving
                 with open_dict(self.cfg):
-                    self.cfg.predictor.dim = dim
+                    self.cfg.predictor.dim = predictor_dim
                     self.cfg.predictor.num_patches = num_patches
                     self.cfg.predictor.num_frames = self.cfg.num_hist
 
@@ -606,6 +609,12 @@ class Trainer:
             if not self.train_decoder:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
+        
+        if self.cfg.train_aux_predictor:
+            self.aux_predictor = hydra.utils.instantiate(
+                self.cfg.aux_predictor,
+                dim=predictor_dim,
+            )
 
         for name, mod in dict(
             encoder=self.encoder,
@@ -619,19 +628,18 @@ class Trainer:
                 assert n >= 0, f"{name} has negative param count?"
         self.accelerator.wait_for_everyone()
 
+        models = [self.encoder, self.predictor, self.decoder, self.proprio_encoder, self.action_encoder]
+        if self.cfg.train_aux_predictor:
+            models.append(self.aux_predictor)
+
         (
             self.encoder,
             self.predictor,
             self.decoder,
             self.proprio_encoder,
             self.action_encoder,
-        ) = self.accelerator.prepare(
-            self.encoder,
-            self.predictor,
-            self.decoder,
-            self.proprio_encoder,
-            self.action_encoder,
-        )
+        ) = self.accelerator.prepare(*models)
+
 
         self.model = hydra.utils.instantiate(
             self.cfg.model,
@@ -642,6 +650,7 @@ class Trainer:
             proprio_encoder=self.proprio_encoder,
             action_encoder=self.action_encoder,
             predictor=self.predictor,
+            aux_predictor=self.aux_predictor,
             decoder=self.decoder,
             proprio_dim=proprio_emb_dim,
             action_dim=action_emb_dim,
@@ -735,6 +744,20 @@ class Trainer:
                 log.info(
                     f"Decoder LR: {self.cfg.training.decoder_lr} -> {self.cfg.training.decoder_lr * lr_scale}"
                 )
+        
+        if self.cfg.train_aux_predictor:
+            self.aux_predictor_optimizer = torch.optim.AdamW(
+                self.aux_predictor.parameters(),
+                lr=self.cfg.training.aux_predictor_lr * lr_scale,
+                weight_decay=self.cfg.training.aux_predictor_weight_decay,
+            )
+            self.aux_predictor_optimizer = self.accelerator.prepare(
+                self.aux_predictor_optimizer
+            )
+            if self.accelerator.is_main_process:
+                log.info(
+                    f"Aux Predictor LR: {self.cfg.training.aux_predictor_lr} -> {self.cfg.training.aux_predictor_lr * lr_scale}"
+                )
 
         # Initialize learning rate schedulers
         self.schedulers = {}
@@ -806,6 +829,16 @@ class Trainer:
                     eta_min=self.cfg.training.decoder_lr
                     * lr_scale
                     * eta_min_ratio,
+                    decay_factor=decay_factor,
+                    warmup_epochs=warmup_steps,
+                )
+
+            if self.cfg.train_aux_predictor:s
+                self.schedulers["aux_predictor"] = CosineAnnealingWarmRestartsDecay(
+                    self.aux_predictor_optimizer,
+                    T_0=T_0_steps,
+                    T_mult=T_mult,
+                    eta_min=self.cfg.training.aux_predictor_lr * lr_scale * eta_min_ratio,
                     decay_factor=decay_factor,
                     warmup_epochs=warmup_steps,
                 )
@@ -944,13 +977,6 @@ class Trainer:
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
-
-            # if hasattr(self.model.predictor, "reset_memory"):
-            #     self.model.predictor.reset_memory()
-            # elif hasattr(self.model.predictor, "module") and hasattr(
-            #     self.model.predictor.module, "reset_memory"
-            # ):
-            #     self.model.predictor.module.reset_memory()
             self.model.reset_predictor_memory()
 
             batch_loss_components = defaultdict(float)

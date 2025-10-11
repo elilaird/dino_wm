@@ -24,6 +24,19 @@ NUM_FRAMES = 1
 NUM_PATCHES = 1
 
 
+class RetentionPredictor(nn.Module):
+    def __init__(self, dim, hidden_mul=2):
+        super().__init__()
+        self.hidden_mul = hidden_mul
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * hidden_mul),
+            nn.GELU(),
+            nn.Linear(dim * hidden_mul, dim),
+        )
+    
+    def forward(self, x):
+        return self.mlp(x)
+
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):
         super().__init__()
@@ -380,7 +393,7 @@ class ViTPredictor(nn.Module):
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
         x = self.transformer(x)
-        return x
+        return x, None
 
 
 class ViTPredictorWithPersistentTokens(nn.Module):
@@ -442,7 +455,7 @@ class ViTPredictorWithPersistentTokens(nn.Module):
         # drop persistent tokens
         if self.persistent_tokens is not None:
             x = x[:, self.n_persist :, :]
-        return x
+        return x, None
 
 
 class AdditiveControlTransformer(Transformer):
@@ -483,7 +496,7 @@ class AdditiveControlTransformer(Transformer):
                     dim=1,
                 )
                 x = x + injection
-        return self.norm(x)
+        return self.norm(x), None
 
 
 class AdditiveControlViTPredictor(nn.Module):
@@ -545,7 +558,7 @@ class AdditiveControlViTPredictor(nn.Module):
         x = x[:, :-1, :]  # remove the action token
         x = self.transformer(x, action_emb)
         x = torch.cat([x, action_emb], dim=1)
-        return x
+        return x, None
 
 
 class MAGTransformerBlock(nn.Module):
@@ -660,7 +673,7 @@ class MAGTransformer(nn.Module):
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
-        return self.norm(x)
+        return self.norm(x), None
 
     def reset_memory(self):
         for layer in self.layers:
@@ -882,7 +895,7 @@ class MACTransformer(nn.Module):
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
-        return self.norm(x)
+        return self.norm(x), None
 
 
 class MACViTPredictor(nn.Module):
@@ -1028,7 +1041,7 @@ class LayerMACTransformer(nn.Module):
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
-        return self.norm(x)
+        return self.norm(x), None
 
     def reset_memory(self):
         for layer in self.layers:
@@ -1204,7 +1217,7 @@ class LookupTransformer(nn.Module):
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
-        return self.norm(x)
+        return self.norm(x), None
 
 
 class LookupViTPredictor(nn.Module):
@@ -1312,6 +1325,7 @@ class StateSpaceTransformer(nn.Module):
     def _build_mem_blocks(
         self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
     ):
+        self.ln_mem_out = nn.LayerNorm(dim)
         self.mem_blocks = nn.ModuleList([])
         for _ in range(n_mem_blocks):
             self.mem_blocks.append(
@@ -1400,7 +1414,7 @@ class StateSpaceTransformer(nn.Module):
             # remove the prepended tokens
             ctx = ctx[:, T:, :]
 
-        return self.ln_out(ctx)
+        return self.ln_out(ctx), self.ln_mem_out(M_new)
 
     def reset_memory(self):
         for mem_block, _ in self.mem_blocks:
@@ -1484,7 +1498,7 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
             x = x + self.injection_layers[i](M_new) * self.alphas[i]
             x = x + ff(x)
 
-        return self.ln_out(x)
+        return self.ln_out(x), self.ln_mem_out(M_new)
 
 class AdaMemSSMTransformer(StateSpaceTransformer):
     def __init__(
@@ -1555,7 +1569,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
             x = self.injection_layers[i](x, M_new)
             x = x + ff(x)
 
-        return self.ln_out(x)
+        return self.ln_out(x), self.ln_mem_out(M_new)
 
 
 class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
@@ -1620,7 +1634,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
             x = x + self.injection_layers[i](x, M_new)
             x = x + ff(x)
 
-        return self.ln_out(x)
+        return self.ln_out(x), self.ln_mem_out(M_new)
 
 
 class StateSpaceViTPredictor(nn.Module):
@@ -2072,7 +2086,7 @@ class HybridTransformer(nn.Module):
         """
         for layer in self.layers:
             x = layer(x)
-        return self.norm(x)
+        return self.norm(x), None
 
     def reset_memory(self):
         for layer in self.layers:
@@ -2135,8 +2149,7 @@ class HybridViTPredictor(nn.Module):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
-        x = self.transformer(x)
-        return x
+        return self.transformer(x)
 
     def reset_memory(self):
         self.transformer.reset_memory()
@@ -2350,7 +2363,7 @@ class CLSMemoryTransformer(nn.Module):
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
-        return self.norm(x)
+        return self.norm(x), None
 
     def set_step_size(self, step_size):
         for layer in self.layers:
@@ -2620,7 +2633,7 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
         for attn, ff in self.layers:
             x = x + attn(x, M_new)
             x = x + ff(x)
-        return self.ln_out(x)
+        return self.ln_out(x), self.ln_mem_out(M_new)
 
 
 ########### LoRA FFN with Memory ###########
@@ -2712,7 +2725,7 @@ class LoRAFFNTransformer(StateSpaceTransformer):
         for attn, ff in self.layers:
             x = x + attn(x)
             x = x + ff(x, M_new)
-        return self.ln_out(x)
+        return self.ln_out(x), self.ln_mem_out(M_new)
 
 
 class LoRAInjectionViTPredictor(nn.Module):
@@ -2968,7 +2981,7 @@ class DynamicFFNTransformer(StateSpaceTransformer):
             x = x + attn(x)
             x = x + ff(x, M_new) # could cache generated AB matrices
 
-        return self.ln_out(x)
+        return self.ln_out(x), self.ln_mem_out(M_new)
 
 
 class DynamicFFNVitPredictor(nn.Module):

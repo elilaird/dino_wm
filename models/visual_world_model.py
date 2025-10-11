@@ -25,6 +25,8 @@ class VWorldModel(nn.Module):
         decoder_loss_type='mse',
         step_size=1,
         use_cls_token=False,
+        aux_predictor=None,
+        **kwargs,
     ):
         super().__init__()
         self.num_hist = num_hist
@@ -44,7 +46,8 @@ class VWorldModel(nn.Module):
         self.decoder_loss_type = decoder_loss_type 
         self.step_size = step_size
         self.use_cls_token = use_cls_token
-        
+        self.aux_predictor = aux_predictor
+
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
             encoder_patch_size = self.encoder.module.patch_size
@@ -71,9 +74,6 @@ class VWorldModel(nn.Module):
         self.encoder_transform = transforms.Compose(
             [transforms.Resize(self.encoder_image_size)]
         )
-        # else:
-        #     # set self.encoder_transform to identity transform
-        #     self.encoder_transform = lambda x: x
 
         # Initialize decoder criterion based on config
         self.decoder_loss_type = getattr(self, 'decoder_loss_type', 'mse')
@@ -82,7 +82,10 @@ class VWorldModel(nn.Module):
         else:  # default to mse
             self.decoder_criterion = nn.MSELoss()
         print(f"Decoder loss type: {self.decoder_criterion}")
-        
+
+        if self.aux_predictor is not None:
+            self.aux_predictor_criterion = nn.MSELoss()
+
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
 
@@ -96,6 +99,8 @@ class VWorldModel(nn.Module):
         self.action_encoder.train(mode)
         if self.decoder is not None and self.train_decoder:
             self.decoder.train(mode)
+        if self.aux_predictor is not None:
+            self.aux_predictor.train(mode)
 
     def eval(self):
         super().eval()
@@ -106,6 +111,8 @@ class VWorldModel(nn.Module):
         self.action_encoder.eval()
         if self.decoder is not None:
             self.decoder.eval()
+        if self.aux_predictor is not None:
+            self.aux_predictor.eval()
 
     def encode(self, obs, act): 
         """
@@ -161,9 +168,18 @@ class VWorldModel(nn.Module):
         # reshape to a batch of windows of inputs
         z = rearrange(z, "b t p d -> b (t p) d")
         # (b, num_hist * num_patches per img, emb_dim)
-        z = self.predictor(z)
+        z, s = self.predictor(z)
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
-        return z
+        if s is not None:
+            s = rearrange(s, "b (t p) d -> b t p d", t=T)
+        return z, s
+    
+    def predict_aux(self, s):
+        """
+        input : s: (b, num_hist, num_patches, emb_dim)
+        output: s: (b, num_hist, num_patches, emb_dim)
+        """
+        return self.aux_predictor(s)
 
     def decode(self, z):
         """
@@ -230,7 +246,7 @@ class VWorldModel(nn.Module):
         ]  # (b, num_hist, 3, img_size, img_size)
 
         if self.predictor is not None:
-            z_pred = self.predict(z_src)
+            z_pred, s = self.predict(z_src)
             if self.decoder is not None:
                 obs_pred, diff_pred = self.decode(
                     z_pred.detach()
@@ -290,6 +306,13 @@ class VWorldModel(nn.Module):
                     z_tgt[:, :, :, : -self.action_dim].detach(),
                 )
 
+            if self.aux_predictor is not None:
+                z_ret_pred = self.predict_aux(s)
+                # TODO: update the selection of z_tgt
+                z_ret_loss = self.aux_predictor_criterion(z_ret_pred[:, :, :-2, :], z_tgt[:, :, :-2, :].detach())
+                loss = loss + z_ret_loss
+                loss_components["z_ret_loss"] = z_ret_loss
+
             loss = loss + z_loss
             loss_components["z_loss"] = z_loss
             loss_components["z_visual_loss"] = z_visual_loss
@@ -348,10 +371,8 @@ class VWorldModel(nn.Module):
         if not bypass_memory_reset:
             self.reset_predictor_memory()
 
-
         # set step size to 1 for autoregressive rollout
         self.set_predictor_step_size(1)
-        
 
         num_obs_init = obs_0['visual'].shape[1]
         act_0 = act[:, :num_obs_init]
@@ -360,14 +381,14 @@ class VWorldModel(nn.Module):
         t = 0
         inc = 1
         while t < action.shape[1]:
-            z_pred = self.predict(z[:, -self.num_hist :])
+            z_pred, _ = self.predict(z[:, -self.num_hist :])
             z_new = z_pred[:, -inc:, ...]
             z_new = self.replace_actions_from_z(z_new, action[:, t : t + inc, :])
             z = torch.cat([z, z_new], dim=1)
 
             t += inc
 
-        z_pred = self.predict(z[:, -self.num_hist :])
+        z_pred, _ = self.predict(z[:, -self.num_hist :])
         z_new = z_pred[:, -1 :, ...] # take only the next pred
         z = torch.cat([z, z_new], dim=1)
         z_obses, z_acts = self.separate_emb(z)
