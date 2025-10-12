@@ -891,8 +891,9 @@ class Trainer:
         # test and save results
         self.test()
         self.accelerator.wait_for_everyone()
+        self.logs_flash(step=self.epoch)
 
-    def train_step(self, obs, act):
+    def train_step(self, obs, act, aux_obs=None):
         self.model.train()
         self.encoder_optimizer.zero_grad()
         if self.cfg.has_decoder:
@@ -900,9 +901,11 @@ class Trainer:
         if self.cfg.has_predictor:
             self.predictor_optimizer.zero_grad()
             self.action_encoder_optimizer.zero_grad()
+        if self.cfg.train_aux_predictor:
+            self.aux_predictor_optimizer.zero_grad()
 
         z_out, visual_out, visual_reconstructed, loss, loss_components = (
-            self.model(obs, act)
+            self.model(obs, act, aux_obs)
         )
         self.accelerator.backward(loss)
         assert not torch.isnan(loss), f"Loss is NaN at epoch {self.epoch}"
