@@ -610,6 +610,7 @@ class Trainer:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
         
+        self.aux_predictor = None
         if self.cfg.train_aux_predictor:
             self.aux_predictor = hydra.utils.instantiate(
                 self.cfg.aux_predictor,
