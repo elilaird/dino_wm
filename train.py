@@ -833,7 +833,7 @@ class Trainer:
                     warmup_epochs=warmup_steps,
                 )
 
-            if self.cfg.train_aux_predictor:s
+            if self.cfg.train_aux_predictor:
                 self.schedulers["aux_predictor"] = CosineAnnealingWarmRestartsDecay(
                     self.aux_predictor_optimizer,
                     T_0=T_0_steps,
