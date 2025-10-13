@@ -2760,6 +2760,7 @@ class DynamicLoRAAttention(nn.Module):
                 alpha=alpha,
                 gen_type=gen_type,
                 use_bias=False,
+                mem_features=dim,
             )
         else:
             self.v_proj = nn.Linear(dim, inner_dim, bias=False)
@@ -2906,7 +2907,7 @@ class DynamicLoRAFFN(nn.Module):
         super().__init__()
         self.W1 = DynamicLoRALinear(dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
         self.W2 = DynamicLoRALinear(dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
-        self.W3 = DynamicLoRALinear(hidden_dim, dim, r, alpha=alpha, gen_type=gen_type)
+        self.W3 = DynamicLoRALinear(hidden_dim, dim, r, alpha=alpha, gen_type=gen_type, mem_features=dim)
 
         self.silu = nn.SiLU()
         self.dropout = nn.Dropout(dropout)

@@ -447,11 +447,13 @@ class DynamicLoRALinear(nn.Module):
         alpha: float = 2.0,
         use_bias: bool = True,
         gen_type: str = "A", 
+        mem_features: int = None,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.gen_type = gen_type
+        self.mem_features = mem_features if mem_features is not None else in_features
         assert gen_type in {"A", "B", "AB"}, "Invalid type"
    
         # base linear parameters
@@ -472,7 +474,7 @@ class DynamicLoRALinear(nn.Module):
             # gen both AB
             gen_out = out_features # AB: r x in_features
             
-        self.gen = LowRankGenerator(in_features, gen_out, r) if not gen_type == "AB" else LoRAGenerator(in_features, in_features, gen_out, r)
+        self.gen = LowRankGenerator(self.mem_features, gen_out, r) if not gen_type == "AB" else LoRAGenerator(self.mem_features, in_features, gen_out, r)
         self.scale = alpha / float(r)
         self.r = r
         self.reset_parameters()
