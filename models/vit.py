@@ -1787,6 +1787,14 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
             x = x + ff(x)
 
         return self.ln_out(x), self.ln_mem_out(M_new)
+    
+    def reset_memory(self):
+        for mem_block in self.mem_blocks:
+            mem_block.reset_memory()
+
+    def set_step_size(self, step_size):
+        for mem_block in self.mem_blocks:
+            mem_block.set_step_size(step_size)
 
 
 class StateSpaceViTPredictor(nn.Module):
