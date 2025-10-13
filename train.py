@@ -2235,10 +2235,11 @@ class Trainer:
         lr_msg += f"  Decoder LR: {self.decoder_optimizer.param_groups[0]['lr']:.2e}"
         lr_msg += f"  Action Encoder LR: {self.action_encoder_optimizer.param_groups[0]['lr']:.2e}"
 
-        log.info(
-            f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
-                Validation loss: {epoch_log['val_loss']:.4f}{epoch_time_msg}{lr_msg}"
-        )
+        if 'train_loss' in epoch_log:
+            log.info(
+                f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
+                    Validation loss: {epoch_log['val_loss']:.4f}{epoch_time_msg}{lr_msg}"
+            )
 
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
