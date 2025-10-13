@@ -6,6 +6,7 @@ from torch.nn import functional as F
 
 from .model_utils import *
 from .memory_retrieval import (
+    BasicHiddenMambaLayer,
     NeuralMemory,
     LookupMemory,
     MambaLayer,
@@ -157,6 +158,57 @@ class CrossAttention(nn.Module):
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
 
+class CrossAttentionInjection(nn.Module):
+    def __init__(self, q_dim, kv_dim, heads=8, dim_head=64, dropout=0.0, bias=None):
+        super().__init__()
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == q_dim)
+
+        self.heads = heads
+        self.scale = dim_head**-0.5
+
+        self.norm = nn.LayerNorm(q_dim)
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+
+        self.to_q = nn.Linear(q_dim, inner_dim, bias=False)
+        self.to_kv = nn.Linear(kv_dim, inner_dim * 2, bias=False)
+
+        self.to_out = (
+            nn.Sequential(nn.Linear(inner_dim, q_dim), nn.Dropout(dropout))
+            if project_out
+            else nn.Identity()
+        )
+
+        if bias is None:
+            bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
+        self.register_buffer("bias", bias)
+
+    def forward(self, x, context):
+        B, T, C = x.size()
+        B_c, T_c, C_c = context.size()
+
+        x = self.norm(x)
+
+        q = self.to_q(x)
+        kv = self.to_kv(context)
+        k, v = kv.chunk(2, dim=-1)
+
+        q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
+        k = rearrange(k, "b n (h d) -> b h n d", h=self.heads)
+        v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        
+        # apply causal mask - prevent attending to future memory tokens
+        dots = dots.masked_fill(self.bias[:, :, :T, :T_c] == 0, float("-inf"))
+
+        attn = self.attend(dots)
+        attn = self.dropout(attn)
+
+        out = torch.matmul(attn, v)
+        out = rearrange(out, "b h n d -> b n (h d)")
+        return self.to_out(out)
 
 class AttentionWithLoRA(nn.Module):
     def __init__(
@@ -1325,7 +1377,7 @@ class StateSpaceTransformer(nn.Module):
     def _build_mem_blocks(
         self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
     ):
-        self.ln_mem_out = nn.LayerNorm(dim)
+        self.ln_mem_out = nn.Identity() # nn.LayerNorm(dim) #TODO: add back in
         self.mem_blocks = nn.ModuleList([])
         for _ in range(n_mem_blocks):
             self.mem_blocks.append(
@@ -1637,6 +1689,106 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
         return self.ln_out(x), self.ln_mem_out(M_new)
 
 
+class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        state_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        dim_head=64,
+        dt_rank: int = 16,
+        use_cls_token: bool = False,
+        **kwargs,
+    ):
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            state_dim,
+            step_size,
+            n_mem_blocks,
+            dropout,
+            dim_head,
+            dt_rank,
+            use_cls_token=use_cls_token,
+            **kwargs,
+        )
+
+    def _build_mem_blocks(
+        self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
+    ):
+        self.ln_mem_out = nn.Identity() # nn.LayerNorm(dim) #TODO: add back in
+        self.mem_blocks = nn.ModuleList([])
+        for _ in range(n_mem_blocks):
+            self.mem_blocks.append(
+                nn.ModuleList(
+                    [
+                        BasicHiddenMambaLayer(
+                            d_model=dim,
+                            n_state=state_dim,
+                            step_size=self.step_size,
+                            num_patches=self.num_patches if not self.use_cls_token else 1,
+                            dt_rank=dt_rank,
+                            dropout=dropout,
+                        ),
+                    ]
+                )
+            )
+    
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.layers = nn.ModuleList([])
+        self.injection_layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(dim, heads, dim_head, dropout),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            # Generate bias mask for cross-attention to prevent attending to future memory tokens
+            bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
+            self.injection_layers.append(
+                CrossAttentionInjection(dim, self.state_dim, heads, dim_head, dropout, bias=bias)
+            )
+    
+    def _mem_blocks_forward(self, x):
+        B, T, D = x.shape
+        x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
+        if self.use_cls_token:
+            x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
+        for mem_block in self.mem_blocks:
+            x = mem_block(x)
+        
+        if self.use_cls_token:
+            # repeat the cls token to the number of patches
+            x = x.repeat(1, 1, self.num_patches, 1)
+        return rearrange(x, "b t p d -> b (t p) d")
+
+
+    def forward(self, x):
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
+
+        for i, (attn, ff) in enumerate(self.layers):
+            x = x + attn(x)
+            x = x + self.injection_layers[i](x, M_new)
+            x = x + ff(x)
+
+        return self.ln_out(x), self.ln_mem_out(M_new)
+
+
 class StateSpaceViTPredictor(nn.Module):
     def __init__(
         self,
@@ -1736,6 +1888,21 @@ class StateSpaceViTPredictor(nn.Module):
         
         elif injection_type == "ssm_ca":
             self.transformer = MemCrossAttentionSSMTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
+                use_cls_token=use_cls_token,
+            )
+        elif injection_type == "ca_hidden":
+            self.transformer = HiddenMemCrossAttentionSSMTransformer(
                 dim=dim,
                 num_patches=num_patches,
                 depth=depth,
