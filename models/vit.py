@@ -2914,7 +2914,7 @@ class DynamicLoRAFFN(nn.Module):
     def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
         x1 = self.W1(x, m_tok)
         x2 = self.W2(x, m_tok) 
-        return self.W3(self.dropout(self.silu(x1) * x2))
+        return self.W3(self.dropout(self.silu(x1) * x2), m_tok)
 
 
 class LoRAFFNTransformer(StateSpaceTransformer):
