@@ -420,15 +420,75 @@ class MambaLayer(nn.Module):
     def set_step_size(self, step_size):
         self.step_size = step_size
 
-class BasicHiddenMambaLayer(nn.Module):
-    def __init__(self, d_model: int, n_state: int, step_size: int, num_patches: int, dropout: float = 0.0):
+
+class BasicMambaLayer(nn.Module):
+    # ssm block following: Facing off World Model Backbones paper
+
+    def __init__(
+        self,
+        d_model: int,
+        n_state: int,
+        step_size: int,
+        num_patches: int,
+        dt_rank: int = 4,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         self.d_model = d_model
         self.n_state = n_state
         self.step_size = step_size
-        self.num_patches = num_patches
+        self.dt_rank = dt_rank
         self.dropout = dropout
-        self.ssm = MambaSSMCell(d_model, n_state)
+        self.num_patches = num_patches
+
+        self.ssm = MambaSSMCell(d_model, n_state, dt_rank)
+        self.H_cache = None
+
+    def forward(self, x):
+        if self.H_cache is None:
+            self.H_cache = self.init_state(x.size(0), device=x.device)
+
+        y = self.layer_norm(x)
+        H_new, y, _ = self.ssm(y, self.H_cache, mode="scan")
+        self.H_cache = H_new[
+            :, min(self.step_size - 1, y.size(1) - 1)
+        ].detach()
+
+        return y
+
+    def init_state(self, B: int, device=None):
+        return self.ssm.init_state(
+            B, self.num_patches, self.n_state, device=device
+        )
+
+    def reset_memory(self):
+        self.H_cache = None
+
+    def set_step_size(self, step_size):
+        self.step_size = step_size
+
+
+class BasicHiddenMambaLayer(nn.Module):
+
+    def __init__(
+        self,
+        d_model: int,
+        n_state: int,
+        step_size: int,
+        num_patches: int,
+        dt_rank: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.n_state = n_state
+        self.step_size = step_size
+        self.dt_rank = dt_rank
+        self.dropout = dropout
+        self.num_patches = num_patches
+
+        self.ssm = MambaSSMCell(d_model, n_state, dt_rank)
+        self.H_cache = None
         self.layer_norm = nn.LayerNorm(d_model)
 
     def forward(self, x):
