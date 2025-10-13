@@ -7,6 +7,7 @@ from torch.nn import functional as F
 from .model_utils import *
 from .memory_retrieval import (
     BasicHiddenMambaLayer,
+    BasicMambaLayer,
     NeuralMemory,
     LookupMemory,
     MambaLayer,
@@ -1689,6 +1690,76 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
         return self.ln_out(x), self.ln_mem_out(M_new)
 
 
+class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        state_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        dim_head=64,
+        dt_rank: int = 16,
+        use_cls_token: bool = False,
+        **kwargs,
+    ):
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            state_dim,
+            step_size,
+            n_mem_blocks,
+            dropout,
+            dim_head,
+            dt_rank,
+            use_cls_token=use_cls_token,
+            **kwargs,
+        )
+    
+    def _build_mem_blocks(
+        self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
+    ):
+        self.ln_mem_out = nn.Identity() # nn.LayerNorm(dim) #TODO: add back in
+        self.mem_blocks = nn.ModuleList([])
+        for _ in range(n_mem_blocks):
+            self.mem_blocks.append(
+                BasicMambaLayer(
+                    d_model=dim,
+                    n_state=state_dim,
+                    step_size=self.step_size,
+                    num_patches=self.num_patches if not self.use_cls_token else 1,
+                    dt_rank=dt_rank,
+                    dropout=dropout,
+                ),
+            )
+    def _mem_blocks_forward(self, x):
+        B, T, D = x.shape
+        x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
+        if self.use_cls_token:
+            x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
+        for mem_block in self.mem_blocks:
+            x = mem_block(x)
+        
+        if self.use_cls_token:
+            # repeat the cls token to the number of patches
+            x = x.repeat(1, 1, self.num_patches, 1)
+        return rearrange(x, "b t p d -> b (t p) d")
+
+    def reset_memory(self):    
+        for mem_block in self.mem_blocks:
+            mem_block.reset_memory()
+
+    def set_step_size(self, step_size):
+        for mem_block in self.mem_blocks:
+            mem_block.set_step_size(step_size)
+
 class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
     def __init__(
         self,
@@ -1908,6 +1979,21 @@ class StateSpaceViTPredictor(nn.Module):
             )
         elif injection_type == "ca_hidden":
             self.transformer = HiddenMemCrossAttentionSSMTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                dt_rank=dt_rank,
+                use_cls_token=use_cls_token,
+            )
+        elif injection_type == "ca_basic":
+            self.transformer = BasicMemCrossAttentionSSMTransformer(
                 dim=dim,
                 num_patches=num_patches,
                 depth=depth,
