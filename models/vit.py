@@ -2909,7 +2909,7 @@ class DynamicLoRAFFN(nn.Module):
         self.W3 = DynamicLoRALinear(hidden_dim, dim, r, alpha=alpha, gen_type=gen_type)
 
         self.silu = nn.SiLU()
-        self.drop = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
         x1 = self.W1(x, m_tok)
