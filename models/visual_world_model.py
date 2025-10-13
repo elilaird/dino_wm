@@ -85,9 +85,12 @@ class VWorldModel(nn.Module):
 
         if self.aux_predictor is not None:
             self.aux_predictor_criterion = nn.MSELoss()
+            self.retention_cache = [] # cache for retention predictor
 
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
+
+        
 
     def train(self, mode=True):
         super().train(mode)
@@ -159,7 +162,7 @@ class VWorldModel(nn.Module):
         proprio_emb = self.encode_proprio(proprio)
         return {"visual": visual_embs, "proprio": proprio_emb}
 
-    def predict(self, z, global_start_pos=0):  # in embedding space
+    def predict(self, z):  # in embedding space
         """
         input : z: (b, num_hist, num_patches, emb_dim)
         output: z: (b, num_hist, num_patches, emb_dim)
@@ -224,10 +227,11 @@ class VWorldModel(nn.Module):
         z_obs = {"visual": z_visual, "proprio": z_proprio}
         return z_obs, z_act
 
-    def forward(self, obs, act):
+    def forward(self, obs, act, aux_obs=None):
         """
         input:  obs (dict):  "visual", "proprio" (b, num_frames, 3, img_size, img_size)
                 act: (b, num_frames, action_dim)
+                aux_obs: "visual", "proprio", "actions"
         output: z_pred: (b, num_hist, num_patches, emb_dim)
                 visual_pred: (b, num_hist, 3, img_size, img_size)
                 visual_reconstructed: (b, num_frames, 3, img_size, img_size)
