@@ -123,7 +123,7 @@ class Trainer:
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
-        if self.cfg.model.train_encoder:
+        if self.cfg.model.train_encoder or self.cfg.predictor.injection_type == "ca_hidden":
             ddp_kwargs = DistributedDataParallelKwargs(
                 find_unused_parameters=True 
             )

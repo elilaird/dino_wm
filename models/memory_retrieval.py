@@ -422,7 +422,6 @@ class MambaLayer(nn.Module):
 
 
 class BasicMambaLayer(nn.Module):
-    # ssm block following: Facing off World Model Backbones paper
 
     def __init__(
         self,
@@ -442,6 +441,7 @@ class BasicMambaLayer(nn.Module):
         self.num_patches = num_patches
 
         self.ssm = MambaSSMCell(d_model, n_state, dt_rank)
+        self.layer_norm = nn.LayerNorm(d_model)
         self.H_cache = None
 
     def forward(self, x):
@@ -496,10 +496,10 @@ class BasicHiddenMambaLayer(nn.Module):
             self.H_cache = self.init_state(x.size(0), device=x.device)
 
         y = self.layer_norm(x)
-        H_new, _, H_T = self.ssm(y, self.H_cache, mode="scan")
+        H_new, y, H_T = self.ssm(y, self.H_cache, mode="scan")
         self.H_cache = H_new[:, min(self.step_size - 1, y.size(1) - 1)].detach()
 
-        return H_T
+        return y, H_new
 
     def init_state(self, B: int, device=None):
         return self.ssm.init_state(B, self.num_patches, self.n_state, device=device)

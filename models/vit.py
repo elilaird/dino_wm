@@ -1729,18 +1729,14 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
         self.mem_blocks = nn.ModuleList([])
         for _ in range(n_mem_blocks):
             self.mem_blocks.append(
-                nn.ModuleList(
-                    [
-                        BasicHiddenMambaLayer(
-                            d_model=dim,
-                            n_state=state_dim,
-                            step_size=self.step_size,
-                            num_patches=self.num_patches if not self.use_cls_token else 1,
-                            dt_rank=dt_rank,
-                            dropout=dropout,
-                        ),
-                    ]
-                )
+                BasicHiddenMambaLayer(
+                    d_model=dim,
+                    n_state=state_dim,
+                    step_size=self.step_size,
+                    num_patches=self.num_patches if not self.use_cls_token else 1,
+                    dt_rank=dt_rank,
+                    dropout=dropout,
+                ),
             )
     
     def _build_transformer(
@@ -1769,12 +1765,13 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
         if self.use_cls_token:
             x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
         for mem_block in self.mem_blocks:
-            x = mem_block(x)
+            x, H_T = mem_block(x)
         
         if self.use_cls_token:
             # repeat the cls token to the number of patches
-            x = x.repeat(1, 1, self.num_patches, 1)
-        return rearrange(x, "b t p d -> b (t p) d")
+            H_T = H_T.repeat(1, 1, self.num_patches, 1)
+
+        return rearrange(H_T, "b t p d -> b (t p) d")
 
 
     def forward(self, x):
