@@ -564,6 +564,8 @@ class Trainer:
 
         if self.cfg.use_cls_token:
             num_patches += 1
+        
+        print(f"Num patches: {num_patches}", flush=True)
 
         predictor_dim = None
         if self.cfg.has_predictor:
@@ -1560,7 +1562,7 @@ class Trainer:
         self, z_pred, z_tgt, obs_tgt, obs_recon, reencoded_visuals
     ):
         logs = {}
-        for k in z_pred.keys():
+        for k in ['visual']:
             # mse between z_pred and z_tgt latents
             logs[f"{k}_latent_mse"] = torch.nn.functional.mse_loss(
                 z_pred[k], z_tgt[k]
@@ -1705,13 +1707,6 @@ class Trainer:
 
         # rollout with both num_hist and 1 frame as context
         num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
-
-        # if hasattr(self.model.predictor, "reset_memory"):
-        #     self.model.predictor.reset_memory()
-        # elif hasattr(self.model.predictor, "module") and hasattr(
-        #     self.model.predictor.module, "reset_memory"
-        # ):
-        #     self.model.predictor.module.reset_memory()
         self.model.reset_predictor_memory()
 
         # sample traj
@@ -1796,13 +1791,14 @@ class Trainer:
                             imgs,
                             obs["visual"].shape[0],
                             f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}_h{horizon}.png",
-                        )           
+                        )                           
 
                 if horizon_treatment is not None:
                     # compute rollout error progression
                     obs_tgt = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
                     z_tgts = self.model.encode_obs(obs_tgt)
                     z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
+
                     div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": visuals, "proprio": obs_tgt["proprio"]}, z_cycle)
                     for k in div_loss.keys():
                         logs[f"{k}_err_horizon_{postfix}_h{horizon}"].append(div_loss[k].cpu().numpy())

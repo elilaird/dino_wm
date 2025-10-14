@@ -199,14 +199,15 @@ class VWorldModel(nn.Module):
         output: obs: (b, num_frames, 3, img_size, img_size)
         """
         b, num_frames, num_patches, emb_dim = z_obs["visual"].shape
+        z = {k: v.clone() for k, v in z_obs.items()}
         if self.encoder.use_cls_token:
             # remove cls token
-            z_obs["visual"] = z_obs["visual"][:, :, 1:, :]
-        visual, diff = self.decoder(z_obs["visual"])  # (b*num_frames, 3, 224, 224)
+            z["visual"] = z["visual"][:, :, 1:, :]
+        visual, diff = self.decoder(z["visual"])  # (b*num_frames, 3, 224, 224)
         visual = rearrange(visual, "(b t) c h w -> b t c h w", t=num_frames)
         obs = {
             "visual": visual,
-            "proprio": z_obs["proprio"], # Note: no decoder for proprio for now!
+            "proprio": z["proprio"], # Note: no decoder for proprio for now!
         }
         return obs, diff
 
@@ -382,6 +383,7 @@ class VWorldModel(nn.Module):
         act_0 = act[:, :num_obs_init]
         action = act[:, num_obs_init:] 
         z = self.encode(obs_0, act_0)
+
         t = 0
         inc = 1
         while t < action.shape[1]:

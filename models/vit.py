@@ -1433,6 +1433,7 @@ class StateSpaceTransformer(nn.Module):
 
     def _mem_blocks_forward(self, x):
         B, T, D = x.shape
+        x = x.clone()
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
         if self.use_cls_token:
             x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
@@ -1741,6 +1742,7 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
             )
     def _mem_blocks_forward(self, x):
         B, T, D = x.shape
+        x = x.clone()
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
         if self.use_cls_token:
             x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
@@ -1832,6 +1834,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
     
     def _mem_blocks_forward(self, x):
         B, T, D = x.shape
+        x = x.clone()
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
         if self.use_cls_token:
             x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
