@@ -1777,6 +1777,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
         dim_head=64,
         dt_rank: int = 16,
         use_cls_token: bool = False,
+        shift_memory: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1794,6 +1795,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
             use_cls_token=use_cls_token,
             **kwargs,
         )
+        self.shift_memory = shift_memory
 
     def _build_mem_blocks(
         self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
@@ -1838,12 +1840,23 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
         if self.use_cls_token:
             x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
+        
+        if self.shift_memory:
+            H_0 = self.mem_blocks[0].H_cache
+            if H_0 is None:
+                H_0 = self.mem_blocks[0].init_state(B, device=x.device)
+            
+        
         for mem_block in self.mem_blocks:
             x, H_T = mem_block(x)
         
         if self.use_cls_token:
             # repeat the cls token to the number of patches
             H_T = H_T.repeat(1, 1, self.num_patches, 1)
+        
+        if self.shift_memory:
+            H_T = H_T[:, :-1, :, :]
+            H_T = torch.cat([H_0.unsqueeze(1), H_T], dim=1)
 
         return rearrange(H_T, "b t p d -> b (t p) d")
 
@@ -1893,6 +1906,7 @@ class StateSpaceViTPredictor(nn.Module):
         lora_alpha: float = 1.0,
         lora_dropout: float = 0.0,
         use_cls_token: bool = False,
+        shift_memory: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -1994,6 +2008,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dim_head=dim_head,
                 dt_rank=dt_rank,
                 use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
             )
         elif injection_type == "ca_basic":
             self.transformer = BasicMemCrossAttentionSSMTransformer(

@@ -455,7 +455,7 @@ class Trainer:
             elif k.endswith("_optimizer"):
                 # Load optimizer state dict
                 if k in ckpt and hasattr(self.__dict__[k], "load_state_dict"):
-                    self.__dict__[k].load_state_dict(ckpt[k])
+                    self.__dict__[k].load_state_dict(ckpt[k], strict=False)
                     log.info(f"Loaded optimizer {k} from state dict")
                 else:
                     log.warning(
@@ -468,9 +468,9 @@ class Trainer:
                     if hasattr(self.__dict__[k], "module"):
                         self.accelerator.unwrap_model(
                             self.__dict__[k]
-                        ).load_state_dict(ckpt[k])
+                        ).load_state_dict(ckpt[k], strict=False)
                     else:
-                        self.__dict__[k].load_state_dict(ckpt[k])
+                        self.__dict__[k].load_state_dict(ckpt[k], strict=False)
                     log.info(f"Loaded model {k} from state dict")
                 else:
                     log.warning(
@@ -854,7 +854,7 @@ class Trainer:
 
             if self.accelerator.is_main_process:
                 log.info(
-                    f"Initialized step-based cosine LR schedulers: T_0={T_0_steps} steps, T_mult={T_mult}, eta_min_ratio={eta_min_ratio}, decay_factor={decay_factor}, warmup_steps={warmup_steps}"
+                    f"Initialized step-based cosine LR schedulers: steps_per_epoch={steps_per_epoch}, T_0={T_0_steps} steps, T_mult={T_mult}, eta_min_ratio={eta_min_ratio}, decay_factor={decay_factor}, warmup_steps={warmup_steps}"
                 )
 
     def run(self):

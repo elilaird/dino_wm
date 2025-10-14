@@ -217,7 +217,10 @@ class SSMCell(nn.Module):
 
 class MambaSSMCell(nn.Module):
     """
-    Full Mamba-style selective SSM cell (diagonal state matrix).
+    Full Mamba-style selective SSM cell (diagonal state matrix) with forget/write gates.
+
+    Modified recurrence: h_t = (A_t ⊙ (1-λ_t)) ⊙ h_{t-1} + (γ_t ⊙ b_t)
+    where λ_t is the forget gate and γ_t is the write gate.
 
     Shapes:
       X_t:  [B, P, D]
@@ -226,7 +229,8 @@ class MambaSSMCell(nn.Module):
       scan(X_win, H0) with X_win: [B, T, P, D] -> (H_seq: [B,T,P,S], Y_seq: [B,T,P,D], H_T: [B,P,S])
     """
 
-    def __init__(self, d_model: int, n_state: int, dt_rank: int = 4):
+    def __init__(self, d_model: int, n_state: int, dt_rank: int = 4, 
+                 forget_gate_value: float = 0.0, write_gate_value: float = 1.0):
         super().__init__()
         self.D = d_model
         self.S = n_state
@@ -245,6 +249,10 @@ class MambaSSMCell(nn.Module):
         # Δ_t = softplus( W2( SiLU(W1 x_t) ) )  -> scalar per (B,P,1) then broadcast to S
         self.sDelta1 = nn.Linear(self.D, dt_rank, bias=True)
         self.sDelta2 = nn.Linear(dt_rank, 1, bias=True)
+
+        # ---- Forget and Write Gates (constant values)
+        self.register_buffer("forget_gate", torch.tensor(forget_gate_value))
+        self.register_buffer("write_gate", torch.tensor(write_gate_value))
 
         # ---- Readout: (C_t ⊙ h_t) -> D
         self.readout = nn.Linear(self.S, self.D, bias=False)
@@ -296,34 +304,45 @@ class MambaSSMCell(nn.Module):
           returns: (H_{t+1}, Y_{t+1}=[B,P,D])
         """
         A_t, b_t, C_t = self._selective_params(X_t)  # [B,P,S]
-        H_tp1 = A_t * H_t + b_t  # [B,P,S]
+        
+        # Modified recurrence: h_t = (A_t ⊙ (1-λ_t)) ⊙ h_{t-1} + (γ_t ⊙ b_t)
+        forget_factor = A_t * (1.0 - self.forget_gate)  # [B,P,S]
+        write_factor = self.write_gate * b_t            # [B,P,S]
+        H_tp1 = forget_factor * H_t + write_factor  # [B,P,S]
+        
         Y_tp1 = self.readout(C_t * H_tp1)  # [B,P,D]
         return H_tp1, Y_tp1
 
     # ---------- Fast parallel scan over a window (training) ----------
     @staticmethod
-    def _scan_window(A, b, H0):
+    def _scan_window(A, b, H0, forget_gate, write_gate):
         """
-        Parallel prefix for diagonal recurrence with initial state:
-          h_t = A_t ⊙ h_{t-1} + b_t
+        Parallel prefix for diagonal recurrence with forget/write gates:
+          h_t = (A_t ⊙ (1-λ_t)) ⊙ h_{t-1} + (γ_t ⊙ b_t)
         Closed form (inclusive):
-          P_t = Π_{j<=t} A_j
-          h_t = P_t ⊙ (H0 + Σ_{k<=t} b_k / P_k)
-        A,b:  [B, T, P, S]
+          P_t = Π_{j<=t} (A_j ⊙ (1-λ_j))
+          h_t = P_t ⊙ (H0 + Σ_{k<=t} (γ_k ⊙ b_k) / P_k)
+        A,b,lambda_t,gamma_t:  [B, T, P, S]
         H0:   [B, P, S]
         returns: H_seq [B,T,P,S]
         """
         eps = 1e-12
-        P = torch.cumprod(A.clamp_min(eps), dim=1)  # [B,T,P,S]
+        # Modified decay factors with forget gates
+        forget_factors = A * (1.0 - forget_gate)  # [B,T,P,S]
+        P = torch.cumprod(forget_factors.clamp_min(eps), dim=1)  # [B,T,P,S]
         invP = 1.0 / P.clamp_min(eps)  # [B,T,P,S]
-        c = torch.cumsum(b * invP, dim=1)  # [B,T,P,S]
+        
+        # Modified input terms with write gates
+        write_terms = write_gate * b  # [B,T,P,S]
+        c = torch.cumsum(write_terms * invP, dim=1)  # [B,T,P,S]
+        
         H0e = H0.unsqueeze(1)  # [B,1,P,S]
         H_seq = P * (H0e + c)  # [B,T,P,S]
         return H_seq
 
     def scan(self, X_win, H0):
         """
-        Parallel selective scan over a window:
+        Parallel selective scan over a window with forget/write gates:
           X_win: [B, T, P, D]
           H0:    [B, P, S]  (carried state from previous window)
         returns:
@@ -340,7 +359,7 @@ class MambaSSMCell(nn.Module):
         C_t = rearrange(C_t, "(b t) p s -> b t p s", b=B, t=T)
 
         # Parallel recurrence with initial state H0
-        H_seq = self._scan_window(A_t, b_t, H0)  # [B,T,P,S]
+        H_seq = self._scan_window(A_t, b_t, H0, self.forget_gate, self.write_gate)  # [B,T,P,S]
 
         # Readout (token-dependent C_t gates the state)
         Y_seq = self.readout((C_t * H_seq).reshape(B * T, P, self.S)).view(
@@ -377,7 +396,8 @@ class MambaSSMCell(nn.Module):
 class MambaLayer(nn.Module):
     # ssm block following: Facing off World Model Backbones paper
 
-    def __init__(self, d_model: int, n_state: int, step_size: int, num_patches: int, dt_rank: int = 4, dropout: float = 0.0):
+    def __init__(self, d_model: int, n_state: int, step_size: int, num_patches: int, dt_rank: int = 4, dropout: float = 0.0,
+                 forget_gate_value: float = 0.0, write_gate_value: float = 1.0):
         super().__init__()
         self.d_model = d_model
         self.n_state = n_state
@@ -386,7 +406,7 @@ class MambaLayer(nn.Module):
         self.dropout = dropout
         self.num_patches = num_patches
 
-        self.ssm = MambaSSMCell(d_model, n_state, dt_rank)
+        self.ssm = MambaSSMCell(d_model, n_state, dt_rank, forget_gate_value, write_gate_value)
         self.gelu = nn.GELU()
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(d_model)
@@ -431,6 +451,8 @@ class BasicMambaLayer(nn.Module):
         num_patches: int,
         dt_rank: int = 4,
         dropout: float = 0.0,
+        forget_gate_value: float = 0.0,
+        write_gate_value: float = 1.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -440,7 +462,7 @@ class BasicMambaLayer(nn.Module):
         self.dropout = dropout
         self.num_patches = num_patches
 
-        self.ssm = MambaSSMCell(d_model, n_state, dt_rank)
+        self.ssm = MambaSSMCell(d_model, n_state, dt_rank, forget_gate_value, write_gate_value)
         self.layer_norm = nn.LayerNorm(d_model)
         self.H_cache = None
 
@@ -478,6 +500,8 @@ class BasicHiddenMambaLayer(nn.Module):
         num_patches: int,
         dt_rank: int = 4,
         dropout: float = 0.0,
+        forget_gate_value: float = 0.0,
+        write_gate_value: float = 1.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -487,7 +511,7 @@ class BasicHiddenMambaLayer(nn.Module):
         self.dropout = dropout
         self.num_patches = num_patches
 
-        self.ssm = MambaSSMCell(d_model, n_state, dt_rank)
+        self.ssm = MambaSSMCell(d_model, n_state, dt_rank, forget_gate_value, write_gate_value)
         self.H_cache = None
         self.layer_norm = nn.LayerNorm(d_model)
 
