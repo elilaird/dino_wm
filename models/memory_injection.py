@@ -465,11 +465,11 @@ class DynamicLoRALinear(nn.Module):
         ) if use_bias else None
         
         if gen_type == "A":
-            gen_out = in_features # A: r x in_features
+            gen_out = self.mem_features # A: r x in_features
             self.B = nn.Parameter(torch.empty(r, out_features), requires_grad=True)
         elif gen_type == "B":
             gen_out = out_features # B: r x out_features (will transpose in forward)
-            self.A = nn.Parameter(torch.empty(r, in_features), requires_grad=True)
+            self.A = nn.Parameter(torch.empty(r, self.mem_features), requires_grad=True)
         elif gen_type == "AB":
             # gen both AB
             gen_out = out_features # AB: r x in_features
@@ -481,7 +481,7 @@ class DynamicLoRALinear(nn.Module):
     
     def generate_weights(self, m_tok: torch.Tensor) -> torch.Tensor:
         if self.gen_type == "A":
-            return self.gen(m_tok).view(-1, self.r, self.in_features), self.B
+            return self.gen(m_tok).view(-1, self.r, self.mem_features), self.B
         elif self.gen_type == "B":
             return self.A, self.gen(m_tok).view(-1, self.r, self.out_features)
         elif self.gen_type == "AB":
