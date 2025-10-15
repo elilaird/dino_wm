@@ -556,7 +556,7 @@ class Trainer:
         if self.encoder.latent_ndim == 1:  # if feature is 1D
             num_patches = 1
         else:
-            if isinstance(self.encoder, ResNetSmallTokens):
+            if self.cfg.encoder == "mini_resnet":
                 print(f"Using out_hw from ResNetSmallTokens: {self.encoder.out_hw}", flush=True)
                 num_side_patches = self.encoder.out_hw
             else:
