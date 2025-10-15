@@ -1845,8 +1845,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
             H_0 = self.mem_blocks[0].H_cache
             if H_0 is None:
                 H_0 = self.mem_blocks[0].init_state(B, device=x.device)
-            
-        
+                  
         for mem_block in self.mem_blocks:
             x, H_T = mem_block(x)
         

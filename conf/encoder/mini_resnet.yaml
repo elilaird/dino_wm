@@ -1,0 +1,11 @@
+_target_: models.encoder.resnet.ResNetSmallTokens
+in_ch: 3
+stem_ch: 32
+stages: [2, 2, 1, 0]
+channels: [32, 64, 128]
+norm: "bn"
+emb_dim: 256
+out_grid: "8x8"
+freeze_backbone: False
+return_map: False
+gn_groups: 32

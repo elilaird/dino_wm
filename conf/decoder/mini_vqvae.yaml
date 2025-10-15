@@ -1,7 +1,7 @@
 _target_: models.vqvae.VQVAE
-channel: 384 
-n_embed: 2048
+channel: 256 
+n_embed: 512
 n_res_block: 4
 n_res_channel: 128
 quantize: False
-stride: 4
+stride: 2

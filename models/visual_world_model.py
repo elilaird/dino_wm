@@ -3,6 +3,8 @@ import torch.nn as nn
 from torchvision import transforms
 from einops import rearrange, repeat
 
+from models.encoder.resnet import ResNetSmallTokens
+
 class VWorldModel(nn.Module):
     def __init__(
         self,
@@ -67,10 +69,16 @@ class VWorldModel(nn.Module):
         assert concat_dim == 0 or concat_dim == 1, f"concat_dim {concat_dim} not supported."
         print("Model emb_dim: ", self.emb_dim)
 
-        # if "dino" in self.encoder.name:
-        decoder_scale = 16  # from vqvae
-        num_side_patches = image_size // decoder_scale
+        if isinstance(self.encoder, ResNetSmallTokens):
+            print(f"Using out_hw from ResNetSmallTokens: {self.encoder.out_hw}", flush=True)
+            num_side_patches = self.encoder.out_hw
+        else:
+            decoder_scale = 16  # from vqvae
+            print(f"Using decoder_scale from cfg: {image_size // decoder_scale}", flush=True)
+            num_side_patches = image_size // decoder_scale            
+        
         self.encoder_image_size = num_side_patches * encoder_patch_size
+        print(f"Encoder image size: {self.encoder_image_size}", flush=True)
         self.encoder_transform = transforms.Compose(
             [transforms.Resize(self.encoder_image_size)]
         )

@@ -1,11 +1,11 @@
 defaults:
   - _self_
   - env: memory_maze_3x7
-  - encoder: dino 
+  - encoder: mini_resnet 
   - action_encoder: discrete
   - proprio_encoder: memmaze
-  - decoder: vqvae
-  - predictor: vit
+  - decoder: small_vqvae
+  - predictor: vit_small
   - model: base
   - aux_predictor: retention
 
@@ -24,38 +24,38 @@ hydra:
 
 training:
   seed: 0
-  epochs: 50
-  batch_size: 128 # gpu_batch_size (128 for 16 gpus)
-  save_every_x_epoch: 5 
+  epochs: 10
+  batch_size: 32 # gpu_batch_size (128 for 16 gpus)
+  save_every_x_epoch: 1 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
-  encoder_lr: 1e-6
+  encoder_lr: 3e-4
   decoder_lr: 3e-4
   predictor_lr: 5e-4
   action_encoder_lr: 5e-4
-  decoder_weight_decay: null
-  encoder_weight_decay: null
-  predictor_weight_decay: 0.1
-  action_encoder_weight_decay: 0.1
-  max_grad_norm: 0.5
+  decoder_weight_decay: 0.01
+  encoder_weight_decay: 0.01
+  predictor_weight_decay: 0.01
+  action_encoder_weight_decay: 0.01
+  max_grad_norm: 1.0
   use_scheduler: True
-  T_0: 50  # Number of epochs for the first restart
+  T_0: 10  # Number of epochs for the first restart
   T_mult: 2  # A factor increases T_i after a restart
   eta_min_ratio: 0.1  # minimum LR as ratio of initial LR
   decay_factor: 0.9  # Factor to decay peak LR at each restart
   warmup_percent: 0.01 # warmup percentage of total steps
 
-train_encoder: False
+train_encoder: True
 train_aux_predictor: False
 use_cls_token: False
 
-n_mem_blocks: 6
+n_mem_blocks: 2
 
 decoder_loss_type: mse
 
-eval_every_x_epoch: 2
+eval_every_x_epoch: 1
 num_eval_samples: 10
-horizon_treatment: 300
+horizon_treatment: 100
 
 eval_long_imagination: True
 query_phase_start_idx: 301

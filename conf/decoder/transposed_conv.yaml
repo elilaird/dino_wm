@@ -1,5 +1,5 @@
 _target_: models.decoder.transposed_conv.TransposedConvDecoder
-observation_shape: [3, 224, 224]
+observation_shape: [3, 64, 64]
 depth: 64
 kernel_size: 5
 stride: 3

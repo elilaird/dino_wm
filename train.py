@@ -30,6 +30,7 @@ from collections import OrderedDict, defaultdict
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 from schedulers import CosineAnnealingWarmRestartsDecay
+from models.encoder.resnet import ResNetSmallTokens
 
 CTX = mp.get_context("spawn")
 
@@ -182,7 +183,6 @@ class Trainer:
             f"Batch_size: {cfg.training.batch_size} num_processes: {self.accelerator.num_processes}."
         )
 
-        # OmegaConf.set_struct(cfg, False)
         with open_dict(cfg):
             if cfg.dry_run:
                 cfg.training.batch_size = 32
@@ -190,7 +190,6 @@ class Trainer:
             cfg.gpu_batch_size = (
                 cfg.training.batch_size // self.accelerator.num_processes
             )
-        # OmegaConf.set_struct(cfg, True)
 
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
@@ -505,23 +504,25 @@ class Trainer:
             n_params > 0
         ), "Encoder has zero parameters on this rank BEFORE DDP."
 
-        if self.train_encoder:
-            print("Freezing the first 9 transformer blocks")
-            # freeze the first 9 transformer blocks
-            for i, block in enumerate(self.encoder.base_model.blocks):
-                if i < 9:
-                    for param in block.parameters():
-                        param.requires_grad = False
-                else:
-                    # unfreeze the last 3 transformer blocks
-                    for param in block.parameters():
-                        param.requires_grad = True
-            # unfreeze the layernorm
-            for param in self.encoder.base_model.norm.parameters():
-                param.requires_grad = True
-        else:
-            for param in self.encoder.parameters():
-                param.requires_grad = False
+        if self.cfg.encoder == "dino":
+            if self.train_encoder:
+                print("Freezing the first 9 transformer blocks", flush=True)
+                # freeze the first 9 transformer blocks
+                for i, block in enumerate(self.encoder.base_model.blocks):
+                    if i < 9:
+                        for param in block.parameters():
+                            param.requires_grad = False
+                    else:
+                        # unfreeze the last 3 transformer blocks
+                        for param in block.parameters():
+                            param.requires_grad = True
+                # unfreeze the layernorm
+                for param in self.encoder.base_model.norm.parameters():
+                    param.requires_grad = True
+            else:
+                print("Freezing the all transformer blocks for DINOv2", flush=True)
+                for param in self.encoder.parameters():
+                    param.requires_grad = False
 
         self.proprio_encoder = hydra.utils.instantiate(
             self.cfg.proprio_encoder,
@@ -555,8 +556,13 @@ class Trainer:
         if self.encoder.latent_ndim == 1:  # if feature is 1D
             num_patches = 1
         else:
-            decoder_scale = 16  # from vqvae
-            num_side_patches = self.cfg.img_size // decoder_scale
+            if isinstance(self.encoder, ResNetSmallTokens):
+                print(f"Using out_hw from ResNetSmallTokens: {self.encoder.out_hw}", flush=True)
+                num_side_patches = self.encoder.out_hw
+            else:
+                decoder_scale = 16  # from vqvae
+                print(f"Using decoder_scale from cfg: {self.cfg.img_size // decoder_scale}", flush=True)
+                num_side_patches = self.cfg.img_size // decoder_scale
             num_patches = num_side_patches**2
 
         if self.cfg.concat_dim == 0:
