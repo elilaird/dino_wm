@@ -29,13 +29,13 @@ training:
   save_every_x_epoch: 1 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
-  encoder_lr: 3e-4
-  decoder_lr: 3e-4
-  predictor_lr: 5e-4
-  action_encoder_lr: 5e-4
-  decoder_weight_decay: 0.01
+  encoder_lr: 1e-4
+  decoder_lr: 1e-4
+  predictor_lr: 3e-4
+  action_encoder_lr: 3e-4
+  decoder_weight_decay: 0.05
   encoder_weight_decay: 0.01
-  predictor_weight_decay: 0.01
+  predictor_weight_decay: 0.1
   action_encoder_weight_decay: 0.01
   max_grad_norm: 1.0
   use_scheduler: True
