@@ -126,7 +126,7 @@ class Trainer:
 
 
         
-        if self.cfg.model.train_encoder:
+        if self.cfg.model.train_encoder and self.cfg.encoder == "dino":
             ddp_kwargs = DistributedDataParallelKwargs(
                 find_unused_parameters=True 
             )
@@ -556,7 +556,7 @@ class Trainer:
         if self.encoder.latent_ndim == 1:  # if feature is 1D
             num_patches = 1
         else:
-            if self.cfg.encoder == "mini_resnet":
+            if isinstance(self.encoder, ResNetSmallTokens):
                 print(f"Using out_hw from ResNetSmallTokens: {self.encoder.out_hw}", flush=True)
                 num_side_patches = self.encoder.out_hw
             else:
