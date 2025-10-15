@@ -70,8 +70,8 @@ class VWorldModel(nn.Module):
         print("Model emb_dim: ", self.emb_dim)
 
         if isinstance(self.encoder.module, ResNetSmallTokens):
-            print(f"Using out_hw from ResNetSmallTokens: {self.encoder.out_hw}", flush=True)
-            num_side_patches = self.encoder.out_hw
+            print(f"Using out_hw from ResNetSmallTokens: {self.encoder.module.out_hw}", flush=True)
+            num_side_patches = self.encoder.module.out_hw
         else:
             decoder_scale = 16  # from vqvae
             print(f"Using decoder_scale from cfg: {image_size // decoder_scale}", flush=True)
@@ -208,7 +208,7 @@ class VWorldModel(nn.Module):
         """
         b, num_frames, num_patches, emb_dim = z_obs["visual"].shape
         z = {k: v.clone() for k, v in z_obs.items()}
-        if self.encoder.use_cls_token:
+        if self.use_cls_token:
             # remove cls token
             z["visual"] = z["visual"][:, :, 1:, :]
         visual, diff = self.decoder(z["visual"])  # (b*num_frames, 3, 224, 224)
