@@ -46,6 +46,8 @@ training:
   warmup_percent: 0.01 # warmup percentage of total steps
 
 train_encoder: True
+train_decoder: True
+train_predictor: True
 train_aux_predictor: False
 use_cls_token: False
 

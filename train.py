@@ -2236,12 +2236,17 @@ class Trainer:
             epoch_time_msg = f"  Epoch time: {epoch_log['epoch_time']:.2f}s"
 
         # Add learning rates to log message
-        lr_msg = f"  Encoder LR: {self.encoder_optimizer.param_groups[0]['lr']:.2e}"
-        lr_msg += (
-            f"  Predictor LR: {self.predictor_optimizer.param_groups[0]['lr']:.2e}"
-        )
-        lr_msg += f"  Decoder LR: {self.decoder_optimizer.param_groups[0]['lr']:.2e}"
+        if self.model.train_encoder:
+            lr_msg = f"  Encoder LR: {self.encoder_optimizer.param_groups[0]['lr']:.2e}"
+        if self.model.train_predictor:
+            lr_msg += (
+                f"  Predictor LR: {self.predictor_optimizer.param_groups[0]['lr']:.2e}"
+            )
+        if self.model.train_decoder:
+            lr_msg += f"  Decoder LR: {self.decoder_optimizer.param_groups[0]['lr']:.2e}"
         lr_msg += f"  Action Encoder LR: {self.action_encoder_optimizer.param_groups[0]['lr']:.2e}"
+        if self.model.train_aux_predictor:
+            lr_msg += f"  Aux Predictor LR: {self.aux_predictor_optimizer.param_groups[0]['lr']:.2e}"
 
         if 'train_loss' in epoch_log:
             log.info(
