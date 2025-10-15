@@ -25,7 +25,7 @@ hydra:
 training:
   seed: 0
   epochs: 10
-  batch_size: 32 # gpu_batch_size (128 for 16 gpus)
+  batch_size: 128 # gpu_batch_size (128 for 16 gpus)
   save_every_x_epoch: 1 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
