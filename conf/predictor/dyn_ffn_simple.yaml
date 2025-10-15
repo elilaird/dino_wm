@@ -1,0 +1,13 @@
+_target_: models.vit.DynamicFFNVitPredictor
+depth: 2
+heads: 16
+mlp_dim: 512
+dropout: 0.1
+emb_dropout: 0
+state_dim: 128
+dt_rank: 8
+ffn_rank: 8
+gen_hidden_mul: 2
+alpha_mem: 1.0
+step_size: ${step_size}
+n_mem_blocks: ${n_mem_blocks}
