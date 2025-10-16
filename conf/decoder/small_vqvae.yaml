@@ -1,10 +1,10 @@
 _target_: models.small_vqvae.SmallVQVAE
 in_channel: 3
-channel: 64
-n_res_block: 1
-n_res_channel: 32
+channel: 128
+n_res_block: 4
+n_res_channel: 128
 emb_dim: 256
-n_embed: 512
+n_embed: 1024
 decay: 0.99
-quantize: False
+quantize: True
 stride: 2

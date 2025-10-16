@@ -496,6 +496,14 @@ class Trainer:
                 self.encoder = hydra.utils.instantiate(
                     self.cfg.encoder,
                 )
+                if not self.train_encoder and self.cfg.pretrained_encoder_path is not None:
+                    ckpt = torch.load(self.cfg.pretrained_encoder_path)
+                    if isinstance(ckpt, dict):
+                        self.encoder.load_state_dict(ckpt["encoder"])
+                    else:
+                        self.encoder.load_state_dict(ckpt)
+                    print(f"Loaded pretrained encoder from {self.cfg.pretrained_encoder_path}")
+                
         self.accelerator.wait_for_everyone()
 
         # Sanity: make sure everyone actually built it and it has params
@@ -504,8 +512,8 @@ class Trainer:
             n_params > 0
         ), "Encoder has zero parameters on this rank BEFORE DDP."
 
-        if self.cfg.encoder == "dino":
-            if self.train_encoder:
+        if self.train_encoder:
+            if self.cfg.encoder == "dino":
                 print("Freezing the first 9 transformer blocks", flush=True)
                 # freeze the first 9 transformer blocks
                 for i, block in enumerate(self.encoder.base_model.blocks):
@@ -519,10 +527,12 @@ class Trainer:
                 # unfreeze the layernorm
                 for param in self.encoder.base_model.norm.parameters():
                     param.requires_grad = True
-            else:
-                print("Freezing the all transformer blocks for DINOv2", flush=True)
-                for param in self.encoder.parameters():
-                    param.requires_grad = False
+        
+        else:
+            print("Freezing the all blocks for encoder", flush=True)
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            
 
         self.proprio_encoder = hydra.utils.instantiate(
             self.cfg.proprio_encoder,

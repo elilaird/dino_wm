@@ -202,48 +202,32 @@ class BasicBlock(nn.Module):
         return out
 
 
-# ---- Mini-ResNet for 64x64 that returns tokens [B, HW, D] ----
+from math import prod
+
+
 class ResNetSmallTokens(nn.Module):
-    """
-    A  ResNet for 64x64 inputs that returns a grid of tokens for a ViT/Transformer predictor.
-
-    Args:
-        in_ch: input channels (3 for RGB)
-        stem_ch: channels after the initial 3x3 conv stem
-        stages: number of residual blocks per stage (default [2,2,1,0])
-        channels: output channels per stage (default [32, 64, 128])
-        norm: "bn" or "gn" (GroupNorm recommended for tiny per-GPU batches)
-        emb_dim: projection dimension for tokens (D)
-        out_grid: "8x8" (default) or "4x4" (adds an extra stride-2 downsample head)
-        freeze_backbone: if True, freeze all conv/Norm in backbone and train only the 1x1 projection
-        return_map: if True, also return the [B, D, H, W] map besides tokens
-    """
-
     def __init__(
         self,
         in_ch: int = 3,
         stem_ch: int = 32,
-        stages: List[int] = (2, 2, 1, 0),  # ≈ ResNet-10ish
+        stages: List[int] = (2, 2, 1),
+        strides: List[int] = (2, 2, 1),
         channels: List[int] = (32, 64, 128),
         norm: str = "bn",
         emb_dim: int = 256,
-        out_grid: str = "8x8",
         freeze_backbone: bool = False,
         return_map: bool = False,
         gn_groups: int = 32,
     ):
         super().__init__()
-        assert len(stages) >= 3, "Provide at least three stage counts"
-        assert len(channels) >= 3, "Provide at least three stage channel sizes"
-        assert out_grid in {"8x8", "4x4"}
+        assert len(stages) == len(strides) == len(channels)
 
         self.return_map = return_map
-        self.patch_size = 8 if out_grid == "8x8" else 4
         self.emb_dim = emb_dim
         self.latent_ndim = 2
-        self.use_cls_token = False # for compatibility with other encoders
+        self.use_cls_token = False
 
-        # --- Stem: 3x3 conv, stride=1 (keep 64x64), no maxpool 
+        # --- Stem
         self.stem = nn.Sequential(
             nn.Conv2d(in_ch, stem_ch, 3, stride=1, padding=1, bias=False),
             (
@@ -254,15 +238,10 @@ class ResNetSmallTokens(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # --- Stages: go 64->32->16->8 with strides [2,2,2] across stage1..3
-        strides = [2, 2, 2]  # three downsamples → 8x8 output from 64x64
         in_c = stem_ch
         self.stages = nn.ModuleList()
-        for si, (num_blocks, out_c, s) in enumerate(
-            zip(stages[:3], channels[:3], strides)
-        ):
+        for num_blocks, out_c, s in zip(stages, channels, strides):
             blocks = []
-            # first block can downsample (stride s), remaining are stride 1
             if num_blocks > 0:
                 blocks.append(
                     BasicBlock(
@@ -282,36 +261,26 @@ class ResNetSmallTokens(nn.Module):
                     )
             self.stages.append(nn.Sequential(*blocks))
 
-        self.out_c = in_c  # channels at 8x8
+        self.out_c = in_c
 
-        # Optional final downsample head to 4x4 if requested
-        if out_grid == "4x4":
-            self.to_4x4 = BasicBlock(
-                self.out_c,
-                self.out_c,
-                stride=2,
-                norm=norm,
-                gn_groups=gn_groups,
-            )
-            out_hw = 4
-        else:
-            self.to_4x4 = nn.Identity()
-            out_hw = 8
+        # --- Compute spatial size from strides
+        total_ds = prod(strides) if len(strides) > 0 else 1
+        hw = 64 // total_ds
+        assert 64 % total_ds == 0, "64 must be divisible by product of strides"
 
-        # --- 1x1 projection to emb_dim, produce tokens
+        self.out_hw = hw
+        self.patch_size = 64 // self.out_hw
+
+        # --- 1×1 projection to emb_dim
         self.proj = nn.Conv2d(self.out_c, emb_dim, 1)
-
-        # Init
         self._init_weights()
 
-        # Optional freezing of backbone (everything except proj)
         if freeze_backbone:
-            for m in [self.stem, *self.stages, self.to_4x4]:
+            for m in [self.stem, *self.stages, self.proj]:
                 for p in m.parameters():
                     p.requires_grad = False
 
         self.emb_dim = emb_dim
-        self.out_hw = out_hw  # 8 or 4
 
     def _init_weights(self):
         # Kaiming init for convs; zeros for Norms' bias
@@ -346,12 +315,10 @@ class ResNetSmallTokens(nn.Module):
         for stage in self.stages:  # → [B, C, 8, 8]
             if len(stage) > 0:
                 x = stage(x)
-        x = self.to_4x4(x)  # optional → [B, C, 4, 4]
-        x = self.proj(x)  # [B, D, H, W]
-
+        x = self.proj(x)  # [B, D, out_hw, out_hw]
         B, D, H, W = x.shape
+        assert (
+            H == self.out_hw and W == self.out_hw
+        ), "Spatial size drifted from metadata"
         tokens = x.flatten(2).transpose(1, 2)  # [B, H*W, D]
-
-        if self.return_map:
-            return tokens, x
-        return tokens
+        return (tokens, x) if self.return_map else tokens

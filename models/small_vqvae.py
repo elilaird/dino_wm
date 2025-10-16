@@ -176,12 +176,12 @@ class Decoder(nn.Module):
                     ),
                     nn.ReLU(inplace=True),
                     nn.ConvTranspose2d(
-                        channel // 2, channel // 4, 4, stride=2, padding=1
+                        channel // 2, out_channel, 4, stride=2, padding=1
                     ),
-                    nn.ReLU(inplace=True),
-                    nn.ConvTranspose2d(
-                        channel // 4, out_channel, 4, stride=2, padding=1
-                    ),
+                    # nn.ReLU(inplace=True),
+                    # nn.ConvTranspose2d(
+                    #     channel // 4, out_channel, 4, stride=2, padding=1
+                    # ),
                 ]
             )
 

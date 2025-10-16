@@ -69,9 +69,12 @@ class VWorldModel(nn.Module):
         assert concat_dim == 0 or concat_dim == 1, f"concat_dim {concat_dim} not supported."
         print("Model emb_dim: ", self.emb_dim)
 
-        if (hasattr(self.encoder, "module") and isinstance(self.encoder.module, ResNetSmallTokens)) or isinstance(self.encoder, ResNetSmallTokens):
-            print(f"Using out_hw from ResNetSmallTokens: {self.encoder.module.out_hw}", flush=True)
+        if (hasattr(self.encoder, "module") and isinstance(self.encoder.module, ResNetSmallTokens)):
+            print(f"Using out_hw from ResNetSmallTokens.module: {self.encoder.module.out_hw}", flush=True)
             num_side_patches = self.encoder.module.out_hw
+        elif isinstance(self.encoder, ResNetSmallTokens):
+            print(f"Using out_hw from ResNetSmallTokens: {self.encoder.out_hw}", flush=True)
+            num_side_patches = self.encoder.out_hw
         else:
             decoder_scale = 16  # from vqvae
             print(f"Using decoder_scale from cfg: {image_size // decoder_scale}", flush=True)
