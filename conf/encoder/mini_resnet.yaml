@@ -4,7 +4,7 @@ stem_ch: 32
 stages: [2, 2, 1]
 channels: [32, 64, 128]
 strides: [2, 2, 1]
-norm: "gn"
+norm: "bn"
 emb_dim: 256
 freeze_backbone: False
 return_map: False
