@@ -46,7 +46,8 @@ training:
   warmup_percent: 0.01 # warmup percentage of total steps
 
 
-pretrained_encoder_path: ${ckpt_base_path}/outputs/2025-10-15/22-08-11/checkpoints/model_latest.pth
+# pretrained_encoder_path: ${ckpt_base_path}/outputs/2025-10-15/22-08-11/checkpoints/model_latest.pth
+pretrained_encoder_path: ${ckpt_base_path}/outputs/2025-10-16/12-29-54/checkpoints/model_4.pth
 train_encoder: False
 train_decoder: True
 train_predictor: True
