@@ -32,7 +32,7 @@ if [ "${TYPE}" = "jupyter" ]; then
     WORK_DIR=${HOME_DIR}
 fi
 
-echo "WORK_DIR: ${WORK_DIR}"
+# echo "WORK_DIR: ${WORK_DIR}"
 
 if [ "${TYPE}" = "minigrid" ]; then
     PY_FILE="env/minigrid/minigrid_env.py generate"
