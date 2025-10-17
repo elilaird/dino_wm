@@ -3403,3 +3403,287 @@ class DynamicFFNVitPredictor(nn.Module):
     
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)
+
+
+########### TransformerXL Implementation ###########
+
+class TransformerXLAttention(nn.Module):
+    """
+    TransformerXL-style attention with segment-level recurrence.
+    Uses relative positional encodings and maintains a memory buffer.
+    """
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, mem_len=0, bias=None):
+        super().__init__()
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == dim)
+
+        self.heads = heads
+        self.scale = dim_head**-0.5
+        self.mem_len = mem_len
+
+        self.norm = nn.LayerNorm(dim)
+        self.attend = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(dropout)
+
+        # Q, K, V projections
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(dim, inner_dim, bias=False)
+
+        # Relative positional encoding projections
+        self.r_w_bias = nn.Parameter(torch.zeros(heads, dim_head))
+        # self.r_r_bias = nn.Parameter(torch.zeros(heads, dim_head))
+
+        self.to_out = (
+            nn.Sequential(nn.Linear(inner_dim, dim), nn.Dropout(dropout))
+            if project_out
+            else nn.Identity()
+        )
+
+        if bias is None:
+            bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
+        self.register_buffer("bias", bias)
+
+    def _rel_shift(self, x):
+        """Relative positional shift for TransformerXL attention"""
+        zero_pad = torch.zeros((*x.size()[:-2], x.size(-2), 1), device=x.device, dtype=x.dtype)
+        x_padded = torch.cat([zero_pad, x], dim=-1)
+        x_padded = x_padded.view(*x.size()[:-2], x.size(-1) + 1, x.size(-2))
+        x = x_padded[:, :, 1:].view_as(x)
+        return x
+
+    def forward(self, x, mems=None):
+        B, T, C = x.size()
+        
+        x = self.norm(x)
+        
+        # Project to Q, K, V
+        q = self.to_q(x)
+        k = self.to_k(x)
+        v = self.to_v(x)
+        
+        # Reshape for multi-head attention
+        q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
+        k = rearrange(k, "b n (h d) -> b h n d", h=self.heads)
+        v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
+        
+        # Handle memory if provided
+        if mems is not None and len(mems) > 0:
+            # Concatenate memory with current keys and values
+            mem_k = mems[0]  # [B, H, M, D] where M is memory length
+            mem_v = mems[1] if len(mems) > 1 else mems[0]
+            
+            k = torch.cat([mem_k, k], dim=2)  # [B, H, M+T, D]
+            v = torch.cat([mem_v, v], dim=2)  # [B, H, M+T, D]
+        
+        # Compute attention scores
+        AC = torch.matmul(q, k.transpose(-1, -2)) * self.scale  # [B, H, T, M+T]
+        
+        # Add relative positional bias
+        BD = torch.matmul(q + self.r_w_bias.unsqueeze(0).unsqueeze(2), 
+                         k.transpose(-1, -2)) * self.scale
+        BD = self._rel_shift(BD)
+        
+        # Combine content and positional attention
+        attn = AC + BD
+        
+        # Apply causal mask
+        if mems is not None:
+            # For memory, we need to adjust the mask
+            mem_len = mems[0].size(2) if len(mems) > 0 else 0
+            mask = torch.cat([
+                torch.ones(T, mem_len, device=x.device, dtype=torch.bool),
+                self.bias[:, :, :T, :T] == 1
+            ], dim=-1)
+        else:
+            mask = self.bias[:, :, :T, :T] == 1
+        
+        attn = attn.masked_fill(~mask, float("-inf"))
+        
+        attn = self.attend(attn)
+        attn = self.dropout(attn)
+        
+        out = torch.matmul(attn, v)
+        out = rearrange(out, "b h n d -> b n (h d)")
+        
+        return self.to_out(out)
+
+
+class TransformerXLBlock(nn.Module):
+    """
+    Single TransformerXL block with attention and feedforward layers.
+    """
+    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.0, mem_len=0):
+        super().__init__()
+        self.attention = TransformerXLAttention(
+            dim=dim,
+            heads=heads,
+            dim_head=dim_head,
+            dropout=dropout,
+            mem_len=mem_len
+        )
+        self.feed_forward = FeedForward(dim, mlp_dim, dropout=dropout)
+        
+    def forward(self, x, mems=None):
+        # Self-attention with memory
+        attn_out = self.attention(x, mems)
+        x = x + attn_out
+        
+        # Feed-forward
+        ff_out = self.feed_forward(x)
+        x = x + ff_out
+        
+        return x
+
+
+class TransformerXL(nn.Module):
+    """
+    TransformerXL model with segment-level recurrence.
+    Maintains a memory buffer across segments for long-range dependencies.
+    """
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0, mem_len=0):
+        super().__init__()
+        self.mem_len = mem_len
+        self.norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList([])
+        
+        for _ in range(depth):
+            self.layers.append(
+                TransformerXLBlock(
+                    dim=dim,
+                    heads=heads,
+                    dim_head=dim_head,
+                    mlp_dim=mlp_dim,
+                    dropout=dropout,
+                    mem_len=mem_len
+                )
+            )
+        
+        # Memory buffer to store previous segment representations
+        self.memory = None
+        
+    def _update_memory(self, new_mem):
+        """Update the memory buffer with new segment representations"""
+        if self.mem_len == 0:
+            return
+            
+        if self.memory is None:
+            self.memory = new_mem
+        else:
+            # Concatenate new memory with existing memory
+            self.memory = torch.cat([self.memory, new_mem], dim=2)
+            
+            # Keep only the most recent mem_len segments
+            if self.memory.size(2) > self.mem_len:
+                self.memory = self.memory[:, :, -self.mem_len:, :]
+    
+    def forward(self, x, mems=None):
+        """
+        Forward pass with optional external memory.
+        
+        Args:
+            x: Input tensor [B, T, D]
+            mems: Optional external memory [B, H, M, D]
+        """
+        new_mems = []
+        
+        for i, layer in enumerate(self.layers):
+            # Use external memory if provided, otherwise use internal memory
+            layer_mems = mems[i] if mems is not None and i < len(mems) else None
+            
+            x = layer(x, layer_mems)
+            
+            # Store representations for memory (detached to prevent gradients)
+            if self.mem_len > 0:
+                # Extract key-value representations for memory
+                # This is a simplified version - in practice, you might want to store
+                # the actual key-value pairs from the attention mechanism
+                # with torch.no_grad():
+                mem_rep = x.detach().unsqueeze(1)  # [B, 1, T, D]
+                new_mems.append(mem_rep)
+        
+        # Update internal memory
+        if new_mems:
+            self._update_memory(new_mems[-1])  # Store the last layer's representation
+        
+        return self.norm(x)
+    
+    def reset_memory(self):
+        """Reset the internal memory buffer"""
+        self.memory = None
+
+
+class TransformerXLViTPredictor(nn.Module):
+    """
+    ViT Predictor using TransformerXL architecture.
+    Combines the ViT structure with TransformerXL's segment-level recurrence.
+    """
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        pool="cls",
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+        mem_len=0,
+    ):
+        super().__init__()
+        assert pool in {
+            "cls",
+            "mean",
+        }, "pool type must be either cls (cls token) or mean (mean pooling)"
+
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.dim = dim
+        self.pool = pool
+        self.mem_len = mem_len
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+        
+        self.transformer = TransformerXL(
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            dim_head=dim_head,
+            mlp_dim=mlp_dim,
+            dropout=dropout,
+            mem_len=mem_len
+        )
+
+    def forward(self, x, H=None):
+        """
+        Forward pass with optional memory.
+        
+        Args:
+            x: Input embeddings [B, T, D] where T = num_frames * num_patches
+            H: Optional external memory (for compatibility with other models)
+        """
+        b, n, _ = x.shape
+        
+        # Add positional embeddings
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        
+        # Pass through TransformerXL
+        x = self.transformer(x, H)
+        
+        return x, None
+
+    def reset_memory(self):
+        """Reset the internal memory buffer"""
+        self.transformer.reset_memory()

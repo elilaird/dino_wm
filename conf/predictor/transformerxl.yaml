@@ -1,0 +1,8 @@
+_target_: models.vit.TransformerXLViTPredictor
+depth: 2
+heads: 16
+mlp_dim: 512
+dropout: 0.1
+emb_dropout: 0
+pool: 'mean'
+mem_len: 10
