@@ -88,9 +88,9 @@ num_proprio_repeat: 1
 
 overlap_size: 6
 num_frames: 500
-num_hist: 9
+num_hist: 4
 num_pred: 1 
-step_size: ${num_hist + num_pred}
+step_size: 5
 has_predictor: True # set this to False for only training a decoder
 has_decoder: True # set this to False for only training a predictor
 
