@@ -26,6 +26,10 @@ NUM_FRAMES = 1
 NUM_PATCHES = 1
 
 
+class TwoInputIdentity(nn.Module):
+    def forward(self, x1, x2):
+        return x1
+
 class RetentionPredictor(nn.Module):
     def __init__(self, dim, hidden_mul=2):
         super().__init__()
@@ -1644,7 +1648,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
                     [
                         AdaptiveLayerNorm(
                             dim, dim, zero_init=kwargs.get("zero_init", False)
-                        ) if self.both_injections else nn.Identity(),
+                        ) if self.both_injections else TwoInputIdentity(),
                         AdaptiveLayerNorm(
                             dim, dim, zero_init=kwargs.get("zero_init", False)
                         )
