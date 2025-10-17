@@ -1339,7 +1339,7 @@ class StateSpaceTransformer(nn.Module):
         dt_rank: int = 16,
         use_gate: bool = False,
         use_cls_token: bool = False,
-        shift_memory: bool = False,
+        shift_memory: bool = True,
         **kwargs,
     ):
         super().__init__()
@@ -2915,6 +2915,7 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
         use_vo: bool = False,
         gen_type: str = "A",
         use_cls_token: bool = False,
+        shift_memory: bool = True,
         **kwargs,
     ):
         self.lora_rank = lora_rank
@@ -2941,6 +2942,7 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
             use_qk=use_qk,
             use_vo=use_vo,
             use_cls_token=use_cls_token,
+            shift_memory=shift_memory,
             **kwargs,
         )
 
@@ -3086,6 +3088,7 @@ class LoRAInjectionViTPredictor(nn.Module):
         lora_rank: int = 16,
         lora_alpha: float = 2.0,
         gen_type: str = "A",
+        shift_memory: bool = True,
     ):
         super().__init__()
         self.dim = dim
@@ -3100,7 +3103,7 @@ class LoRAInjectionViTPredictor(nn.Module):
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
         self.gen_type = gen_type
-
+        self.shift_memory = shift_memory
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
         NUM_FRAMES = num_frames
@@ -3132,6 +3135,7 @@ class LoRAInjectionViTPredictor(nn.Module):
                 gen_type=gen_type,
                 use_qk=use_qk,
                 use_vo=use_vo,
+                shift_memory=shift_memory,
             )
         elif injection_type == "lora_ffn":
             self.transformer = LoRAFFNTransformer(
@@ -3149,6 +3153,7 @@ class LoRAInjectionViTPredictor(nn.Module):
                 lora_rank=lora_rank,
                 lora_alpha=lora_alpha,
                 gen_type=gen_type,
+                shift_memory=shift_memory,
             )
         else:
             raise ValueError(f"Invalid injection type: {injection_type}")
