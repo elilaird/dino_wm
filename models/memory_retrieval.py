@@ -429,7 +429,7 @@ class MambaLayer(nn.Module):
         y = self.glu(y)
         y = self.dropout(y)
 
-        return x + y
+        return x + y, H_new
 
     def init_state(self, B: int, device=None):
         return self.ssm.init_state(B, self.num_patches, self.n_state, device=device)
@@ -476,7 +476,7 @@ class BasicMambaLayer(nn.Module):
             :, min(self.step_size - 1, y.size(1) - 1)
         ].detach()
 
-        return y
+        return y, H_new
 
     def init_state(self, B: int, device=None):
         return self.ssm.init_state(

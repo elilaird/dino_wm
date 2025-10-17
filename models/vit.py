@@ -1382,28 +1382,39 @@ class StateSpaceTransformer(nn.Module):
     ):
         self.ln_mem_out = nn.Identity() # nn.LayerNorm(dim) #TODO: add back in
         self.mem_blocks = nn.ModuleList([])
+        # for _ in range(n_mem_blocks):
+        #     self.mem_blocks.append(
+        #         nn.ModuleList(
+        #             [
+        #                 MambaLayer(
+        #                     d_model=dim,
+        #                     n_state=state_dim,
+        #                     step_size=self.step_size,
+        #                     num_patches=self.num_patches if not self.use_cls_token else 1,
+        #                     dt_rank=dt_rank,
+        #                     dropout=dropout,
+        #                 ),
+        #                 nn.Sequential(
+        #                     nn.LayerNorm(dim),
+        #                     nn.Linear(dim, mlp_dim),
+        #                     nn.GELU(),
+        #                     nn.Dropout(dropout),
+        #                     nn.Linear(mlp_dim, dim),
+        #                     nn.Dropout(dropout),
+        #                 ),
+        #             ]
+        #         )
+        #     )
         for _ in range(n_mem_blocks):
             self.mem_blocks.append(
-                nn.ModuleList(
-                    [
-                        MambaLayer(
-                            d_model=dim,
-                            n_state=state_dim,
-                            step_size=self.step_size,
-                            num_patches=self.num_patches if not self.use_cls_token else 1,
-                            dt_rank=dt_rank,
-                            dropout=dropout,
-                        ),
-                        nn.Sequential(
-                            nn.LayerNorm(dim),
-                            nn.Linear(dim, mlp_dim),
-                            nn.GELU(),
-                            nn.Dropout(dropout),
-                            nn.Linear(mlp_dim, dim),
-                            nn.Dropout(dropout),
-                        ),
-                    ]
-                )
+                BasicMambaLayer(
+                    d_model=dim,
+                    n_state=state_dim,
+                    step_size=self.step_size,
+                    num_patches=self.num_patches if not self.use_cls_token else 1,
+                    dt_rank=dt_rank,
+                    dropout=dropout,
+                ),
             )
 
     def _build_transformer(
@@ -1445,9 +1456,9 @@ class StateSpaceTransformer(nn.Module):
             if H_0 is None:
                 H_0 = self.mem_blocks[0].init_state(B, device=x.device)
 
-        for mem_block, ff in self.mem_blocks:
-            x = mem_block(x)
-            x = x + ff(x)
+        for mem_block in self.mem_blocks:
+            x, H_T = mem_block(x)
+            # x = x + ff(x)
 
         if self.use_cls_token:
             # repeat the cls token to the number of patches
@@ -1484,11 +1495,11 @@ class StateSpaceTransformer(nn.Module):
         return self.ln_out(ctx), self.ln_mem_out(M_new)
 
     def reset_memory(self):
-        for mem_block, _ in self.mem_blocks:
+        for mem_block in self.mem_blocks:
             mem_block.reset_memory()
 
     def set_step_size(self, step_size):
-        for mem_block, _ in self.mem_blocks:
+        for mem_block in self.mem_blocks:
             mem_block.set_step_size(step_size)
 
 
@@ -1586,6 +1597,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
         zero_init: bool = False,
         use_cls_token: bool = False,
         shift_memory: bool = False,
+        both_injections: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1603,6 +1615,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
             zero_init=zero_init,
             use_cls_token=use_cls_token,
             shift_memory=shift_memory,
+            both_injections=both_injections,
             **kwargs,
         )
 
@@ -1774,7 +1787,7 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
                 H_0 = self.mem_blocks[0].init_state(B, device=x.device)
 
         for mem_block in self.mem_blocks:
-            x = mem_block(x)
+            x, H_T = mem_block(x)
         
         if self.use_cls_token:
             # repeat the cls token to the number of patches
