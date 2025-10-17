@@ -1600,6 +1600,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
         both_injections: bool = False,
         **kwargs,
     ):
+        self.both_injections = both_injections
         super().__init__(
             dim,
             num_patches,
@@ -1618,7 +1619,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
             both_injections=both_injections,
             **kwargs,
         )
-
+        
     def _build_transformer(
         self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
     ):
@@ -1639,19 +1640,26 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
                 )
             )
             self.injection_layers.append(
-                AdaptiveLayerNorm(
-                    dim, dim, zero_init=kwargs.get("zero_init", False)
-                )
+                nn.ModuleList(
+                    [
+                        AdaptiveLayerNorm(
+                            dim, dim, zero_init=kwargs.get("zero_init", False)
+                        ) if self.both_injections else nn.Identity(),
+                        AdaptiveLayerNorm(
+                            dim, dim, zero_init=kwargs.get("zero_init", False)
+                        )
+                    ]
+                )                
             )
 
     def forward(self, x):
         M_new = self._mem_blocks_forward(x)
         x = self.ln_in(x)
 
-        for i, (attn, ff) in enumerate(self.layers):
-            x = x + attn(x)
-            x = self.injection_layers[i](x, M_new)
-            x = x + ff(x)
+        for i, (attn, ff) in enumerate(self.layers):            
+            injection_1, injection_2 = self.injection_layers[i]
+            x = x + attn(injection_1(x, M_new))
+            x = x + ff(injection_2(x, M_new))
 
         return self.ln_out(x), self.ln_mem_out(M_new)
 
@@ -1952,6 +1960,7 @@ class StateSpaceViTPredictor(nn.Module):
         lora_dropout: float = 0.0,
         use_cls_token: bool = False,
         shift_memory: bool = True,
+        both_injections: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -2025,6 +2034,7 @@ class StateSpaceViTPredictor(nn.Module):
                 zero_init=zero_init,
                 use_cls_token=use_cls_token,
                 shift_memory=shift_memory,
+                both_injections=both_injections,
             )
         
         elif injection_type == "ssm_ca":

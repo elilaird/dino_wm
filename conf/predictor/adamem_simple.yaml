@@ -13,3 +13,4 @@ zero_init: False
 step_size: ${step_size}
 n_mem_blocks: ${n_mem_blocks}
 shift_memory: True
+both_injections: True
