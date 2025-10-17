@@ -1339,6 +1339,7 @@ class StateSpaceTransformer(nn.Module):
         dt_rank: int = 16,
         use_gate: bool = False,
         use_cls_token: bool = False,
+        shift_memory: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -1355,6 +1356,7 @@ class StateSpaceTransformer(nn.Module):
         self.step_size = step_size
         self.n_mem_blocks = n_mem_blocks
         self.use_cls_token = use_cls_token
+        self.shift_memory = shift_memory
 
         if use_gate:
             self.gate = nn.Linear(dim, dim)
@@ -1437,13 +1439,24 @@ class StateSpaceTransformer(nn.Module):
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
         if self.use_cls_token:
             x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
+
+        if self.shift_memory:
+            H_0 = self.mem_blocks[0].H_cache
+            if H_0 is None:
+                H_0 = self.mem_blocks[0].init_state(B, device=x.device)
+
         for mem_block, ff in self.mem_blocks:
             x = mem_block(x)
             x = x + ff(x)
-        
+
         if self.use_cls_token:
             # repeat the cls token to the number of patches
             x = x.repeat(1, 1, self.num_patches, 1)
+        
+        if self.shift_memory:
+            H_T = H_T[:, :-1, :, :]
+            H_T = torch.cat([H_0.unsqueeze(1), H_T], dim=1)
+
         return rearrange(x, "b t p d -> b (t p) d")
 
     def forward(self, x, H=None):
@@ -1495,6 +1508,7 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
         dt_rank: int = 16,
         alpha_init: float = 0.1,
         use_cls_token: bool = False,
+        shift_memory: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1511,6 +1525,7 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
             dt_rank,
             alpha_init=alpha_init,
             use_cls_token=use_cls_token,
+            shift_memory=shift_memory,
             **kwargs,
         )
 
@@ -1570,6 +1585,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
         dt_rank: int = 16,
         zero_init: bool = False,
         use_cls_token: bool = False,
+        shift_memory: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1586,6 +1602,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
             dt_rank,
             zero_init=zero_init,
             use_cls_token=use_cls_token,
+            shift_memory=shift_memory,
             **kwargs,
         )
 
@@ -1641,6 +1658,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
         dim_head=64,
         dt_rank: int = 16,
         use_cls_token: bool = False,
+        shift_memory: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1656,6 +1674,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
             dim_head,
             dt_rank,
             use_cls_token=use_cls_token,
+            shift_memory=shift_memory,
             **kwargs,
         )
 
@@ -1706,6 +1725,7 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
         dim_head=64,
         dt_rank: int = 16,
         use_cls_token: bool = False,
+        shift_memory: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1721,6 +1741,7 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
             dim_head,
             dt_rank,
             use_cls_token=use_cls_token,
+            shift_memory=shift_memory,
             **kwargs,
         )
     
@@ -1746,12 +1767,23 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
         if self.use_cls_token:
             x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
+
+        if self.shift_memory:
+            H_0 = self.mem_blocks[0].H_cache
+            if H_0 is None:
+                H_0 = self.mem_blocks[0].init_state(B, device=x.device)
+
         for mem_block in self.mem_blocks:
             x = mem_block(x)
         
         if self.use_cls_token:
             # repeat the cls token to the number of patches
             x = x.repeat(1, 1, self.num_patches, 1)
+
+        if self.shift_memory:
+            H_T = H_T[:, :-1, :, :]
+            H_T = torch.cat([H_0.unsqueeze(1), H_T], dim=1)
+
         return rearrange(x, "b t p d -> b (t p) d")
 
     def reset_memory(self):    
@@ -1777,7 +1809,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
         dim_head=64,
         dt_rank: int = 16,
         use_cls_token: bool = False,
-        shift_memory: bool = False,
+        shift_memory: bool = True,
         **kwargs,
     ):
         super().__init__(
@@ -1793,6 +1825,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
             dim_head,
             dt_rank,
             use_cls_token=use_cls_token,
+            shift_memory=shift_memory,
             **kwargs,
         )
         self.shift_memory = shift_memory
@@ -1905,7 +1938,7 @@ class StateSpaceViTPredictor(nn.Module):
         lora_alpha: float = 1.0,
         lora_dropout: float = 0.0,
         use_cls_token: bool = False,
-        shift_memory: bool = False,
+        shift_memory: bool = True,
     ):
         super().__init__()
         self.dim = dim
@@ -1944,6 +1977,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dt_rank=dt_rank,
                 use_gate=use_gate,
                 use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
             )
         elif injection_type == "misst":
             self.transformer = MemoryInjectionSSMTransformer(
@@ -1960,6 +1994,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dt_rank=dt_rank,
                 alpha_init=alpha_init,
                 use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
             )
         elif injection_type == "adamem":
             self.transformer = AdaMemSSMTransformer(
@@ -1976,6 +2011,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dt_rank=dt_rank,
                 zero_init=zero_init,
                 use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
             )
         
         elif injection_type == "ssm_ca":
@@ -1992,6 +2028,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dim_head=dim_head,
                 dt_rank=dt_rank,
                 use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
             )
         elif injection_type == "ca_hidden":
             self.transformer = HiddenMemCrossAttentionSSMTransformer(
@@ -2023,6 +2060,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dim_head=dim_head,
                 dt_rank=dt_rank,
                 use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
             )
         else:
             raise ValueError(f"Invalid injection type: {injection_type}")

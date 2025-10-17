@@ -11,3 +11,4 @@ gen_hidden_mul: 2
 alpha_mem: 1.0
 step_size: ${step_size}
 n_mem_blocks: ${n_mem_blocks}
+shift_memory: True
