@@ -1,0 +1,11 @@
+_target_: models.vit.BlockRecurrentViTPredictor
+depth: 6
+heads: 16
+mlp_dim: 2048
+dropout: 0.1
+emb_dropout: 0
+state_dim: 256
+dt_rank: 16
+mem_layer_type: "all"
+step_size: ${step_size}
+n_mem_blocks: ${n_mem_blocks}

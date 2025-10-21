@@ -3687,3 +3687,245 @@ class TransformerXLViTPredictor(nn.Module):
     def reset_memory(self):
         """Reset the internal memory buffer"""
         self.transformer.reset_memory()
+
+
+class BlockRecurrentTransformerLayer(nn.Module):
+    def __init__(self, dim, heads, dim_head, mlp_dim, emb_dropout=0.0, attn_dropout=0.0, bias=None):
+        super().__init__()
+        inner_dim = dim_head * heads
+        self.scale = dim_head**-0.5
+
+        # input processing
+        self.to_qkv_input = nn.Linear(dim, 3 * inner_dim, bias=False)
+        self.norm_input = nn.LayerNorm(dim)
+        self.q_input_memory = nn.Linear(dim, inner_dim, bias=False) # for cross attention between input and memory
+
+        # memory processing
+        self.to_kv_memory = nn.Linear(dim, 2 * inner_dim, bias=False)
+        self.norm_memory = nn.LayerNorm(dim)
+
+        # shared
+        self.attend = nn.Softmax(dim=-1)
+        self.attn_dropout = nn.Dropout(attn_dropout)
+        self.to_out = nn.Sequential(nn.Linear(2 * inner_dim, dim), nn.Dropout(emb_dropout))
+        self.ff = FeedForward(dim, mlp_dim, dropout=emb_dropout)
+        self.out_norm = nn.LayerNorm(dim)
+
+        if bias is None:
+            self_attention_bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
+        self.register_buffer("self_attention_bias", self_attention_bias)
+        if bias is None:
+            cross_attention_bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES) # TODO: proper bias for cross attention
+        self.register_buffer("cross_attention_bias", cross_attention_bias)
+
+    def forward(self, x, m, s_pe=None):
+        B, T, C = x.size()
+        B_m, M, C_m = m.size()
+
+        # input processing
+        x = self.norm_input(x)
+        qkv_input = self.to_qkv_input(x).chunk(3, dim=-1)
+        q_in, k_in, v_in = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), qkv_input)
+        dots_in = torch.matmul(q_in, k_in.transpose(-1, -2)) * self.scale
+        dots_in = dots_in.masked_fill(self.self_attention_bias[:, :, :T, :T] == 0, float("-inf"))
+        attn_in = self.attn_dropout(self.attend(dots_in))
+
+        z_in = torch.matmul(attn_in, v_in)
+        z_in = rearrange(z_in, "b h n d -> b n (h d)")
+
+        # memory processing
+        if s_pe is not None:
+            m = m + s_pe[:, :M, :] # context ids (memory positional encodings)
+
+        m = self.norm_memory(m)
+        q_mem = self.q_input_memory(m)
+        kv_mem = self.to_kv_memory(m).chunk(2, dim=-1)
+        k_mem, v_mem = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), kv_mem)
+        dots_in_mem = torch.matmul(q_mem, k_mem.transpose(-1, -2)) * self.scale
+        dots_in_mem = dots_in_mem.masked_fill(self.cross_attention_bias[:, :, :T, :M] == 0, float("-inf"))
+        attn_in_mem = self.attn_dropout(self.attend(dots_in_mem))
+
+        z_in_mem = torch.matmul(attn_in_mem, v_mem)
+        z_in_mem = rearrange(z_in_mem, "b h n d -> b n (h d)")
+
+        # concat input and memory 
+        z = torch.cat([z_in, z_in_mem], dim=-1)
+        x = x + self.to_out(z)
+
+        # ff
+        x = x + self.ff(x)
+
+        return self.out_norm(x)
+
+
+class BlockRecurrentTransformer(StateSpaceTransformer):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        state_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        dim_head=64,
+        dt_rank: int = 16,
+        use_gate: bool = False,
+        mem_layer_type: str = "all", # 'all', 'first', 'middle', 'last', 'alternate'
+        **kwargs,
+    ):
+        self.mem_layer_type = mem_layer_type
+        assert mem_layer_type in {'all', 'first', 'middle', 'last', 'alternate'}, "mem_layer_type must be one of 'all', 'first', 'middle', 'last', 'alternate'"
+        self.s_pe = nn.Parameter(torch.randn(1, NUM_FRAMES * NUM_PATCHES, dim))
+
+        super().__init__(
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            state_dim=state_dim,
+            step_size=step_size,
+            n_mem_blocks=n_mem_blocks,
+            dropout=dropout,
+            dim_head=dim_head,
+            dt_rank=dt_rank,
+            use_gate=use_gate,
+            mem_layer_type=mem_layer_type,
+            **kwargs,
+        )
+
+    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+        self.layers = nn.ModuleList([])
+        if self.mem_layer_type == 'all':
+            mem_layer_idx = list(range(depth))
+        elif self.mem_layer_type == 'first':
+            mem_layer_idx = [0]
+        elif self.mem_layer_type == 'middle':
+            mem_layer_idx = list(range(1, depth - 1))
+        elif self.mem_layer_type == 'last':
+            mem_layer_idx = [depth - 1]
+        elif self.mem_layer_type == 'alternate':
+            mem_layer_idx = list(range(0, depth, 2))
+        
+        self.mem_layer_idx = mem_layer_idx
+        
+        for i in range(depth):
+            if i in mem_layer_idx:
+                self.layers.append(
+                    BlockRecurrentTransformerLayer(
+                        dim=dim,
+                        heads=heads,
+                        dim_head=dim_head,
+                        mlp_dim=mlp_dim,
+                        emb_dropout=dropout,
+                        attn_dropout=dropout,
+                    )
+                )
+            else:
+                self.layers.append(
+                    nn.ModuleList([
+                        Attention(
+                            dim=dim,
+                            heads=heads,
+                            dim_head=dim_head,
+                            dropout=dropout,
+                            bias=generate_mask_matrix(NUM_PATCHES, NUM_FRAMES),
+                        ),
+                        FeedForward(
+                            dim=dim,
+                            hidden_dim=mlp_dim,
+                            dropout=dropout,
+                        )
+                    ])
+                )
+    
+    def _mem_blocks_forward(self, x):
+        B, T, D = x.shape
+        x = x.clone()
+        x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
+        for mem_block in self.mem_blocks:
+            x, H_T = mem_block(x)
+
+        return rearrange(x, "b t p d -> b (t p) d")
+
+    def forward(self, x):
+        B, T, D = x.size()
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
+        for i, layer in enumerate(self.layers):
+            if i in self.mem_layer_idx:
+                x = layer(x, M_new, self.s_pe) # residual connection inside layer
+            else:
+                x = x + layer[0](x)
+                x = x + layer[1](x)
+        return self.ln_out(x), self.ln_mem_out(M_new)
+
+
+class BlockRecurrentViTPredictor(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        state_dim,
+        depth,
+        heads,
+        mlp_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        emb_dropout=0.0,
+        dim_head=64,
+        dt_rank: int = 16,
+        mem_layer_type: str = "all", # 'all', 'first', 'middle', 'last', 'alternate'
+    ):
+        super().__init__()
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+        self.dim = dim
+        self.state_dim = state_dim
+        self.depth = depth
+        self.heads = heads
+        self.mlp_dim = mlp_dim
+        self.step_size = step_size
+        self.n_mem_blocks = n_mem_blocks
+        
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+        
+        self.transformer = BlockRecurrentTransformer(
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            state_dim=state_dim,
+            step_size=step_size,
+            n_mem_blocks=n_mem_blocks,
+            dropout=dropout,
+            dim_head=dim_head,
+            dt_rank=dt_rank,
+            mem_layer_type=mem_layer_type,
+        )
+
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
+    
+    def reset_memory(self):
+        self.transformer.reset_memory()
+    
+    def set_step_size(self, step_size):
+        self.transformer.set_step_size(step_size)
+
+
