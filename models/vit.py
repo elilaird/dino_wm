@@ -1,5 +1,6 @@
 # adapted from https://github.com/lucidrains/vit-pytorch/blob/main/vit_pytorch/vit.py
 import torch
+import torch.cuda
 from torch import nn
 from einops import rearrange
 from torch.nn import functional as F
@@ -3723,8 +3724,18 @@ class BlockRecurrentTransformerLayer(nn.Module):
         B, T, C = x.size()
         B_m, M, C_m = m.size()
 
-        # input processing
         x = self.norm_input(x)
+        # x_copy = x.clone()
+
+        # stream1 = torch.cuda.Stream(device=x.device)
+        # stream2 = torch.cuda.Stream(device=x.device)
+
+        # z_in = None
+        # z_in_mem = None
+
+        # torch.cuda.synchronize()
+        # with torch.cuda.stream(stream1):
+        # input processing
         qkv_input = self.to_qkv_input(x).chunk(3, dim=-1)
         q_in, k_in, v_in = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), qkv_input)
         dots_in = torch.matmul(q_in, k_in.transpose(-1, -2)) * self.scale
@@ -3734,12 +3745,13 @@ class BlockRecurrentTransformerLayer(nn.Module):
         z_in = torch.matmul(attn_in, v_in)
         z_in = rearrange(z_in, "b h n d -> b n (h d)")
 
+        # with torch.cuda.stream(stream2):
         # memory processing
         if s_pe is not None:
             m = m + s_pe[:, :M, :] # context ids (memory positional encodings)
 
         m = self.norm_memory(m)
-        q_mem = self.q_input_memory(m)
+        q_mem = self.q_input_memory(x) 
         k_mem, v_mem = self.to_kv_memory(m).chunk(2, dim=-1)
         q_mem, k_mem, v_mem = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), [q_mem, k_mem, v_mem])
         dots_in_mem = torch.matmul(q_mem, k_mem.transpose(-1, -2)) * self.scale
@@ -3748,6 +3760,10 @@ class BlockRecurrentTransformerLayer(nn.Module):
 
         z_in_mem = torch.matmul(attn_in_mem, v_mem)
         z_in_mem = rearrange(z_in_mem, "b h n d -> b n (h d)")
+
+        # torch.cuda.synchronize()
+
+        # assert z_in is not None and z_in_mem is not None
 
         # concat input and memory 
         z = torch.cat([z_in, z_in_mem], dim=-1)
