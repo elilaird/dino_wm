@@ -469,7 +469,7 @@ class Trainer:
                             self.__dict__[k]
                         ).load_state_dict(ckpt[k], strict=False)
                     else:
-                        self.__dict__[k].load_state_dict(ckpt[k], strict=False)
+                        self.__dict__[k].load_state_dict(ckpt[k])
                     log.info(f"Loaded model {k} from state dict")
                 else:
                     log.warning(
