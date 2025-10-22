@@ -6,6 +6,6 @@ dropout: 0.1
 emb_dropout: 0
 state_dim: 512
 dt_rank: 128
-mem_layer_type: "all"
+mem_layer_type: "all" # 'all', 'first', 'middle', 'last', 'alternate'
 step_size: ${step_size}
 n_mem_blocks: ${n_mem_blocks}

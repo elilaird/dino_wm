@@ -1,6 +1,4 @@
-# adapted from https://github.com/lucidrains/vit-pytorch/blob/main/vit_pytorch/vit.py
 import torch
-import torch.cuda
 from torch import nn
 from einops import rearrange
 from torch.nn import functional as F
@@ -1344,7 +1342,8 @@ class StateSpaceTransformer(nn.Module):
         dt_rank: int = 16,
         use_gate: bool = False,
         use_cls_token: bool = False,
-        shift_memory: bool = True,
+        shift_memory: bool = False,
+        mem_layer_type: str = "all", # "all", "first", "middle", "last", "alternate" (injection position)
         **kwargs,
     ):
         super().__init__()
@@ -1362,6 +1361,18 @@ class StateSpaceTransformer(nn.Module):
         self.n_mem_blocks = n_mem_blocks
         self.use_cls_token = use_cls_token
         self.shift_memory = shift_memory
+        self.mem_layer_type = mem_layer_type
+
+        if self.mem_layer_type == 'all':
+            self.mem_layer_idx = list(range(depth))
+        elif self.mem_layer_type == 'first':
+            self.mem_layer_idx = [0]
+        elif self.mem_layer_type == 'middle':
+            self.mem_layer_idx = list(range(1, depth - 1))
+        elif self.mem_layer_type == 'last':
+            self.mem_layer_idx = [depth - 1]
+        elif self.mem_layer_type == 'alternate':
+            self.mem_layer_idx = list(range(0, depth, 2))
 
         if use_gate:
             self.gate = nn.Linear(dim, dim)
@@ -1387,29 +1398,7 @@ class StateSpaceTransformer(nn.Module):
     ):
         self.ln_mem_out = nn.Identity() # nn.LayerNorm(dim) #TODO: add back in
         self.mem_blocks = nn.ModuleList([])
-        # for _ in range(n_mem_blocks):
-        #     self.mem_blocks.append(
-        #         nn.ModuleList(
-        #             [
-        #                 MambaLayer(
-        #                     d_model=dim,
-        #                     n_state=state_dim,
-        #                     step_size=self.step_size,
-        #                     num_patches=self.num_patches if not self.use_cls_token else 1,
-        #                     dt_rank=dt_rank,
-        #                     dropout=dropout,
-        #                 ),
-        #                 nn.Sequential(
-        #                     nn.LayerNorm(dim),
-        #                     nn.Linear(dim, mlp_dim),
-        #                     nn.GELU(),
-        #                     nn.Dropout(dropout),
-        #                     nn.Linear(mlp_dim, dim),
-        #                     nn.Dropout(dropout),
-        #                 ),
-        #             ]
-        #         )
-        #     )
+
         for _ in range(n_mem_blocks):
             self.mem_blocks.append(
                 BasicMambaLayer(
@@ -1525,6 +1514,7 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
         alpha_init: float = 0.1,
         use_cls_token: bool = False,
         shift_memory: bool = False,
+        mem_layer_type: str = "all", # "all", "first", "middle", "last", "alternate" (injection position)
         **kwargs,
     ):
         super().__init__(
@@ -1542,6 +1532,7 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
             alpha_init=alpha_init,
             use_cls_token=use_cls_token,
             shift_memory=shift_memory,
+            mem_layer_type=mem_layer_type,
             **kwargs,
         )
 
@@ -1551,13 +1542,13 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
         self.alphas = nn.ParameterList(
             [
                 nn.Parameter(torch.ones(1) * kwargs.get("alpha_init", 0.1))
-                for _ in range(depth)
+                for _ in self.mem_layer_idx
             ]
         )
 
         self.layers = nn.ModuleList([])
         self.injection_layers = nn.ModuleList([])
-        for _ in range(depth):
+        for i in range(depth):
             self.layers.append(
                 nn.ModuleList(
                     [
@@ -1571,7 +1562,8 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
                     ]
                 )
             )
-            self.injection_layers.append(nn.Linear(dim, dim))
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(nn.Linear(dim, dim))
 
     def forward(self, x):
         B, T, D = x.shape
@@ -1580,7 +1572,9 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
-            x = x + self.injection_layers[i](M_new) * self.alphas[i]
+            if i in self.mem_layer_idx:
+                idx = self.mem_layer_idx.index(i)            
+                x = x + self.injection_layers[idx](M_new) * self.alphas[idx]
             x = x + ff(x)
 
         return self.ln_out(x), self.ln_mem_out(M_new)
@@ -1603,6 +1597,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
         use_cls_token: bool = False,
         shift_memory: bool = False,
         both_injections: bool = False,
+        mem_layer_type: str = "all",
         **kwargs,
     ):
         self.both_injections = both_injections
@@ -1622,6 +1617,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
             use_cls_token=use_cls_token,
             shift_memory=shift_memory,
             both_injections=both_injections,
+            mem_layer_type=mem_layer_type,
             **kwargs,
         )
         
@@ -1630,7 +1626,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
     ):
         self.layers = nn.ModuleList([])
         self.injection_layers = nn.ModuleList([])
-        for _ in range(depth):
+        for i in range(depth):
             self.layers.append(
                 nn.ModuleList(
                     [
@@ -1644,18 +1640,22 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
                     ]
                 )
             )
-            self.injection_layers.append(
-                nn.ModuleList(
-                    [
-                        AdaptiveLayerNorm(
-                            dim, dim, zero_init=kwargs.get("zero_init", False)
-                        ) if self.both_injections else TwoInputIdentity(),
-                        AdaptiveLayerNorm(
-                            dim, dim, zero_init=kwargs.get("zero_init", False)
-                        )
-                    ]
-                )                
-            )
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(
+                    nn.ModuleList(
+                        [
+                            AdaptiveLayerNorm(
+                                dim, dim, zero_init=kwargs.get("zero_init", False)
+                            ) if self.both_injections else TwoInputIdentity(),
+                            AdaptiveLayerNorm(
+                                dim, dim, zero_init=kwargs.get("zero_init", False)
+                            )
+                        ]
+                    )                
+                )
+            else:
+                self.injection_layers.append(nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()]))
+            
 
     def forward(self, x):
         M_new = self._mem_blocks_forward(x)
@@ -1685,6 +1685,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
         dt_rank: int = 16,
         use_cls_token: bool = False,
         shift_memory: bool = False,
+        mem_layer_type: str = "all",
         **kwargs,
     ):
         super().__init__(
@@ -1701,6 +1702,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
             dt_rank,
             use_cls_token=use_cls_token,
             shift_memory=shift_memory,
+            mem_layer_type=mem_layer_type,
             **kwargs,
         )
 
@@ -1709,7 +1711,7 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
     ):
         self.layers = nn.ModuleList([])
         self.injection_layers = nn.ModuleList([])
-        for _ in range(depth):
+        for i in range(depth):
             self.layers.append(
                 nn.ModuleList(
                     [
@@ -1720,9 +1722,10 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
             )
             # Generate bias mask for cross-attention to prevent attending to future memory tokens
             bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
-            self.injection_layers.append(
-                CrossAttention(dim, heads, dim_head, dropout, bias=bias)
-            )
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(
+                    CrossAttention(dim, heads, dim_head, dropout, bias=bias)
+                )
 
     def forward(self, x):
         M_new = self._mem_blocks_forward(x)
@@ -1730,7 +1733,8 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
-            x = x + self.injection_layers[i](x, M_new)
+            if i in self.mem_layer_idx:
+                x = x + self.injection_layers[self.mem_layer_idx.index(i)](x, M_new)
             x = x + ff(x)
 
         return self.ln_out(x), self.ln_mem_out(M_new)
@@ -1752,6 +1756,7 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
         dt_rank: int = 16,
         use_cls_token: bool = False,
         shift_memory: bool = False,
+        mem_layer_type: str = "all",
         **kwargs,
     ):
         super().__init__(
@@ -1768,6 +1773,7 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
             dt_rank,
             use_cls_token=use_cls_token,
             shift_memory=shift_memory,
+            mem_layer_type=mem_layer_type,
             **kwargs,
         )
     
@@ -1787,6 +1793,7 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
                     dropout=dropout,
                 ),
             )
+
     def _mem_blocks_forward(self, x):
         B, T, D = x.shape
         x = x.clone()
@@ -1836,6 +1843,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
         dt_rank: int = 16,
         use_cls_token: bool = False,
         shift_memory: bool = True,
+        mem_layer_type: str = "all",
         **kwargs,
     ):
         super().__init__(
@@ -1852,6 +1860,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
             dt_rank,
             use_cls_token=use_cls_token,
             shift_memory=shift_memory,
+            mem_layer_type=mem_layer_type,
             **kwargs,
         )
         self.shift_memory = shift_memory
@@ -1878,7 +1887,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
     ):
         self.layers = nn.ModuleList([])
         self.injection_layers = nn.ModuleList([])
-        for _ in range(depth):
+        for i in range(depth):
             self.layers.append(
                 nn.ModuleList(
                     [
@@ -1889,9 +1898,10 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
             )
             # Generate bias mask for cross-attention to prevent attending to future memory tokens
             bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
-            self.injection_layers.append(
-                CrossAttentionInjection(dim, self.state_dim, heads, dim_head, dropout, bias=bias)
-            )
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(
+                    CrossAttentionInjection(dim, self.state_dim, heads, dim_head, dropout, bias=bias)
+                )
     
     def _mem_blocks_forward(self, x):
         B, T, D = x.shape
@@ -1925,7 +1935,8 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
-            x = x + self.injection_layers[i](x, M_new)
+            if i in self.mem_layer_idx:
+                x = x + self.injection_layers[self.mem_layer_idx.index(i)](x, M_new)
             x = x + ff(x)
 
         return self.ln_out(x), self.ln_mem_out(M_new)
@@ -1966,6 +1977,7 @@ class StateSpaceViTPredictor(nn.Module):
         use_cls_token: bool = False,
         shift_memory: bool = True,
         both_injections: bool = False,
+        mem_layer_type: str = "all",
     ):
         super().__init__()
         self.dim = dim
@@ -2005,6 +2017,7 @@ class StateSpaceViTPredictor(nn.Module):
                 use_gate=use_gate,
                 use_cls_token=use_cls_token,
                 shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
             )
         elif injection_type == "misst":
             self.transformer = MemoryInjectionSSMTransformer(
@@ -2022,6 +2035,7 @@ class StateSpaceViTPredictor(nn.Module):
                 alpha_init=alpha_init,
                 use_cls_token=use_cls_token,
                 shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
             )
         elif injection_type == "adamem":
             self.transformer = AdaMemSSMTransformer(
@@ -2040,6 +2054,7 @@ class StateSpaceViTPredictor(nn.Module):
                 use_cls_token=use_cls_token,
                 shift_memory=shift_memory,
                 both_injections=both_injections,
+                mem_layer_type=mem_layer_type,
             )
         
         elif injection_type == "ssm_ca":
@@ -2057,6 +2072,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dt_rank=dt_rank,
                 use_cls_token=use_cls_token,
                 shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
             )
         elif injection_type == "ca_hidden":
             self.transformer = HiddenMemCrossAttentionSSMTransformer(
@@ -2073,6 +2089,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dt_rank=dt_rank,
                 use_cls_token=use_cls_token,
                 shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
             )
         elif injection_type == "ca_basic":
             self.transformer = BasicMemCrossAttentionSSMTransformer(
@@ -2089,6 +2106,7 @@ class StateSpaceViTPredictor(nn.Module):
                 dt_rank=dt_rank,
                 use_cls_token=use_cls_token,
                 shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
             )
         else:
             raise ValueError(f"Invalid injection type: {injection_type}")
@@ -3725,17 +3743,7 @@ class BlockRecurrentTransformerLayer(nn.Module):
         B_m, M, C_m = m.size()
 
         x = self.norm_input(x)
-        # x_copy = x.clone()
 
-        # stream1 = torch.cuda.Stream(device=x.device)
-        # stream2 = torch.cuda.Stream(device=x.device)
-
-        # z_in = None
-        # z_in_mem = None
-
-        # torch.cuda.synchronize()
-        # with torch.cuda.stream(stream1):
-        # input processing
         qkv_input = self.to_qkv_input(x).chunk(3, dim=-1)
         q_in, k_in, v_in = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), qkv_input)
         dots_in = torch.matmul(q_in, k_in.transpose(-1, -2)) * self.scale
@@ -3745,7 +3753,6 @@ class BlockRecurrentTransformerLayer(nn.Module):
         z_in = torch.matmul(attn_in, v_in)
         z_in = rearrange(z_in, "b h n d -> b n (h d)")
 
-        # with torch.cuda.stream(stream2):
         # memory processing
         if s_pe is not None:
             m = m + s_pe[:, :M, :] # context ids (memory positional encodings)
@@ -3760,10 +3767,6 @@ class BlockRecurrentTransformerLayer(nn.Module):
 
         z_in_mem = torch.matmul(attn_in_mem, v_mem)
         z_in_mem = rearrange(z_in_mem, "b h n d -> b n (h d)")
-
-        # torch.cuda.synchronize()
-
-        # assert z_in is not None and z_in_mem is not None
 
         # concat input and memory 
         z = torch.cat([z_in, z_in_mem], dim=-1)
