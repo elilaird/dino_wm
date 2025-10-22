@@ -2938,7 +2938,8 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
         use_vo: bool = False,
         gen_type: str = "A",
         use_cls_token: bool = False,
-        shift_memory: bool = True,
+        shift_memory: bool = False,
+        mem_layer_type: str = "all",
         **kwargs,
     ):
         self.lora_rank = lora_rank
@@ -2966,14 +2967,16 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
             use_vo=use_vo,
             use_cls_token=use_cls_token,
             shift_memory=shift_memory,
+            mem_layer_type=mem_layer_type,
             **kwargs,
         )
 
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
         self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList([
+        for i in range(depth):
+            block = nn.ModuleList([])
+            if i in self.mem_layer_idx:
+                block.append(
                     DynamicLoRAAttention(
                         dim=dim, 
                         heads=heads, 
@@ -2985,15 +2988,19 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
                         use_vo=self.use_vo,
                         dropout=dropout, 
                         bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES),
-                    ),
-                    FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout),
-                ])
-            )
+                    )
+                )
+            else:
+                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)))
+            block.append(FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout))
+            self.layers.append(block)
+
     def forward(self, x):
         M_new = self._mem_blocks_forward(x)
         x = self.ln_in(x)
-        for attn, ff in self.layers:
-            x = x + attn(x, M_new)
+        for i, (attn, ff) in enumerate(self.layers):
+            attn_out = attn(x, M_new) if i in self.mem_layer_idx else attn(x)
+            x = x + attn_out            
             x = x + ff(x)
         return self.ln_out(x), self.ln_mem_out(M_new)
 
@@ -3039,6 +3046,7 @@ class LoRAFFNTransformer(StateSpaceTransformer):
         lora_alpha: float = 2.0,
         gen_type: str = "A",
         use_cls_token: bool = False,
+        mem_layer_type: str = "all",
         **kwargs,
     ):
         self.lora_rank = lora_rank
@@ -3061,15 +3069,19 @@ class LoRAFFNTransformer(StateSpaceTransformer):
             lora_alpha=lora_alpha,
             gen_type=gen_type,
             use_cls_token=use_cls_token,
+            mem_layer_type=mem_layer_type,
             **kwargs,
         )
 
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
         self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList([
-                    Attention(dim, heads, dim_head, dropout, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)),
+        for i in range(depth):
+            block = nn.ModuleList([])
+            block.append(
+                Attention(dim, heads, dim_head, dropout, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES))
+            )
+            if i in self.mem_layer_idx:
+                block.append(
                     DynamicLoRAFFN(
                         dim=dim,
                         hidden_dim=mlp_dim,
@@ -3078,15 +3090,19 @@ class LoRAFFNTransformer(StateSpaceTransformer):
                         gen_type=self.gen_type,
                         dropout=dropout,
                     )       
-                ])
-            )
+                )
+            else:
+                block.append(FeedForward(dim, mlp_dim, dropout))
+            self.layers.append(block)
+
 
     def forward(self, x):
         M_new = self._mem_blocks_forward(x)
         x = self.ln_in(x)
-        for attn, ff in self.layers:
+        for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
-            x = x + ff(x, M_new)
+            ff_out = ff(x, M_new) if i in self.mem_layer_idx else ff(x)
+            x = x + ff_out
         return self.ln_out(x), self.ln_mem_out(M_new)
 
 
@@ -3111,7 +3127,8 @@ class LoRAInjectionViTPredictor(nn.Module):
         lora_rank: int = 16,
         lora_alpha: float = 2.0,
         gen_type: str = "A",
-        shift_memory: bool = True,
+        shift_memory: bool = False,
+        mem_layer_type: str = "all",
     ):
         super().__init__()
         self.dim = dim
@@ -3159,6 +3176,7 @@ class LoRAInjectionViTPredictor(nn.Module):
                 use_qk=use_qk,
                 use_vo=use_vo,
                 shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
             )
         elif injection_type == "lora_ffn":
             self.transformer = LoRAFFNTransformer(
@@ -3176,7 +3194,7 @@ class LoRAInjectionViTPredictor(nn.Module):
                 lora_rank=lora_rank,
                 lora_alpha=lora_alpha,
                 gen_type=gen_type,
-                shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
             )
         else:
             raise ValueError(f"Invalid injection type: {injection_type}")
