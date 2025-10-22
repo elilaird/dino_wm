@@ -3694,6 +3694,7 @@ class BlockRecurrentTransformerLayer(nn.Module):
         super().__init__()
         inner_dim = dim_head * heads
         self.scale = dim_head**-0.5
+        self.heads = heads
 
         # input processing
         self.to_qkv_input = nn.Linear(dim, 3 * inner_dim, bias=False)
@@ -3739,8 +3740,8 @@ class BlockRecurrentTransformerLayer(nn.Module):
 
         m = self.norm_memory(m)
         q_mem = self.q_input_memory(m)
-        kv_mem = self.to_kv_memory(m).chunk(2, dim=-1)
-        k_mem, v_mem = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), kv_mem)
+        k_mem, v_mem = self.to_kv_memory(m).chunk(2, dim=-1)
+        q_mem, k_mem, v_mem = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), [q_mem, k_mem, v_mem])
         dots_in_mem = torch.matmul(q_mem, k_mem.transpose(-1, -2)) * self.scale
         dots_in_mem = dots_in_mem.masked_fill(self.cross_attention_bias[:, :, :T, :M] == 0, float("-inf"))
         attn_in_mem = self.attn_dropout(self.attend(dots_in_mem))
@@ -3778,7 +3779,6 @@ class BlockRecurrentTransformer(StateSpaceTransformer):
     ):
         self.mem_layer_type = mem_layer_type
         assert mem_layer_type in {'all', 'first', 'middle', 'last', 'alternate'}, "mem_layer_type must be one of 'all', 'first', 'middle', 'last', 'alternate'"
-        self.s_pe = nn.Parameter(torch.randn(1, NUM_FRAMES * NUM_PATCHES, dim))
 
         super().__init__(
             dim=dim,
@@ -3796,6 +3796,8 @@ class BlockRecurrentTransformer(StateSpaceTransformer):
             mem_layer_type=mem_layer_type,
             **kwargs,
         )
+        self.s_pe = nn.Parameter(torch.randn(1, NUM_FRAMES * NUM_PATCHES, dim))
+
 
     def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
         self.layers = nn.ModuleList([])
