@@ -381,6 +381,17 @@ class FeedForwardWithLoRA(nn.Module):
         return y
 
 
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.0, bias=None):
+        super().__init__()
+        self.attn = Attention(dim, heads, dim_head, dropout, bias=bias)
+        self.ff = FeedForward(dim, mlp_dim, dropout)
+
+    def forward(self, x):
+        x = x + self.attn(x)
+        x = x + self.ff(x)
+        return x
+
 class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0):
         super().__init__()
@@ -926,27 +937,45 @@ class MACTransformer(nn.Module):
         dim_head=64,
         update_type="selfattention",
         proj_k_eq_q=False,
+        mem_layer_type: str = "all",
     ):
         super().__init__()
         self.mem = memory_module
         self.norm = nn.LayerNorm(dim)
+
+        if self.mem_layer_type == 'all':
+            self.mem_layer_idx = list(range(depth))
+        elif self.mem_layer_type == 'first':
+            self.mem_layer_idx = [0]
+        elif self.mem_layer_type == 'middle':
+            self.mem_layer_idx = list(range(1, depth - 1))
+        elif self.mem_layer_type == 'last':
+            self.mem_layer_idx = [depth - 1]
+        elif self.mem_layer_type == 'alternate':
+            self.mem_layer_idx = list(range(0, depth, 2))
+
         self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                MACTransformerBlock(
-                    mem=memory_module,
-                    num_patches=num_patches,
-                    num_frames=num_frames,
-                    d_model=dim,
-                    n_heads=heads,
-                    d_ff=mlp_dim,
-                    n_persistent=n_persistent,
-                    dropout=dropout,
-                    dim_head=dim_head,
-                    update_type=update_type,
-                    proj_k_eq_q=proj_k_eq_q,
+        for i in range(depth):
+            if i in self.mem_layer_idx:
+                self.layers.append(
+                    MACTransformerBlock(
+                        mem=memory_module,
+                        num_patches=num_patches,
+                        num_frames=num_frames,
+                        d_model=dim,
+                        n_heads=heads,
+                        d_ff=mlp_dim,
+                        n_persistent=n_persistent,
+                        dropout=dropout,
+                        dim_head=dim_head,
+                        update_type=update_type,
+                        proj_k_eq_q=proj_k_eq_q,
+                    )
                 )
-            )
+            else:
+                self.layers.append(
+                    TransformerBlock(dim, heads, dim_head, mlp_dim, dropout, bias=generate_mask_matrix(NUM_PATCHES, NUM_FRAMES))
+                )
 
     def forward(self, x):
         for layer in self.layers:
@@ -980,6 +1009,7 @@ class MACViTPredictor(nn.Module):
         update_steps=1,
         update_type="selfattention",
         proj_k_eq_q=False,
+        mem_layer_type: str = "all",
     ):
         assert pool in {
             "cls",
@@ -1022,6 +1052,7 @@ class MACViTPredictor(nn.Module):
             dim_head,
             update_type,
             proj_k_eq_q,
+            mem_layer_type,
         )
 
     def forward(self, x, H=None):

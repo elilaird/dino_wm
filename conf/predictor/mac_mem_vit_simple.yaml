@@ -17,3 +17,4 @@ weight_clip: 10.0
 update_steps: 10
 update_type: "selfattention"
 proj_k_eq_q: False
+mem_layer_type: "all"

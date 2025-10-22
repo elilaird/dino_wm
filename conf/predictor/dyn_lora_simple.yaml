@@ -13,3 +13,4 @@ injection_type: "lora_qk"
 step_size: ${step_size}
 n_mem_blocks: ${n_mem_blocks}
 shift_memory: False
+mem_layer_type: "all"
