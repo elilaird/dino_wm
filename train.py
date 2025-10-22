@@ -454,7 +454,7 @@ class Trainer:
             elif k.endswith("_optimizer"):
                 # Load optimizer state dict
                 if k in ckpt and hasattr(self.__dict__[k], "load_state_dict"):
-                    self.__dict__[k].load_state_dict(ckpt[k], strict=False)
+                    self.__dict__[k].load_state_dict(ckpt[k])
                     log.info(f"Loaded optimizer {k} from state dict")
                 else:
                     log.warning(
