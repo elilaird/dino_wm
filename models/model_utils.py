@@ -44,9 +44,9 @@ def generate_sliding_window_mask(seq_len, window_size):
 def generate_mac_mask_matrix(npatch, nwindow, n_persistent, n_retrieved):
     """
     Generate frame-level mask for MAC transformer with the following attention patterns:
-    - Persistent tokens: attend to everything
-    - Memory frames: attend to memory frames behind them + main blocks at timesteps behind them
-    - Main blocks: frame-level causality + access to memory blocks at current and previous time frames
+    - Persistent tokens: attend to main sequence frames only
+    - Memory frames: attend to main sequence frames only
+    - Main blocks: attend to persistent tokens + memory tokens at same time step + previous frames
     """
     total_frames = n_persistent + n_retrieved + nwindow
 
@@ -56,34 +56,44 @@ def generate_mac_mask_matrix(npatch, nwindow, n_persistent, n_retrieved):
 
     rows = []
 
-    # Persistent token rows (can attend to everything)
+    # Persistent token rows (attend to main sequence frames only)
     for i in range(n_persistent):
-        row = torch.cat([ones] * total_frames, dim=1)
-        rows.append(row)
-
-    # Memory frame rows (attend to memory frames behind them + main blocks at timesteps behind them)
-    for i in range(n_retrieved):
-        # Allow attention to persistent tokens (all frames can attend to persistent tokens)
-        persistent_blocks = [ones] * n_persistent
+        # No attention to other persistent tokens
+        persistent_blocks = [zeros] * n_persistent
         
-        # Allow attention to memory frames behind current memory frame
-        memory_blocks = [ones] * (i + 1) + [zeros] * (n_retrieved - i - 1)
+        # No attention to memory tokens
+        memory_blocks = [zeros] * n_retrieved
         
-        # Allow attention to main blocks at timesteps behind current memory frame
-        # Memory frame i corresponds to main sequence timestep i
+        # Allow attention to main blocks at current and previous time steps
         main_blocks = [ones] * (i + 1) + [zeros] * (nwindow - i - 1)
         
         row = torch.cat(persistent_blocks + memory_blocks + main_blocks, dim=1)
         rows.append(row)
 
-    # Main sequence rows (frame-level causality + access to memory blocks at current and previous time frames)
+    # Memory frame rows (attend to main sequence frames only)
+    for i in range(n_retrieved):
+        # No attention to persistent tokens
+        persistent_blocks = [zeros] * n_persistent
+        
+        # No attention to other memory tokens
+        memory_blocks = [zeros] * n_retrieved
+        
+        # Allow attention to main blocks at current and previous time steps
+        main_blocks = [ones] * (i + 1) + [zeros] * (nwindow - i - 1)
+        
+        row = torch.cat(persistent_blocks + memory_blocks + main_blocks, dim=1)
+        rows.append(row)
+
+    # Main sequence rows (attend to persistent tokens + memory tokens at same time step + previous frames)
     for i in range(nwindow):
-        # Allow attention to persistent tokens (all frames can attend to persistent tokens)
+        # Allow attention to persistent tokens
         persistent_blocks = [ones] * n_persistent
 
-        # Allow attention to memory blocks at current and previous time frames
-        # Main sequence timestep i can attend to memory frames 0 through i
-        memory_blocks = [ones] * min(i + 1, n_retrieved) + [zeros] * max(0, n_retrieved - i - 1)
+        # Allow attention to memory tokens at same time step (if memory frame exists for this timestep)
+        if i < n_retrieved:
+            memory_blocks = [zeros] * i + [ones] + [zeros] * (n_retrieved - i - 1)
+        else:
+            memory_blocks = [zeros] * n_retrieved
 
         # Allow attention to current and previous frames in main sequence (frame-level causality)
         main_blocks = [ones] * (i + 1) + [zeros] * (nwindow - i - 1)
