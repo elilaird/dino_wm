@@ -3526,6 +3526,7 @@ class TransformerXLAttention(nn.Module):
         if mems is not None and len(mems) > 0:
             # Concatenate memory with current keys and values
             # print(f"mems_shape: {mems.shape}", flush=True)
+            mems = self.norm(mems)
             mem_k = self.to_k(mems)
             mem_v = self.to_v(mems)
 
@@ -3556,7 +3557,7 @@ class TransformerXLAttention(nn.Module):
             # For memory, we need to adjust the mask
             mem_len = mems.size(1) if mems is not None else 0
             mask = generate_frame_mask_with_memory(NUM_PATCHES, NUM_FRAMES, mem_len, device=x.device, dtype=torch.bool)
-            mask = mask[:,:,mem_len:,:]
+            mask = mask[:,:,mem_len:,:] == 1
         else:
             mask = self.bias[:, :, :T, :T] == 1
             mem_len = 0
