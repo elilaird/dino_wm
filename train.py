@@ -2191,7 +2191,13 @@ class Trainer:
                 )
                 if self.accelerator.is_main_process:
                     self.plot_imgs(imgs, horizon, f"{plotting_dir}/e{self.epoch}_{idx}_recent_memory_recall_h{horizon}.png")
-                
+
+                # eval reconstructions
+                rec_loss = eval_images(decoded_pred["visual"][0], obs_tgt["visual"][0])
+                for k in rec_loss.keys():
+                    local_logs[f"{k}_img_err_recent_memory_recall_h{horizon}"].append(rec_loss[k].cpu().numpy())
+
+                # eval latents 
                 z_cycle = self.model.encode_obs({"visual": decoded_pred["visual"], "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
                 div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": decoded_pred["visual"], "proprio": obs_tgt["proprio"]}, z_cycle)
                 for k in div_loss.keys():
