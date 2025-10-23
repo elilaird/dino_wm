@@ -1,12 +1,12 @@
 _target_: models.vit.StateSpaceViTPredictor
-depth: 2
+depth: 4
 heads: 16
-mlp_dim: 512
+mlp_dim: 2048
 dropout: 0.1
 emb_dropout: 0
-state_dim: 128
+state_dim: 512
 use_gate: False
-dt_rank: 8
+dt_rank: 128
 alpha_init: 0.1
 injection_type: "adamem"
 zero_init: False
