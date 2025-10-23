@@ -1474,25 +1474,9 @@ class StateSpaceTransformer(nn.Module):
         B, T, D = x.shape
         x = x.clone()
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
-        if self.use_cls_token:
-            x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
-
-        if self.shift_memory:
-            H_0 = self.mem_blocks[0].H_cache
-            if H_0 is None:
-                H_0 = self.mem_blocks[0].init_state(B, device=x.device)
-
+  
         for mem_block in self.mem_blocks:
             x, H_T = mem_block(x)
-            # x = x + ff(x)
-
-        if self.use_cls_token:
-            # repeat the cls token to the number of patches
-            x = x.repeat(1, 1, self.num_patches, 1)
-        
-        if self.shift_memory:
-            H_T = H_T[:, :-1, :, :]
-            H_T = torch.cat([H_0.unsqueeze(1), H_T], dim=1)
 
         return rearrange(x, "b t p d -> b (t p) d")
 
@@ -3019,11 +3003,11 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
                         use_qk=self.use_qk,
                         use_vo=self.use_vo,
                         dropout=dropout, 
-                        bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES),
+                        # bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES),
                     )
                 )
             else:
-                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)))
+                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout)) #, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)))
             block.append(FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout))
             self.layers.append(block)
 
@@ -3110,7 +3094,7 @@ class LoRAFFNTransformer(StateSpaceTransformer):
         for i in range(depth):
             block = nn.ModuleList([])
             block.append(
-                Attention(dim, heads, dim_head, dropout, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES))
+                Attention(dim, heads, dim_head, dropout) #, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES))
             )
             if i in self.mem_layer_idx:
                 block.append(
@@ -3373,7 +3357,7 @@ class DynamicFFNTransformer(StateSpaceTransformer):
         for _ in range(depth):
             self.layers.append(
                 nn.ModuleList([
-                    Attention(dim, heads, dim_head, dropout, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)),
+                    Attention(dim, heads, dim_head, dropout), #, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)),
                     FFNDynamicMemories(
                         dim=dim,
                         hidden_dim=mlp_dim,
