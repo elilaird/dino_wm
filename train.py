@@ -331,7 +331,7 @@ class Trainer:
             model_ckpt = (
                 Path(self.cfg.saved_folder)
                 / "checkpoints"
-                / "model_latest.pth"
+                / self.cfg.ckpt_name
             )
             if model_ckpt.exists():
                 self.load_ckpt(model_ckpt)

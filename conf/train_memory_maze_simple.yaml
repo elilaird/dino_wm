@@ -14,6 +14,7 @@ debug: False
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
 ckpt_base_path: /projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/checkpoints # put absolute path here
+ckpt_name: "model_latest.pth"
 
 hydra:
   run:
@@ -24,7 +25,7 @@ hydra:
 
 training:
   seed: 0
-  epochs: 50
+  epochs: 20
   batch_size: 128 # gpu_batch_size (128 for 16 gpus)
   save_every_x_epoch: 1 
   reconstruct_every_x_batch: 500
@@ -39,7 +40,7 @@ training:
   action_encoder_weight_decay: 0.01
   max_grad_norm: 1.0
   use_scheduler: True
-  T_0: 100  # Number of epochs for the first restart
+  T_0: 40  # Number of epochs for the first restart
   T_mult: 2  # A factor increases T_i after a restart
   eta_min_ratio: 0.1  # minimum LR as ratio of initial LR
   decay_factor: 0.9  # Factor to decay peak LR at each restart
