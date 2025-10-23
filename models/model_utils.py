@@ -119,3 +119,61 @@ def generate_diagonal_frame_mask(num_patches, num_frames, device=None, dtype=Non
     
     mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
     return mask
+
+
+def generate_frame_mask_with_memory(num_patches, num_frames, n_memory, device=None, dtype=None):
+    """
+    Generate a frame mask that allows all patches in all frames to attend to the n_memory tokens
+    prepended at the beginning.
+    
+    Args:
+        num_patches: Number of patches per frame
+        num_frames: Number of frames
+        n_memory: Number of memory tokens prepended at the beginning
+        device: Device for the tensor
+        dtype: Data type for the tensor
+    
+    Returns:
+        mask: [1, 1, n_memory + num_frames * num_patches, n_memory + num_frames * num_patches] boolean mask
+    """
+    total_tokens = n_memory + num_frames * num_patches
+    
+    # Create memory tokens that can attend to themselves and all other tokens
+    memory_zeros = torch.zeros(n_memory, n_memory, device=device, dtype=torch.bool)
+    memory_ones = torch.ones(n_memory, n_memory, device=device, dtype=torch.bool)
+    
+    # Memory tokens attend to all tokens
+    memory_to_all = torch.ones(n_memory, num_frames * num_patches, device=device, dtype=torch.bool)
+    
+    # Create frame patches that can attend to memory tokens and themselves
+    frame_zeros = torch.zeros(num_patches, num_patches, device=device, dtype=torch.bool)
+    frame_ones = torch.ones(num_patches, num_patches, device=device, dtype=torch.bool)
+    
+    rows = []
+    
+    # Memory token rows - can attend to everything
+    for i in range(n_memory):
+        memory_to_memory = memory_ones[i:i+1, :]
+        memory_to_frames = memory_to_all[i:i+1, :]
+        row = torch.cat([memory_to_memory, memory_to_frames], dim=1)
+        rows.append(row)
+    
+    # Frame patch rows - can attend to memory tokens and past/current frames
+    for i in range(num_frames):
+        for j in range(num_patches):
+            # Can attend to all memory tokens
+            memory_attention = torch.ones(1, n_memory, device=device, dtype=torch.bool)
+            
+            # Can attend to patches in current and past frames (temporal causality)
+            frame_attention = torch.zeros(1, num_frames * num_patches, device=device, dtype=torch.bool)
+            for k in range(i + 1):  # Attend to frames 0 through i
+                start_idx = k * num_patches
+                end_idx = (k + 1) * num_patches
+                frame_attention[0, start_idx:end_idx] = 1
+            
+            row = torch.cat([memory_attention, frame_attention], dim=1)
+            rows.append(row)
+    
+    mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
+    return mask
+

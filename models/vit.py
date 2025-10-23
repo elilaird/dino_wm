@@ -3513,6 +3513,8 @@ class TransformerXLAttention(nn.Module):
             bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
         self.register_buffer("bias", bias)
 
+        
+
     def _rel_shift(self, x):
         """Relative positional shift for TransformerXL attention"""
         zero_pad = torch.zeros((*x.size()[:-2], x.size(-2), 1), device=x.device, dtype=x.dtype)
@@ -3539,11 +3541,19 @@ class TransformerXLAttention(nn.Module):
         # Handle memory if provided
         if mems is not None and len(mems) > 0:
             # Concatenate memory with current keys and values
-            mem_k = mems[0]  # [B, H, M, D] where M is memory length
-            mem_v = mems[1] if len(mems) > 1 else mems[0]
+            # print(f"mems_shape: {mems.shape}", flush=True)
+            mem_k = self.to_k(mems)
+            mem_v = self.to_v(mems)
+
+            # print(f"mem_k_shape after projection: {mem_k.shape}", flush=True)
+
+            mem_k = rearrange(mem_k, "b n (h d) -> b h n d", h=self.heads)
+            mem_v = rearrange(mem_v, "b n (h d) -> b h n d", h=self.heads)
+
+            # print(f"mem_k_shape after reshape: {mem_k.shape}", flush=True)
             
             k = torch.cat([mem_k, k], dim=2)  # [B, H, M+T, D]
-            v = torch.cat([mem_v, v], dim=2)  # [B, H, M+T, D]
+            v = torch.cat([mem_v, v], dim=2)  # [B, H, M+T, D]  
         
         # Compute attention scores
         AC = torch.matmul(q, k.transpose(-1, -2)) * self.scale  # [B, H, T, M+T]
@@ -3555,22 +3565,23 @@ class TransformerXLAttention(nn.Module):
         
         # Combine content and positional attention
         attn = AC + BD
+
         
         # Apply causal mask
         if mems is not None:
             # For memory, we need to adjust the mask
-            mem_len = mems[0].size(2) if len(mems) > 0 else 0
-            mask = torch.cat([
-                torch.ones(T, mem_len, device=x.device, dtype=torch.bool),
-                self.bias[:, :, :T, :T] == 1
-            ], dim=-1)
+            mem_len = mems.size(1) if mems is not None else 0
+            mask = generate_frame_mask_with_memory(NUM_PATCHES, NUM_FRAMES, mem_len, device=x.device, dtype=torch.bool)
+            mask = mask[:,:,mem_len:,:]
         else:
             mask = self.bias[:, :, :T, :T] == 1
+            mem_len = 0
         
         attn = attn.masked_fill(~mask, float("-inf"))
         
         attn = self.attend(attn)
         attn = self.dropout(attn)
+
         
         out = torch.matmul(attn, v)
         out = rearrange(out, "b h n d -> b n (h d)")
@@ -3635,45 +3646,33 @@ class TransformerXL(nn.Module):
         """Update the memory buffer with new segment representations"""
         if self.mem_len == 0:
             return
+
+        self.memory = new_mem  
+        # if self.memory is None:
+        #     self.memory = new_mem
+        # else:
+        #     # Concatenate new memory with existing memory
+        #     self.memory = torch.cat([self.memory, new_mem], dim=1)
             
-        if self.memory is None:
-            self.memory = new_mem
-        else:
-            # Concatenate new memory with existing memory
-            self.memory = torch.cat([self.memory, new_mem], dim=2)
-            
-            # Keep only the most recent mem_len segments
-            if self.memory.size(2) > self.mem_len:
-                self.memory = self.memory[:, :, -self.mem_len:, :]
+        #     # Keep only the most recent mem_len segments
+        #     if self.memory.size(1) > self.mem_len:
+        #         self.memory = self.memory[:, -self.mem_len:, :]
     
-    def forward(self, x, mems=None):
+    def forward(self, x):
         """
         Forward pass with optional external memory.
         
         Args:
             x: Input tensor [B, T, D]
-            mems: Optional external memory [B, H, M, D]
         """
         new_mems = []
-        
+        curr_memory = self.memory
         for i, layer in enumerate(self.layers):
-            # Use external memory if provided, otherwise use internal memory
-            layer_mems = mems[i] if mems is not None and i < len(mems) else None
             
-            x = layer(x, layer_mems)
+            x = layer(x, curr_memory)
             
-            # Store representations for memory (detached to prevent gradients)
-            if self.mem_len > 0:
-                # Extract key-value representations for memory
-                # This is a simplified version - in practice, you might want to store
-                # the actual key-value pairs from the attention mechanism
-                # with torch.no_grad():
-                mem_rep = x.detach().unsqueeze(1)  # [B, 1, T, D]
-                new_mems.append(mem_rep)
-        
-        # Update internal memory
-        if new_mems:
-            self._update_memory(new_mems[-1])  # Store the last layer's representation
+        new_mem = x.detach().clone()
+        self._update_memory(new_mem) 
         
         return self.norm(x)
     
@@ -3717,7 +3716,7 @@ class TransformerXLViTPredictor(nn.Module):
         self.num_frames = num_frames
         self.dim = dim
         self.pool = pool
-        self.mem_len = mem_len
+        self.mem_len = mem_len * num_patches
 
         self.pos_embedding = nn.Parameter(
             torch.randn(1, num_frames * num_patches, dim)
@@ -3734,7 +3733,7 @@ class TransformerXLViTPredictor(nn.Module):
             mem_len=mem_len
         )
 
-    def forward(self, x, H=None):
+    def forward(self, x):
         """
         Forward pass with optional memory.
         
@@ -3749,7 +3748,7 @@ class TransformerXLViTPredictor(nn.Module):
         x = self.dropout(x)
         
         # Pass through TransformerXL
-        x = self.transformer(x, H)
+        x = self.transformer(x)
         
         return x, None
 
