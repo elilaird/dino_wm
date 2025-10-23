@@ -942,6 +942,7 @@ class MACTransformer(nn.Module):
         super().__init__()
         self.mem = memory_module
         self.norm = nn.LayerNorm(dim)
+        self.mem_layer_type = mem_layer_type
 
         if self.mem_layer_type == 'all':
             self.mem_layer_idx = list(range(depth))
