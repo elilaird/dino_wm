@@ -2289,18 +2289,14 @@ class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             if i in self.mem_layer_idx and M_new is not None:
-                idx = self.mem_layer_idx.index(i)            
-                x = x + self.injection_layers[idx](M_new) * self.alphas[idx]
+                idx = self.mem_layer_idx.index(i)       
+                injection = torch.cat([self.injection_layers[idx](M_new), torch.zeros((B, T - M_new.size(1), D), device=x.device)], dim=1)      
+                x = x + injection * self.alphas[idx]
             x = x + ff(x)
 
         self._update_memory(x.detach().clone())
         return self.ln_out(x), self.H_buffer
 
-    def _update_memory(self, mem):
-        if mem is not None:
-            self.H_buffer = mem[:, min(self.step_size - 1, mem.size(1) - 1):]
-        else:
-            self.H_buffer = mem  
 
 
 class CacheAdaMemTransformer(CacheMemoryTransformer):
