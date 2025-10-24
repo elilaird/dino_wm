@@ -2192,6 +2192,7 @@ class CacheMemoryTransformer(nn.Module):
     def _build_transformer(
         self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
     ):
+        self.ln_fuse = nn.LayerNorm(dim)
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(
@@ -2201,7 +2202,8 @@ class CacheMemoryTransformer(nn.Module):
                             dim,
                             heads,
                             dim_head,
-                            dropout,                           
+                            dropout,     
+                            bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)                      
                         ),
                         FeedForward(dim, mlp_dim, dropout),
                     ]
@@ -2209,7 +2211,21 @@ class CacheMemoryTransformer(nn.Module):
             )
 
     def forward(self, x):
-        raise NotImplementedError("CacheMemoryTransformer is not implemented yet")
+        B, T, D = x.shape
+        x = self.ln_in(x)
+        M_new = self._get_memory()
+        M_T = M_new.size(1)
+
+        ctx = self.ln_fuse(torch.cat([M_new, x], dim=1))
+        for i, (attn, ff) in enumerate(self.layers):
+            ctx = ctx + attn(ctx)
+            ctx = ctx + ff(ctx)
+
+        ctx = ctx[:, M_T:]
+
+        self._update_memory(ctx.detach().clone())
+        return self.ln_out(ctx), self._get_memory()
+        s
     
     def reset_memory(self):
         self.H_buffer = None
@@ -2586,7 +2602,20 @@ class CacheMemoryViTPredictor(nn.Module):
         )
         self.dropout = nn.Dropout(emb_dropout)
 
-        if injection_type == "misst":
+        if injection_type == "cache_prepend":
+            self.transformer = CacheMemoryTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                cache_size=cache_size,
+                step_size=step_size,
+                dropout=dropout,
+                dim_head=dim_head,
+                mem_layer_type=mem_layer_type,
+            )
+        elif injection_type == "misst":
             self.transformer = CacheMemoryInjectionTransformer(
                 dim=dim,
                 num_patches=num_patches,

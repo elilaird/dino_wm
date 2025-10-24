@@ -1,0 +1,10 @@
+_target_: models.vit.CacheMemoryViTPredictor
+depth: 4
+heads: 16
+mlp_dim: 2048
+dropout: 0.1
+emb_dropout: 0
+injection_type: "cache_prepend"
+step_size: ${step_size}
+mem_layer_type: "all"
+cache_size: ${num_hist}
