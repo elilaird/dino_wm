@@ -125,8 +125,12 @@ class Trainer:
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
 
-        
+        predictor_name = OmegaConf.to_container(self.cfg.predictor, resolve=True)["_target_"]
         if self.cfg.model.train_encoder and self.cfg.encoder == "dino":
+            ddp_kwargs = DistributedDataParallelKwargs(
+                find_unused_parameters=True 
+            )
+        elif predictor_name == "models.vit.CacheMemoryViTPredictor":
             ddp_kwargs = DistributedDataParallelKwargs(
                 find_unused_parameters=True 
             )

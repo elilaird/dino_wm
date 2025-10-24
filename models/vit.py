@@ -2164,7 +2164,8 @@ class CacheMemoryTransformer(nn.Module):
         self.dropout = dropout
         self.dim_head = dim_head
         self.mem_layer_type = mem_layer_type
-        self.step_size = step_size
+        self.step_size = step_size 
+        self.num_patches = num_patches
 
         if self.mem_layer_type == "all":
             self.mem_layer_idx = list(range(depth))
@@ -2214,11 +2215,11 @@ class CacheMemoryTransformer(nn.Module):
         self.H_buffer = None
 
     def set_step_size(self, step_size):
-        self.step_size = step_size
+        self.step_size = step_size * self.num_patches
     
     def _update_memory(self, mem):
         if mem is not None:
-            self.H_buffer = mem[:, min(self.step_size - 1, mem.size(1) - 1):]
+            self.H_buffer = mem[:, self.step_size - self.num_patches:]
         else:
             self.H_buffer = mem  
 
@@ -2526,13 +2527,11 @@ class CacheMemoryViTPredictor(nn.Module):
         num_patches,
         num_frames,
         dim,
-        state_dim,
         depth,
         heads,
         mlp_dim,
         injection_type,
         step_size,
-        n_mem_blocks,
         alpha_init: float = 0.1,
         dropout=0.0,
         emb_dropout=0.0,
@@ -2550,7 +2549,6 @@ class CacheMemoryViTPredictor(nn.Module):
     ):
         super().__init__()
         self.dim = dim
-        self.state_dim = state_dim
         self.depth = depth
         self.heads = heads
         self.mlp_dim = mlp_dim
