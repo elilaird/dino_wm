@@ -185,7 +185,8 @@ class VWorldModel(nn.Module):
         z, s = self.predictor(z)
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
         if s is not None:
-            s = rearrange(s, "b (t p) d -> b t p d", t=T)
+            if s.ndim == 3:
+                s = rearrange(s, "b (t p) d -> b t p d", t=T)
         return z, s
     
     def predict_aux(self, s):

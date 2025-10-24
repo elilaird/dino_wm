@@ -10,3 +10,4 @@ gen_type: "A"
 injection_type: "lora"
 step_size: ${step_size}
 mem_layer_type: "all"
+cache_size: ${num_hist}

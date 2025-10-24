@@ -421,7 +421,7 @@ class MambaLayer(nn.Module):
 
         y = self.layer_norm(x)
         H_new, y, _ = self.ssm(y, self.H_cache, mode="scan")
-        self.H_cache = H_new[:, min(self.step_size - 1, y.size(1) - 1)].detach()
+        self.H_cache = H_new[:, self.step_size - 1].detach()
 
         y = self.gelu(y)
         y = self.dropout(y)
@@ -472,9 +472,11 @@ class BasicMambaLayer(nn.Module):
 
         y = self.layer_norm(x)
         H_new, y, _ = self.ssm(y, self.H_cache, mode="scan")
-        self.H_cache = H_new[
-            :, min(self.step_size - 1, y.size(1) - 1)
-        ].detach()
+        self.H_cache = H_new[:, self.step_size - 1].detach() # this should fail when step size == window_size 
+
+        # self.H_cache = H_new[
+        #     :, min(self.step_size - 1, y.size(1) - 1)
+        # ].detach()
 
         return y, H_new
 
@@ -521,7 +523,8 @@ class BasicHiddenMambaLayer(nn.Module):
 
         y = self.layer_norm(x)
         H_new, y, H_T = self.ssm(y, self.H_cache, mode="scan")
-        self.H_cache = H_new[:, min(self.step_size - 1, y.size(1) - 1)].detach()
+        print(f"H_new shape: {H_new.shape}")
+        self.H_cache = H_new[:, self.step_size - 1].detach()
 
         return y, H_new
 

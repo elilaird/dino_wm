@@ -7,7 +7,7 @@ emb_dropout: 0
 injection_type: "adamem"
 zero_init: False
 step_size: ${step_size}
-n_mem_blocks: ${n_mem_blocks}
 shift_memory: False
 both_injections: True
 mem_layer_type: "all"
+cache_size: ${num_hist}

@@ -2150,6 +2150,7 @@ class CacheMemoryTransformer(nn.Module):
         depth,
         heads,
         mlp_dim,
+        cache_size,
         step_size=1,
         dropout=0.0,
         dim_head=64,
@@ -2166,6 +2167,7 @@ class CacheMemoryTransformer(nn.Module):
         self.mem_layer_type = mem_layer_type
         self.step_size = step_size 
         self.num_patches = num_patches
+        self.cache_size = cache_size
 
         if self.mem_layer_type == "all":
             self.mem_layer_idx = list(range(depth))
@@ -2181,9 +2183,7 @@ class CacheMemoryTransformer(nn.Module):
         self.ln_in = nn.LayerNorm(dim)
         self.ln_out = nn.LayerNorm(dim)
 
-        self.H_buffer = (
-            None  # keep track of hidden memory state w/o passing around
-        )
+        self.H_buffer = None # (b, cache_size, p, d)
 
         self._build_transformer(
             depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
@@ -2215,14 +2215,24 @@ class CacheMemoryTransformer(nn.Module):
         self.H_buffer = None
 
     def set_step_size(self, step_size):
-        self.step_size = step_size * self.num_patches
+        self.step_size = step_size
     
     def _update_memory(self, mem):
         if mem is not None:
-            self.H_buffer = mem[:, self.step_size - self.num_patches:]
-        else:
-            self.H_buffer = mem  
+            mem = rearrange(mem, "b (t p) d -> b t p d", p=self.num_patches)
+            mem = mem[:, :self.step_size]
 
+            if self.H_buffer is None:
+                self.H_buffer = mem
+            else:
+                self.H_buffer = torch.cat([self.H_buffer, mem], dim=1)[:, -self.cache_size:]
+    
+    def _get_memory(self):
+        if self.H_buffer is None:
+            return self.H_buffer
+        else:
+            return rearrange(self.H_buffer.clone(), "b t p d -> b (t p) d")
+            
 
 class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
     def __init__(
@@ -2232,6 +2242,7 @@ class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
         depth,
         heads,
         mlp_dim,
+        cache_size,
         step_size=1,
         dropout=0.0,
         dim_head=64,
@@ -2240,15 +2251,17 @@ class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
         **kwargs,
     ):
         super().__init__(
-            dim,
-            num_patches,
-            depth,
-            heads,
-            mlp_dim,
-            step_size,
-            dropout,
-            dim_head,
-            mem_layer_type,
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            cache_size=cache_size,
+            step_size=step_size,
+            dropout=dropout,
+            dim_head=dim_head,
+            mem_layer_type=mem_layer_type,
+            alpha_init=alpha_init,
             **kwargs,
         )
 
@@ -2284,18 +2297,19 @@ class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
     def forward(self, x):
         B, T, D = x.shape        
         x = self.ln_in(x)
-        M_new = self.H_buffer
+        M_new = self._get_memory()
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             if i in self.mem_layer_idx and M_new is not None:
                 idx = self.mem_layer_idx.index(i)       
+                print(f"M_new shape: {M_new.shape}")
                 injection = torch.cat([self.injection_layers[idx](M_new), torch.zeros((B, T - M_new.size(1), D), device=x.device)], dim=1)      
                 x = x + injection * self.alphas[idx]
             x = x + ff(x)
 
         self._update_memory(x.detach().clone())
-        return self.ln_out(x), self.H_buffer
+        return self.ln_out(x), self._get_memory()
 
 
 
@@ -2307,6 +2321,7 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
         depth,
         heads,
         mlp_dim,
+        cache_size,
         step_size=1,
         dropout=0.0,
         dim_head=64,
@@ -2318,18 +2333,19 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
         self.both_injections = both_injections
         self.zero_init = zero_init
         super().__init__(
-            dim,
-            num_patches,
-            depth,
-            heads,
-            mlp_dim,
-            step_size,
-            dropout,
-            dim_head,
-            mem_layer_type,
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            cache_size=cache_size,
+            step_size=step_size,
+            dropout=dropout,
+            dim_head=dim_head,
+            mem_layer_type=mem_layer_type,
             zero_init=zero_init,
             both_injections=both_injections,
-            **kwargs,
+            **kwargs,   
         )
 
     def _build_transformer(
@@ -2368,7 +2384,7 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
                 self.injection_layers.append(nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()]))
     
     def forward(self, x):
-        M_new = self.H_buffer
+        M_new = self._get_memory()
         x = self.ln_in(x)
 
         for i, (attn, ff) in enumerate(self.layers):            
@@ -2381,7 +2397,7 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
                 x = x + ff(x)
 
         self._update_memory(x.detach().clone())
-        return self.ln_out(x), self.H_buffer
+        return self.ln_out(x), self._get_memory()
 
 class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
     def __init__(
@@ -2391,6 +2407,7 @@ class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
         depth,
         heads,
         mlp_dim,
+        cache_size,
         step_size,
         dropout=0.0,
         dim_head=64,
@@ -2408,15 +2425,16 @@ class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
         self.use_vo = use_vo
         self.gen_type = gen_type
         super().__init__(
-            dim,
-            num_patches,
-            depth,
-            heads,
-            mlp_dim,
-            step_size,
-            dropout,
-            dim_head,
-            mem_layer_type,
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            cache_size=cache_size,
+            step_size=step_size,
+            dropout=dropout,
+            dim_head=dim_head,
+            mem_layer_type=mem_layer_type,
             **kwargs,
         )
     
@@ -2445,14 +2463,14 @@ class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
             self.layers.append(block)
 
     def forward(self, x):
-        M_new = self.H_buffer
+        M_new = self._get_memory()
         x = self.ln_in(x)
         for i, (attn, ff) in enumerate(self.layers):
             attn_out = attn(x, M_new) if i in self.mem_layer_idx else attn(x)
             x = x + attn_out            
             x = x + ff(x)
         self._update_memory(x.detach().clone())
-        return self.ln_out(x), self.H_buffer
+        return self.ln_out(x), self._get_memory()
         
 class CacheCrossAttentionTransformer(CacheMemoryTransformer):
     def __init__(
@@ -2462,6 +2480,7 @@ class CacheCrossAttentionTransformer(CacheMemoryTransformer):
         depth,
         heads,
         mlp_dim,
+        cache_size,
         step_size=1,
         dropout=0.0,
         dim_head=64,
@@ -2469,15 +2488,16 @@ class CacheCrossAttentionTransformer(CacheMemoryTransformer):
         **kwargs,
     ):
         super().__init__(
-            dim,
-            num_patches,
-            depth,
-            heads,
-            mlp_dim,
-            step_size,
-            dropout,
-            dim_head,
-            mem_layer_type,
+            dim=dim,
+            num_patches=num_patches,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            cache_size=cache_size,
+            step_size=step_size,
+            dropout=dropout,
+            dim_head=dim_head,
+            mem_layer_type=mem_layer_type,
             **kwargs,
         )
     
@@ -2503,7 +2523,7 @@ class CacheCrossAttentionTransformer(CacheMemoryTransformer):
                 )
 
     def forward(self, x):
-        M_new = self.H_buffer
+        M_new = self._get_memory()
         x = self.ln_in(x)
 
         for i, (attn, ff) in enumerate(self.layers):
@@ -2513,7 +2533,7 @@ class CacheCrossAttentionTransformer(CacheMemoryTransformer):
             x = x + ff(x)
 
         self._update_memory(x.detach().clone())
-        return self.ln_out(x), self.H_buffer
+        return self.ln_out(x), self._get_memory()
 
 
 class CacheMemoryViTPredictor(nn.Module):
@@ -2528,6 +2548,7 @@ class CacheMemoryViTPredictor(nn.Module):
         mlp_dim,
         injection_type,
         step_size,
+        cache_size,
         alpha_init: float = 0.1,
         dropout=0.0,
         emb_dropout=0.0,
@@ -2553,6 +2574,7 @@ class CacheMemoryViTPredictor(nn.Module):
         self.use_gate = use_gate
         self.num_patches = num_patches
         self.num_frames = num_frames
+        self.cache_size = cache_size
 
         # update params for adding causal attention masks
         global NUM_FRAMES, NUM_PATCHES
@@ -2571,6 +2593,7 @@ class CacheMemoryViTPredictor(nn.Module):
                 depth=depth,
                 heads=heads,
                 mlp_dim=mlp_dim,
+                cache_size=cache_size,
                 step_size=step_size,
                 dropout=dropout,
                 dim_head=dim_head,
@@ -2584,6 +2607,7 @@ class CacheMemoryViTPredictor(nn.Module):
                 depth=depth,
                 heads=heads,
                 mlp_dim=mlp_dim,
+                cache_size=cache_size,
                 step_size=step_size,
                 dropout=dropout,
                 dim_head=dim_head,
@@ -2598,6 +2622,7 @@ class CacheMemoryViTPredictor(nn.Module):
                 depth=depth,
                 heads=heads,
                 mlp_dim=mlp_dim,
+                cache_size=cache_size,
                 step_size=step_size,
                 dropout=dropout,
                 dim_head=dim_head,
@@ -2615,6 +2640,7 @@ class CacheMemoryViTPredictor(nn.Module):
                 depth=depth,
                 heads=heads,
                 mlp_dim=mlp_dim,
+                cache_size=cache_size,
                 step_size=step_size,
                 dropout=dropout,
                 dim_head=dim_head,
