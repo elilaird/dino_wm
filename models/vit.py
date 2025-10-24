@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from einops import rearrange
+from einops import rearrange, repeat
 from torch.nn import functional as F
 
 from .model_utils import *
@@ -30,17 +30,40 @@ class TwoInputIdentity(nn.Module):
         return x1
 
 class RetentionPredictor(nn.Module):
-    def __init__(self, dim, hidden_mul=2):
+    def __init__(self, dim, cond_dim, depth=2, heads=8, dim_head=64, mlp_dim=1024, cond_repeat=7, dropout=0.0):
         super().__init__()
-        self.hidden_mul = hidden_mul
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * hidden_mul),
-            nn.GELU(),
-            nn.Linear(dim * hidden_mul, dim),
-        )
-    
-    def forward(self, x):
-        return self.mlp(x)
+
+        self.depth = depth
+        self.dim = dim
+        self.cond_dim = cond_dim
+        self.cond_repeat = cond_repeat
+        self.heads = heads
+        self.dim_head = dim_head
+        self.mlp_dim = mlp_dim
+        cond_size = cond_dim * cond_repeat
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                Attention(dim + cond_size, heads, dim_head, dropout, bias=generate_mask_matrix(NUM_PATCHES, 1)), # only one time frame
+                FeedForward(dim + cond_size, mlp_dim, dropout)
+            ]))
+        self.to_out = nn.Linear(dim + cond_size, dim)
+
+    def add_cond(self, x, cond):
+        # tile cond 
+        cond_repeated = cond.repeat(1, 1, 1, self.cond_repeat)
+        out = torch.cat([x, cond_repeated], dim=3) # (b, t, num_patches, dim + cond_dim * cond_repeat)
+        return rearrange(out, "b t p d -> b (t p) d")
+
+    def forward(self, x, cond):
+        B, T, P, D = x.shape
+        x = self.add_cond(x, cond) # (b, (t p), dim + cond_dim * cond_repeat)
+        for attn, ff in self.layers:
+            x = x + attn(x)
+            x = x + ff(x)
+        out = self.to_out(x)
+        return rearrange(out, "b (t p) d -> b t p d", t=T)
 
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):

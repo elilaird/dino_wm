@@ -34,10 +34,12 @@ training:
   decoder_lr: 1e-3
   predictor_lr: 3e-4
   action_encoder_lr: 3e-4
+  aux_predictor_lr: 1e-4
   decoder_weight_decay: 0.01
   encoder_weight_decay: 0.01
   predictor_weight_decay: 0.1
   action_encoder_weight_decay: 0.01
+  aux_predictor_weight_decay: 0.01
   max_grad_norm: 1.0
   use_scheduler: True
   T_0: 40  # Number of epochs for the first restart
@@ -54,6 +56,9 @@ train_encoder: False
 train_decoder: True
 train_predictor: True
 train_aux_predictor: False
+per_window_ret_frames: 3
+ret_loss_weight: 0.1
+
 use_cls_token: False
 
 n_mem_blocks: 4

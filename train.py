@@ -640,9 +640,11 @@ class Trainer:
         
         self.aux_predictor = None
         if self.cfg.train_aux_predictor:
+            print(f"Initializing aux predictor with dim: {predictor_dim}", flush=True)
             self.aux_predictor = hydra.utils.instantiate(
                 self.cfg.aux_predictor,
                 dim=predictor_dim,
+                cond_dim=proprio_emb_dim,
             )
 
         for name, mod in dict(
@@ -658,8 +660,6 @@ class Trainer:
         self.accelerator.wait_for_everyone()
 
         models = [self.encoder, self.predictor, self.decoder, self.proprio_encoder, self.action_encoder]
-        if self.cfg.train_aux_predictor:
-            models.append(self.aux_predictor)
 
         (
             self.encoder,
@@ -668,6 +668,9 @@ class Trainer:
             self.proprio_encoder,
             self.action_encoder,
         ) = self.accelerator.prepare(*models)
+
+        if self.cfg.train_aux_predictor:
+            self.aux_predictor = self.accelerator.prepare(self.aux_predictor)
 
 
         self.model = hydra.utils.instantiate(
@@ -692,6 +695,7 @@ class Trainer:
         )
 
         if self.accelerator.is_main_process:
+            print(f"Using aux predictor: {self.cfg.train_aux_predictor}")
             print(f"Model type: {type(self.model)}")
             print(self.model)
 

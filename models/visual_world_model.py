@@ -28,6 +28,8 @@ class VWorldModel(nn.Module):
         step_size=1,
         use_cls_token=False,
         aux_predictor=None,
+        per_window_ret_frames=2, # number of frames to cache for retention
+        ret_loss_weight=1.0,
         **kwargs,
     ):
         super().__init__()
@@ -49,6 +51,8 @@ class VWorldModel(nn.Module):
         self.step_size = step_size
         self.use_cls_token = use_cls_token
         self.aux_predictor = aux_predictor
+        self.per_window_ret_frames = per_window_ret_frames
+        self.ret_loss_weight = ret_loss_weight
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -79,7 +83,7 @@ class VWorldModel(nn.Module):
             decoder_scale = 16  # from vqvae
             print(f"Using decoder_scale from cfg: {image_size // decoder_scale}", flush=True)
             num_side_patches = image_size // decoder_scale            
-        
+
         self.encoder_image_size = num_side_patches * encoder_patch_size
         print(f"Encoder image size: {self.encoder_image_size}", flush=True)
         self.encoder_transform = transforms.Compose(
@@ -101,7 +105,18 @@ class VWorldModel(nn.Module):
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
 
-        
+    def add_retention_target(self, z_tgt):
+        # separate z_tgt into visual, proprio
+        z_visual, z_proprio = (
+            z_tgt[..., : -(self.proprio_dim + self.action_dim)],
+            z_tgt[
+                ..., -(self.proprio_dim + self.action_dim) : -self.action_dim
+            ],
+        )
+        self.retention_cache.append((z_visual, z_proprio))
+
+    def clear_retention_cache(self):
+        self.retention_cache = []
 
     def train(self, mode=True):
         super().train(mode)
@@ -188,13 +203,20 @@ class VWorldModel(nn.Module):
             if s.ndim == 3:
                 s = rearrange(s, "b (t p) d -> b t p d", t=T)
         return z, s
-    
-    def predict_aux(self, s):
+
+    def predict_aux(self, ctx):
         """
-        input : s: (b, num_hist, num_patches, emb_dim)
-        output: s: (b, num_hist, num_patches, emb_dim)
+        input : ctx: (b, t, p, emb_dim)
+        output: ret_losses: (b)
         """
-        return self.aux_predictor(s)
+        ret_losses = torch.tensor(0.0, device=ctx.device)
+        for tgt, cond in self.retention_cache:
+            pred = self.aux_predictor(ctx, cond)
+            ret_losses += self.aux_predictor_criterion(
+                pred[..., : -(self.proprio_dim + self.action_dim)],
+                tgt # already removed proprio and action dims
+            )
+        return ret_losses * self.ret_loss_weight
 
     def decode(self, z):
         """
@@ -324,11 +346,20 @@ class VWorldModel(nn.Module):
                 )
 
             if self.aux_predictor is not None:
-                z_ret_pred = self.predict_aux(s)
-                # TODO: update the selection of z_tgt
-                z_ret_loss = self.aux_predictor_criterion(z_ret_pred[:, :, :-2, :], z_tgt[:, :, :-2, :].detach())
-                loss = loss + z_ret_loss
-                loss_components["z_ret_loss"] = z_ret_loss
+                # add first frame to the retention cache
+                self.add_retention_target(z_src[:, 0, :, :].detach().unsqueeze(1))
+
+                # sample random frame as ctx
+                rand_ctx = torch.randint(low=1, high=self.num_hist, size=(1,), dtype=torch.long)
+                ret_losses = self.predict_aux(z_src[:, rand_ctx, :, :])
+
+                loss = loss + ret_losses
+                loss_components["ret_loss"] = ret_losses
+
+                # add random frames to the retention cache
+                rand_idxs = torch.randperm(self.num_hist - 1)[:self.per_window_ret_frames - 1] + 1
+                for rand_idx in rand_idxs.tolist():
+                    self.add_retention_target(z_src[:, rand_idx, :, :].detach().unsqueeze(1))
 
             loss = loss + z_loss
             loss_components["z_loss"] = z_loss
@@ -415,7 +446,6 @@ class VWorldModel(nn.Module):
         return z_obses, z
 
     def set_predictor_step_size(self, step_size):
-
         if hasattr(self.predictor, "set_step_size"):
             self.predictor.set_step_size(step_size)
         elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "set_step_size"):
@@ -426,3 +456,5 @@ class VWorldModel(nn.Module):
             self.predictor.reset_memory()
         elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "reset_memory"):
             self.predictor.module.reset_memory()
+
+        self.clear_retention_cache()
