@@ -2072,7 +2072,7 @@ class StateSpaceViTPredictor(nn.Module):
                 both_injections=both_injections,
                 mem_layer_type=mem_layer_type,
             )
-        
+
         elif injection_type == "ssm_ca":
             self.transformer = MemCrossAttentionSSMTransformer(
                 dim=dim,
@@ -2122,6 +2122,508 @@ class StateSpaceViTPredictor(nn.Module):
                 dt_rank=dt_rank,
                 use_cls_token=use_cls_token,
                 shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
+            )
+        else:
+            raise ValueError(f"Invalid injection type: {injection_type}")
+
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
+
+    def reset_memory(self):
+        self.transformer.reset_memory()
+
+    def set_step_size(self, step_size):
+        self.transformer.set_step_size(step_size)
+
+### CACHE MEMORY VIT PREDICTOR ###
+
+class CacheMemoryTransformer(nn.Module):
+
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        step_size=1,
+        dropout=0.0,
+        dim_head=64,
+        mem_layer_type: str = "all",  # "all", "first", "middle", "last", "alternate" (injection position)
+        **kwargs,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.depth = depth
+        self.heads = heads
+        self.mlp_dim = mlp_dim
+        self.dropout = dropout
+        self.dim_head = dim_head
+        self.mem_layer_type = mem_layer_type
+        self.step_size = step_size
+
+        if self.mem_layer_type == "all":
+            self.mem_layer_idx = list(range(depth))
+        elif self.mem_layer_type == "first":
+            self.mem_layer_idx = [0]
+        elif self.mem_layer_type == "middle":
+            self.mem_layer_idx = list(range(1, depth - 1))
+        elif self.mem_layer_type == "last":
+            self.mem_layer_idx = [depth - 1]
+        elif self.mem_layer_type == "alternate":
+            self.mem_layer_idx = list(range(0, depth, 2))
+
+        self.ln_in = nn.LayerNorm(dim)
+        self.ln_out = nn.LayerNorm(dim)
+
+        self.H_buffer = (
+            None  # keep track of hidden memory state w/o passing around
+        )
+
+        self._build_transformer(
+            depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+        )
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim,
+                            heads,
+                            dim_head,
+                            dropout,                           
+                        ),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+
+    def forward(self, x):
+        raise NotImplementedError("CacheMemoryTransformer is not implemented yet")
+    
+    def reset_memory(self):
+        self.H_buffer = None
+
+    def set_step_size(self, step_size):
+        self.step_size = step_size
+    
+    def _update_memory(self, mem):
+        if mem is not None:
+            self.H_buffer = mem[:, min(self.step_size - 1, mem.size(1) - 1):]
+        else:
+            self.H_buffer = mem  
+
+
+class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        step_size=1,
+        dropout=0.0,
+        dim_head=64,
+        mem_layer_type: str = "all",  # "all", "first", "middle", "last", "alternate" (injection position)
+        alpha_init: float = 0.1,
+        **kwargs,
+    ):
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            step_size,
+            dropout,
+            dim_head,
+            mem_layer_type,
+            **kwargs,
+        )
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.alphas = nn.ParameterList(
+            [
+                nn.Parameter(torch.ones(1) * kwargs.get("alpha_init", 0.1))
+                for _ in self.mem_layer_idx
+            ]
+        )
+
+        self.layers = nn.ModuleList([])
+        self.injection_layers = nn.ModuleList([])
+        for i in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim,
+                            heads,
+                            dim_head,
+                            dropout,
+                        ),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(nn.Linear(dim, dim))
+    
+    def forward(self, x):
+        B, T, D = x.shape        
+        x = self.ln_in(x)
+        M_new = self.H_buffer
+
+        for i, (attn, ff) in enumerate(self.layers):
+            x = x + attn(x)
+            if i in self.mem_layer_idx and M_new is not None:
+                idx = self.mem_layer_idx.index(i)            
+                x = x + self.injection_layers[idx](M_new) * self.alphas[idx]
+            x = x + ff(x)
+
+        self._update_memory(x.detach().clone())
+        return self.ln_out(x), self.H_buffer
+
+    def _update_memory(self, mem):
+        if mem is not None:
+            self.H_buffer = mem[:, min(self.step_size - 1, mem.size(1) - 1):]
+        else:
+            self.H_buffer = mem  
+
+
+class CacheAdaMemTransformer(CacheMemoryTransformer):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        step_size=1,
+        dropout=0.0,
+        dim_head=64,
+        zero_init: bool = False,
+        both_injections: bool = False,
+        mem_layer_type: str = "all",
+        **kwargs,
+    ):
+        self.both_injections = both_injections
+        self.zero_init = zero_init
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            step_size,
+            dropout,
+            dim_head,
+            mem_layer_type,
+            zero_init=zero_init,
+            both_injections=both_injections,
+            **kwargs,
+        )
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.layers = nn.ModuleList([])
+        self.injection_layers = nn.ModuleList([])
+        for i in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim,
+                            heads,
+                            dim_head,
+                            dropout,
+                        ),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(
+                    nn.ModuleList(
+                        [
+                            AdaptiveLayerNorm(
+                                dim, dim, zero_init=kwargs.get("zero_init", False)
+                            ) if self.both_injections else TwoInputIdentity(),
+                            AdaptiveLayerNorm(
+                                dim, dim, zero_init=kwargs.get("zero_init", False)
+                            )
+                        ]
+                    )                
+                )
+            else:
+                self.injection_layers.append(nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()]))
+    
+    def forward(self, x):
+        M_new = self.H_buffer
+        x = self.ln_in(x)
+
+        for i, (attn, ff) in enumerate(self.layers):            
+            if M_new is not None:
+                injection_1, injection_2 = self.injection_layers[i]
+                x = x + attn(injection_1(x, M_new))
+                x = x + ff(injection_2(x, M_new))
+            else:
+                x = x + attn(x)
+                x = x + ff(x)
+
+        self._update_memory(x.detach().clone())
+        return self.ln_out(x), self.H_buffer
+
+class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        step_size,
+        dropout=0.0,
+        dim_head=64,
+        lora_rank: int = 16,
+        lora_alpha: float = 2.0,
+        use_qk: bool = True,
+        use_vo: bool = False,
+        gen_type: str = "A",
+        mem_layer_type: str = "all",
+        **kwargs,
+    ):
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.use_qk = use_qk
+        self.use_vo = use_vo
+        self.gen_type = gen_type
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            step_size,
+            dropout,
+            dim_head,
+            mem_layer_type,
+            **kwargs,
+        )
+    
+    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+        self.layers = nn.ModuleList([])
+        for i in range(depth):
+            block = nn.ModuleList([])
+            if i in self.mem_layer_idx:
+                block.append(
+                    DynamicLoRAAttention(
+                        dim=dim, 
+                        heads=heads, 
+                        dim_head=dim_head,
+                        r=self.lora_rank, 
+                        alpha=self.lora_alpha,
+                        gen_type=self.gen_type,
+                        use_qk=self.use_qk,
+                        use_vo=self.use_vo,
+                        dropout=dropout, 
+                        # bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES),
+                    )
+                )
+            else:
+                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout)) #, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)))
+            block.append(FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout))
+            self.layers.append(block)
+
+    def forward(self, x):
+        M_new = self.H_buffer
+        x = self.ln_in(x)
+        for i, (attn, ff) in enumerate(self.layers):
+            attn_out = attn(x, M_new) if i in self.mem_layer_idx else attn(x)
+            x = x + attn_out            
+            x = x + ff(x)
+        self._update_memory(x.detach().clone())
+        return self.ln_out(x), self.H_buffer
+        
+class CacheCrossAttentionTransformer(CacheMemoryTransformer):
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        step_size=1,
+        dropout=0.0,
+        dim_head=64,
+        mem_layer_type: str = "all",
+        **kwargs,
+    ):
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            step_size,
+            dropout,
+            dim_head,
+            mem_layer_type,
+            **kwargs,
+        )
+    
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.layers = nn.ModuleList([])
+        self.injection_layers = nn.ModuleList([])
+        for i in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(dim, heads, dim_head, dropout),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            # Generate bias mask for cross-attention to prevent attending to future memory tokens
+            bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(
+                    CrossAttention(dim, heads, dim_head, dropout, bias=bias)
+                )
+
+    def forward(self, x):
+        M_new = self.H_buffer
+        x = self.ln_in(x)
+
+        for i, (attn, ff) in enumerate(self.layers):
+            x = x + attn(x)
+            if i in self.mem_layer_idx and M_new is not None:
+                x = x + self.injection_layers[self.mem_layer_idx.index(i)](x, M_new)
+            x = x + ff(x)
+
+        self._update_memory(x.detach().clone())
+        return self.ln_out(x), self.H_buffer
+
+
+class CacheMemoryViTPredictor(nn.Module):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        state_dim,
+        depth,
+        heads,
+        mlp_dim,
+        injection_type,
+        step_size,
+        n_mem_blocks,
+        alpha_init: float = 0.1,
+        dropout=0.0,
+        emb_dropout=0.0,
+        dim_head=64,
+        use_gate: bool = False,
+        dt_rank: int = 16,
+        zero_init: bool = False,
+        lora_rank: int = 64,
+        lora_alpha: float = 1.0,
+        lora_dropout: float = 0.0,
+        use_cls_token: bool = False,
+        shift_memory: bool = True,
+        both_injections: bool = False,
+        mem_layer_type: str = "all",
+    ):
+        super().__init__()
+        self.dim = dim
+        self.state_dim = state_dim
+        self.depth = depth
+        self.heads = heads
+        self.mlp_dim = mlp_dim
+        self.dropout = dropout
+        self.dim_head = dim_head
+        self.use_gate = use_gate
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+
+        # update params for adding causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+
+        if injection_type == "misst":
+            self.transformer = CacheMemoryInjectionTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                step_size=step_size,
+                dropout=dropout,
+                dim_head=dim_head,
+                alpha_init=alpha_init,
+                mem_layer_type=mem_layer_type,
+            )
+        elif injection_type == "adamem":
+            self.transformer = CacheAdaMemTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                step_size=step_size,
+                dropout=dropout,
+                dim_head=dim_head,
+                zero_init=zero_init,
+                both_injections=both_injections,
+                mem_layer_type=mem_layer_type,
+            )
+        elif injection_type == "lora":
+            self.transformer = CacheLoRAAttentionTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                step_size=step_size,
+                dropout=dropout,
+                dim_head=dim_head,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                use_qk=True,
+                use_vo=False,
+                gen_type="A",
+                mem_layer_type=mem_layer_type,
+            )
+        elif injection_type == "ca_basic":
+            self.transformer = CacheCrossAttentionTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                step_size=step_size,
+                dropout=dropout,
+                dim_head=dim_head,
                 mem_layer_type=mem_layer_type,
             )
         else:
@@ -2909,8 +3411,10 @@ class DynamicLoRAAttention(nn.Module):
         B, T, D = x.shape
 
         x = self.norm(x)
-        m_tok = self.mem_norm(m_tok)
 
+        if m_tok is not None:
+            m_tok = self.mem_norm(m_tok)
+        
         q = self.q_proj(x, m_tok) if self.use_qk else self.q_proj(x) 
         k = self.k_proj(x, m_tok) if self.use_qk else self.k_proj(x)
         v = self.v_proj(x, m_tok) if self.use_vo else self.v_proj(x)
@@ -3606,11 +4110,12 @@ class TransformerXL(nn.Module):
     TransformerXL model with segment-level recurrence.
     Maintains a memory buffer across segments for long-range dependencies.
     """
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0, mem_len=0):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0, mem_len=0, step_size=1):
         super().__init__()
         self.mem_len = mem_len
         self.norm = nn.LayerNorm(dim)
         self.layers = nn.ModuleList([])
+        self.step_size = step_size
         
         for _ in range(depth):
             self.layers.append(
@@ -3628,20 +4133,11 @@ class TransformerXL(nn.Module):
         self.memory = None
         
     def _update_memory(self, new_mem):
-        """Update the memory buffer with new segment representations"""
-        if self.mem_len == 0:
-            return
-
-        self.memory = new_mem  
-        # if self.memory is None:
-        #     self.memory = new_mem
-        # else:
-        #     # Concatenate new memory with existing memory
-        #     self.memory = torch.cat([self.memory, new_mem], dim=1)
-            
-        #     # Keep only the most recent mem_len segments
-        #     if self.memory.size(1) > self.mem_len:
-        #         self.memory = self.memory[:, -self.mem_len:, :]
+        if new_mem is not None:
+            self.memory = new_mem[:, min(self.step_size - 1, new_mem.size(1) - 1):]
+        else:
+            self.memory = new_mem  
+     
     
     def forward(self, x):
         """
@@ -3650,10 +4146,8 @@ class TransformerXL(nn.Module):
         Args:
             x: Input tensor [B, T, D]
         """
-        new_mems = []
         curr_memory = self.memory
         for i, layer in enumerate(self.layers):
-            
             x = layer(x, curr_memory)
             
         new_mem = x.detach().clone()
@@ -3664,6 +4158,9 @@ class TransformerXL(nn.Module):
     def reset_memory(self):
         """Reset the internal memory buffer"""
         self.memory = None
+    
+    def set_step_size(self, step_size):
+        self.step_size = step_size
 
 
 class TransformerXLViTPredictor(nn.Module):
@@ -3679,6 +4176,7 @@ class TransformerXLViTPredictor(nn.Module):
         dim,
         depth,
         heads,
+        step_size,
         mlp_dim,
         pool="cls",
         dim_head=64,
@@ -3715,7 +4213,8 @@ class TransformerXLViTPredictor(nn.Module):
             dim_head=dim_head,
             mlp_dim=mlp_dim,
             dropout=dropout,
-            mem_len=mem_len
+            mem_len=mem_len,
+            step_size=step_size,
         )
 
     def forward(self, x):
@@ -3740,6 +4239,9 @@ class TransformerXLViTPredictor(nn.Module):
     def reset_memory(self):
         """Reset the internal memory buffer"""
         self.transformer.reset_memory()
+    
+    def set_step_size(self, step_size):
+        self.transformer.set_step_size(step_size * self.num_patches)
 
 
 class BlockRecurrentTransformerLayer(nn.Module):
@@ -3982,5 +4484,3 @@ class BlockRecurrentViTPredictor(nn.Module):
     
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)
-
-

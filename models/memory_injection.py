@@ -1,4 +1,6 @@
 from typing import Optional, Tuple
+from matplotlib.pyplot import ylim
+from sympy import yn
 import torch
 import torch.nn as nn
 
@@ -494,19 +496,17 @@ class DynamicLoRALinear(nn.Module):
         """
 
         # y = W0 @ x
-        base = torch.einsum("od,btd->bto", self.W0, x)  # [B,T,out_features]
+        y = torch.einsum("od,btd->bto", self.W0, x)  # [B,T,out_features]
 
-        # pool memory tokens over time
-        m_tok_pooled = m_tok.mean(dim=1)
 
-        # generate A and B
-        A, B = self.generate_weights(m_tok_pooled)
-
-        Am = torch.einsum("...rd,btd->...tr", A, m_tok)  # [B,T,r]
-
-        BAm = torch.einsum("...ro,btr->...to", B, Am)  # [B,T,out_features]
-
-        y = base + self.scale * BAm  # [B,T,out_features]
+        if m_tok is not None:       
+            # pool memory tokens over time
+            m_tok_pooled = m_tok.mean(dim=1)
+            # generate A and B
+            A, B = self.generate_weights(m_tok_pooled)
+            Am = torch.einsum("...rd,btd->...tr", A, m_tok)  # [B,T,r]
+            BAm = torch.einsum("...ro,btr->...to", B, Am)  # [B,T,out_features]
+            y = y + self.scale * BAm  # [B,T,out_features]
 
         if self.b0 is not None:
             y = y + self.b0.view(1, 1, -1)

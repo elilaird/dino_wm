@@ -1,0 +1,12 @@
+_target_: models.vit.CacheMemoryViTPredictor
+depth: 4
+heads: 16
+mlp_dim: 2048
+dropout: 0.1
+emb_dropout: 0
+lora_rank: 16
+lora_alpha: 0.5
+gen_type: "A"
+injection_type: "lora"
+step_size: ${step_size}
+mem_layer_type: "all"

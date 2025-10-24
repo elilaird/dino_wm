@@ -6,3 +6,4 @@ dropout: 0.1
 emb_dropout: 0
 pool: 'mean'
 mem_len: 9
+step_size: ${step_size}
