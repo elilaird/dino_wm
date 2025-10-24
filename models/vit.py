@@ -2214,18 +2214,18 @@ class CacheMemoryTransformer(nn.Module):
         B, T, D = x.shape
         x = self.ln_in(x)
         M_new = self._get_memory()
-        M_T = M_new.size(1)
+        M_T = M_new.size(1) if M_new is not None else 0
 
-        ctx = self.ln_fuse(torch.cat([M_new, x], dim=1))
+        ctx = self.ln_fuse(torch.cat([M_new, x], dim=1)) if M_new is not None else x
         for i, (attn, ff) in enumerate(self.layers):
             ctx = ctx + attn(ctx)
             ctx = ctx + ff(ctx)
 
-        ctx = ctx[:, M_T:]
+        ctx = ctx[:, M_T:] if M_new is not None else ctx
 
         self._update_memory(ctx.detach().clone())
         return self.ln_out(ctx), self._get_memory()
-        s
+        
     
     def reset_memory(self):
         self.H_buffer = None
