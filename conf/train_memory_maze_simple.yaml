@@ -56,7 +56,7 @@ train_predictor: True
 train_aux_predictor: False
 use_cls_token: False
 
-n_mem_blocks: 2
+n_mem_blocks: 4
 
 decoder_loss_type: smooth_l1
 
