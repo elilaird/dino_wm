@@ -30,6 +30,7 @@ class VWorldModel(nn.Module):
         aux_predictor=None,
         per_window_ret_frames=2, # number of frames to cache for retention
         ret_loss_weight=1.0,
+        max_retention_cache_size=10,
         **kwargs,
     ):
         super().__init__()
@@ -53,6 +54,7 @@ class VWorldModel(nn.Module):
         self.aux_predictor = aux_predictor
         self.per_window_ret_frames = per_window_ret_frames
         self.ret_loss_weight = ret_loss_weight
+        self.max_retention_cache_size = max_retention_cache_size
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -113,7 +115,10 @@ class VWorldModel(nn.Module):
                 ..., -(self.proprio_dim + self.action_dim) : -self.action_dim
             ],
         )
-        self.retention_cache.append((z_visual, z_proprio))
+        if len(self.retention_cache) < self.max_retention_cache_size:
+            self.retention_cache.append((z_visual, z_proprio))
+        else:
+            self.retention_cache[:-1] = self.retention_cache[1:] + [(z_visual, z_proprio)]
 
     def clear_retention_cache(self):
         self.retention_cache = []
@@ -347,7 +352,7 @@ class VWorldModel(nn.Module):
 
             if self.aux_predictor is not None:
                 # add first frame to the retention cache
-                self.add_retention_target(z_src[:, 0, :, :].detach().unsqueeze(1))
+                # self.add_retention_target(z_src[:, 0, :, :].detach().unsqueeze(1))
 
                 # sample random frame as ctx
                 rand_ctx = torch.randint(low=1, high=self.num_hist, size=(1,), dtype=torch.long)

@@ -56,8 +56,9 @@ train_encoder: False
 train_decoder: True
 train_predictor: True
 train_aux_predictor: False
-per_window_ret_frames: 3
-ret_loss_weight: 0.1
+per_window_ret_frames: 1
+ret_loss_weight: 0.05
+max_retention_cache_size: 10
 
 use_cls_token: False
 
