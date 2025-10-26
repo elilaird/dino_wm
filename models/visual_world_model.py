@@ -206,7 +206,7 @@ class VWorldModel(nn.Module):
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
         if s is not None:
             if s.ndim == 3:
-                s = rearrange(s, "b (t p) d -> b t p d", t=T)
+                s = rearrange(s, "b (t p) d -> b t p d", p=z.size(2))
         return z, s
 
     def predict_aux(self, ctx):

@@ -2342,7 +2342,6 @@ class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
             x = x + attn(x)
             if i in self.mem_layer_idx and M_new is not None:
                 idx = self.mem_layer_idx.index(i)       
-                print(f"M_new shape: {M_new.shape}")
                 injection = torch.cat([self.injection_layers[idx](M_new), torch.zeros((B, T - M_new.size(1), D), device=x.device)], dim=1)      
                 x = x + injection * self.alphas[idx]
             x = x + ff(x)
@@ -2602,6 +2601,7 @@ class CacheMemoryViTPredictor(nn.Module):
         shift_memory: bool = True,
         both_injections: bool = False,
         mem_layer_type: str = "all",
+        gen_type: str = "A",
     ):
         super().__init__()
         self.dim = dim
@@ -2682,7 +2682,7 @@ class CacheMemoryViTPredictor(nn.Module):
                 lora_alpha=lora_alpha,
                 use_qk=True,
                 use_vo=False,
-                gen_type="A",
+                gen_type=gen_type,
                 mem_layer_type=mem_layer_type,
             )
         elif injection_type == "ca_basic":
