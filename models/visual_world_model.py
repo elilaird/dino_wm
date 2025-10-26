@@ -362,7 +362,7 @@ class VWorldModel(nn.Module):
                 loss_components["ret_loss"] = ret_losses
 
                 # add random frames to the retention cache
-                rand_idxs = torch.randperm(self.num_hist - 1)[:self.per_window_ret_frames - 1] + 1
+                rand_idxs = torch.randperm(self.num_hist)[:self.per_window_ret_frames]
                 for rand_idx in rand_idxs.tolist():
                     self.add_retention_target(z_src[:, rand_idx, :, :].detach().unsqueeze(1))
 
