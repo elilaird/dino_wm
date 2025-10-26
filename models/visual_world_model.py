@@ -118,7 +118,7 @@ class VWorldModel(nn.Module):
         if len(self.retention_cache) < self.max_retention_cache_size:
             self.retention_cache.append((z_visual, z_proprio))
         else:
-            self.retention_cache[:-1] = self.retention_cache[1:] + [(z_visual, z_proprio)]
+            self.retention_cache = self.retention_cache[1:] + [(z_visual, z_proprio)]
 
     def clear_retention_cache(self):
         self.retention_cache = []
@@ -221,6 +221,7 @@ class VWorldModel(nn.Module):
                 pred[..., : -(self.proprio_dim + self.action_dim)],
                 tgt # already removed proprio and action dims
             )
+
         return ret_losses * self.ret_loss_weight
 
     def decode(self, z):
