@@ -164,6 +164,7 @@ class CrossAttention(nn.Module):
         B_c, T_c, C_c = context.size()
 
         x = self.norm(x)
+        context = self.norm(context)
 
         q = self.to_q(x)
         kv = self.to_kv(context)
@@ -179,6 +180,15 @@ class CrossAttention(nn.Module):
         dots = dots.masked_fill(self.bias[:, :, :T, :T_c] == 0, float("-inf"))
 
         attn = self.attend(dots)
+        if torch.isnan(attn).any():
+            print("T_c: ", T_c)
+            print("attn shape: ", attn.shape)
+
+            print(f"Attn is nan, dots: {dots.shape}, q: {q.shape}, k: {k.shape}, v: {v.shape}")
+            print(f"isnan: {torch.isnan(attn).sum()}")
+            print(f"dots nan: {dots[torch.isnan(attn)].shape}")
+
+        assert not torch.isnan(attn).any(), f"Attn is nan, dots: {dots.shape}, q: {q.shape}, k: {k.shape}, v: {v.shape}"
         attn = self.dropout(attn)
 
         out = torch.matmul(attn, v)
@@ -2262,7 +2272,7 @@ class CacheMemoryTransformer(nn.Module):
             mem = mem[:, :self.step_size]
 
             if self.H_buffer is None:
-                self.H_buffer = mem
+                self.H_buffer = mem[:, -self.cache_size:]
             else:
                 self.H_buffer = torch.cat([self.H_buffer, mem], dim=1)[:, -self.cache_size:]
     
@@ -2553,8 +2563,9 @@ class CacheCrossAttentionTransformer(CacheMemoryTransformer):
                     ]
                 )
             )
-            # Generate bias mask for cross-attention to prevent attending to future memory tokens
-            bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
+            # since cache is always < T, we don't need to use a bias mask
+            # bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
+            bias = generate_full_mask(NUM_PATCHES, NUM_FRAMES)
             if i in self.mem_layer_idx:
                 self.injection_layers.append(
                     CrossAttention(dim, heads, dim_head, dropout, bias=bias)

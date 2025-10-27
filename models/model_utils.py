@@ -130,6 +130,14 @@ def generate_diagonal_frame_mask(num_patches, num_frames, device=None, dtype=Non
     mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
     return mask
 
+def generate_full_mask(num_patches, num_frames, device=None, dtype=None):
+
+    ones = torch.ones(num_patches, num_patches, device=device, dtype=torch.bool)
+    rows = []
+    for i in range(num_frames):
+        rows.append(torch.cat([ones] * num_frames, dim=1))
+    mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
+    return mask
 
 def generate_frame_mask_with_memory(num_patches, num_frames, n_memory, device=None, dtype=None):
     """
