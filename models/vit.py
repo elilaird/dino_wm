@@ -900,6 +900,8 @@ class MACTransformerBlock(nn.Module):
         B, T, D = x_seg.shape
         device = x_seg.device
 
+        x_seg = self.norm1(x_seg)
+
         # retrieve long-term memory for current segment
         q_t = self.mem_W_Q(x_seg)  # [B, T, d_model]
         h = self.mem.retrieve(q_t)  # [B, T, d_model]
@@ -917,11 +919,8 @@ class MACTransformerBlock(nn.Module):
                 [h, x_seg], dim=1
             )  # [B, T, d_model]
 
-        x_aug = self.norm1(x_aug)
         x_aug = x_aug + self.attention(x_aug)
-
-        y2 = self.norm2(x_aug)
-        x_aug = x_aug + self.ff(y2)
+        x_aug = x_aug + self.ff(x_aug)
 
         out = x_aug[:, self.n_persistent + T :, :]  # [B, T, d]
 
@@ -930,6 +929,7 @@ class MACTransformerBlock(nn.Module):
             memory_tokens = x_aug[
                 :, self.n_persistent : self.n_persistent + T, :
             ]
+            memory_tokens = self.norm2(memory_tokens)
             if self.update_type == "selfattention":
                 k = (
                     self.mem_W_Q(memory_tokens)
