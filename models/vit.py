@@ -931,30 +931,225 @@ class MACTransformerBlock(nn.Module):
             memory_tokens = x_aug[
                 :, self.n_persistent : self.n_persistent + T, :
             ]
-            if self.update_type == "selfattention":
-                k = (
-                    self.mem_W_Q(memory_tokens)
-                    if self.proj_k_eq_q
-                    else memory_tokens
-                )
-                self.mem.update_from_batch(
-                    k.detach(),
-                    memory_tokens.detach(),
-                )
-            elif self.update_type == "crossattention":
-                assert (
-                    out.shape[1] == memory_tokens.shape[1]
-                ), f"out.shape[1] ({out.shape[1]}) != memory_tokens.shape[1] ({memory_tokens.shape[1]})"
-                k = self.mem_W_Q(out) if self.proj_k_eq_q else out
-                self.mem.update_from_batch(
-                    k.detach(),
-                    memory_tokens.detach(),
-                )
-            else:
-                raise ValueError(f"Invalid update_type: {self.update_type}")
+            self.mem.update_from_batch(
+                q_t.detach(),
+                memory_tokens.detach(),
+            )
 
         return out
 
+
+class MACResidualInjectionBlock(MACTransformerBlock):
+    def __init__(
+        self,
+        mem: NeuralMemory,
+        num_patches: int,  # number of patches per frame
+        num_frames: int,  # number of frames in segment
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        n_persistent: int = 0,  # number of persistent tokens P
+        dropout: float = 0.0,
+        dim_head: int = 64,
+        update_type: str = "selfattention",  # "selfattention" or "crossattention"
+        proj_k_eq_q: bool = False,
+    ):
+        super().__init__(
+            mem=mem,
+            num_patches=num_patches,
+            num_frames=num_frames,
+            d_model=d_model,
+            n_heads=n_heads,
+            d_ff=d_ff,
+            n_persistent=n_persistent,
+            dropout=dropout,
+            dim_head=dim_head,
+            update_type=update_type,
+        )
+        self.attention = Attention(d_model, n_heads, dim_head, dropout)
+
+        self.injection_layer = nn.Linear(d_model, d_model)
+        self.alpha = nn.Parameter(torch.ones(1) * 0.1)
+
+    def forward(self, x: torch.Tensor, update_memory: bool = True) -> torch.Tensor:
+        B, T, D = x.shape
+        x = self.norm1(x)
+
+        # retrieve long-term memory for current segment
+        q_t = self.mem_W_Q(x)  # [B, T, d_model]
+        M = self.mem.retrieve(q_t)  # [B, T, d_model]
+
+        x = x + self.attention(x)
+        x = x + self.injection_layer(M) * self.alpha
+        x = x + self.ff(x)
+        out = self.norm2(x)
+
+        #  update memory online
+        if update_memory:
+            self.mem.update_from_batch(
+                q_t.detach(),
+                M.detach(),
+            )
+          
+        return out
+
+class MACCrossAttentionBlock(MACTransformerBlock):
+    def __init__(
+        self,
+        mem: NeuralMemory,
+        num_patches: int,  # number of patches per frame
+        num_frames: int,  # number of frames in segment
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        n_persistent: int = 0,  # number of persistent tokens P
+        dropout: float = 0.0,
+        dim_head: int = 64,
+        update_type: str = "selfattention",  # "selfattention" or "crossattention"
+        proj_k_eq_q: bool = False,
+    ):
+        super().__init__(
+            mem=mem,
+            num_patches=num_patches,
+            num_frames=num_frames,
+            d_model=d_model,
+            n_heads=n_heads,
+            d_ff=d_ff,
+            n_persistent=n_persistent,
+            dropout=dropout,
+            dim_head=dim_head,
+            update_type=update_type,
+        )
+        self.attention = Attention(d_model, n_heads, dim_head, dropout)
+        self.injection_layer = CrossAttention(d_model, n_heads, dim_head, dropout, bias=generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES))
+
+    def forward(self, x: torch.Tensor, update_memory: bool = True) -> torch.Tensor:
+        B, T, D = x.shape
+        x = self.norm1(x)
+
+        # retrieve long-term memory for current segment
+        q_t = self.mem_W_Q(x)  # [B, T, d_model]
+        M = self.mem.retrieve(q_t)  # [B, T, d_model]
+
+        x = x + self.attention(x)
+        x = x + self.injection_layer(x, M)
+        x = x + self.ff(x)
+        out = self.norm2(x)
+
+        #  update memory online
+        if update_memory:
+            self.mem.update_from_batch(
+                q_t.detach(),
+                M.detach(),
+            )
+          
+        return out
+
+
+class MACAdaMemTransformerBlock(MACTransformerBlock):
+    def __init__(
+        self,
+        mem: NeuralMemory,
+        num_patches: int,  # number of patches per frame
+        num_frames: int,  # number of frames in segment
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        n_persistent: int = 0,  # number of persistent tokens P
+        dropout: float = 0.0,
+        dim_head: int = 64,
+        update_type: str = "selfattention",  # "selfattention" or "crossattention"
+        proj_k_eq_q: bool = False,
+
+    ):
+        super().__init__(
+            mem=mem,
+            num_patches=num_patches,
+            num_frames=num_frames,
+            d_model=d_model,
+            n_heads=n_heads,
+            d_ff=d_ff,
+            n_persistent=n_persistent,
+            dropout=dropout,
+            dim_head=dim_head,
+            update_type=update_type,
+        )
+        self.attention = Attention(d_model, n_heads, dim_head, dropout)
+        self.injection_layer1 = AdaptiveLayerNorm(d_model, d_model)
+        self.injection_layer2 = AdaptiveLayerNorm(d_model, d_model)
+
+    def forward(self, x: torch.Tensor, update_memory: bool = True) -> torch.Tensor:
+        B, T, D = x.shape
+        x = self.norm1(x)
+
+        # retrieve long-term memory for current segment
+        q_t = self.mem_W_Q(x)  # [B, T, d_model]
+        M = self.mem.retrieve(q_t)  # [B, T, d_model]
+
+
+        x = x + self.attention(self.injection_layer1(x, M))
+        x = x + self.ff(self.injection_layer2(x, M))
+        out = self.norm2(x)
+
+        #  update memory online
+        if update_memory:
+            self.mem.update_from_batch(
+                q_t.detach(),
+                M.detach(),
+            )
+          
+        return out
+
+class MACLoRATransformerBlock(MACTransformerBlock):
+    def __init__(
+        self,
+        mem: NeuralMemory,
+        num_patches: int,  # number of patches per frame
+        num_frames: int,  # number of frames in segment
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        n_persistent: int = 0,  # number of persistent tokens P
+        dropout: float = 0.0,
+        dim_head: int = 64,
+        update_type: str = "selfattention",  # "selfattention" or "crossattention"
+        proj_k_eq_q: bool = False,
+
+    ):
+        super().__init__(
+            mem=mem,
+            num_patches=num_patches,
+            num_frames=num_frames,
+            d_model=d_model,
+            n_heads=n_heads,
+            d_ff=d_ff,
+            n_persistent=n_persistent,
+            dropout=dropout,
+            dim_head=dim_head,
+            update_type=update_type,
+        )
+        self.attention = DynamicLoRAAttention(d_model, n_heads, dim_head, r=16, alpha=0.5, dropout=dropout)
+
+    def forward(self, x: torch.Tensor, update_memory: bool = True) -> torch.Tensor:
+        B, T, D = x.shape
+        x = self.norm1(x)
+
+        # retrieve long-term memory for current segment
+        q_t = self.mem_W_Q(x)  # [B, T, d_model]
+        M = self.mem.retrieve(q_t)  # [B, T, d_model]
+
+        x = x + self.attention(x, M)
+        x = x + self.ff(x)
+        out = self.norm2(x)
+
+        #  update memory online
+        if update_memory:
+            self.mem.update_from_batch(
+                q_t.detach(),
+                M.detach(),
+            )
+          
+        return out
 
 class MACTransformer(nn.Module):
     def __init__(
@@ -972,11 +1167,13 @@ class MACTransformer(nn.Module):
         update_type="selfattention",
         proj_k_eq_q=False,
         mem_layer_type: str = "all",
+        injection_type = "prepend",
     ):
         super().__init__()
         self.mem = memory_module
         self.norm = nn.LayerNorm(dim)
         self.mem_layer_type = mem_layer_type
+        self.injection_type = injection_type
 
         if self.mem_layer_type == 'all':
             self.mem_layer_idx = list(range(depth))
@@ -992,8 +1189,8 @@ class MACTransformer(nn.Module):
         self.layers = nn.ModuleList([])
         for i in range(depth):
             if i in self.mem_layer_idx:
-                self.layers.append(
-                    MACTransformerBlock(
+                if self.injection_type == "prepend":
+                    injection_layer = MACTransformerBlock(
                         mem=memory_module,
                         num_patches=num_patches,
                         num_frames=num_frames,
@@ -1006,7 +1203,63 @@ class MACTransformer(nn.Module):
                         update_type=update_type,
                         proj_k_eq_q=proj_k_eq_q,
                     )
-                )
+                elif self.injection_type == "residual":
+                    injection_layer = MACResidualInjectionBlock(
+                        mem=memory_module,
+                        num_patches=num_patches,
+                        num_frames=num_frames,
+                        d_model=dim,
+                        n_heads=heads,
+                        d_ff=mlp_dim,
+                        dropout=dropout,
+                        dim_head=dim_head,
+                        update_type=update_type,
+                        proj_k_eq_q=proj_k_eq_q,
+                    )
+                elif self.injection_type == "crossattention":
+                    injection_layer = MACCrossAttentionBlock(
+                        mem=memory_module,
+                        num_patches=num_patches,
+                        num_frames=num_frames,
+                        d_model=dim,
+                        n_heads=heads,
+                        d_ff=mlp_dim,
+                        dropout=dropout,
+                        dim_head=dim_head,
+                        update_type=update_type,
+                        proj_k_eq_q=proj_k_eq_q,
+                    )
+                elif self.injection_type == "admem":
+                    injection_layer = MACAdaMemTransformerBlock(
+                        mem=memory_module,
+                        num_patches=num_patches,
+                        num_frames=num_frames,
+                        d_model=dim,
+                        n_heads=heads,
+                        d_ff=mlp_dim,
+                        dropout=dropout,
+                        dim_head=dim_head,
+                        update_type=update_type,
+                        proj_k_eq_q=proj_k_eq_q,
+                    )
+                elif self.injection_type == "lora":
+                    injection_layer = MACLoRATransformerBlock(
+                        mem=memory_module,
+                        num_patches=num_patches,
+                        num_frames=num_frames,
+                        d_model=dim,
+                        n_heads=heads,
+                        d_ff=mlp_dim,
+                        dropout=dropout,
+                        dim_head=dim_head,
+                        update_type=update_type,
+                        proj_k_eq_q=proj_k_eq_q,
+                    )
+                else:
+                    raise ValueError(f"Invalid injection type: {self.injection_type}")
+
+                self.layers.append(injection_layer)
+                
             else:
                 self.layers.append(
                     TransformerBlock(dim, heads, dim_head, mlp_dim, dropout, bias=generate_mask_matrix(NUM_PATCHES, NUM_FRAMES))
@@ -1045,6 +1298,7 @@ class MACViTPredictor(nn.Module):
         update_type="selfattention",
         proj_k_eq_q=False,
         mem_layer_type: str = "all",
+        injection_type = "prepend",
     ):
         assert pool in {
             "cls",
@@ -1088,6 +1342,7 @@ class MACViTPredictor(nn.Module):
             update_type,
             proj_k_eq_q,
             mem_layer_type,
+            injection_type=injection_type,
         )
 
     def forward(self, x, H=None):
