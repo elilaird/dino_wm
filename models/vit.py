@@ -2603,12 +2603,14 @@ class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
         B, T, D = x.shape        
         x = self.ln_in(x)
         M_new = self._get_memory()
+        if M_new is not None:
+            M_new = M_new.mean(dim=1).unsqueeze(1).repeat(1, T, 1)
 
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             if i in self.mem_layer_idx and M_new is not None:
                 idx = self.mem_layer_idx.index(i)       
-                injection = torch.cat([self.injection_layers[idx](M_new), torch.zeros((B, T - M_new.size(1), D), device=x.device)], dim=1)      
+                injection = self.injection_layers[idx](M_new)      
                 x = x + injection * self.alphas[idx]
             x = x + ff(x)
 
@@ -2657,6 +2659,7 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
     ):
         self.layers = nn.ModuleList([])
         self.injection_layers = nn.ModuleList([])
+        
         for i in range(depth):
             self.layers.append(
                 nn.ModuleList(
@@ -2689,13 +2692,15 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
     
     def forward(self, x):
         M_new = self._get_memory()
+        if M_new is not None:
+            M = M_new.mean(dim=1).unsqueeze(1).repeat(1, x.size(1), 1)
         x = self.ln_in(x)
 
         for i, (attn, ff) in enumerate(self.layers):            
             if M_new is not None:
                 injection_1, injection_2 = self.injection_layers[i]
-                x = x + attn(injection_1(x, M_new))
-                x = x + ff(injection_2(x, M_new))
+                x = x + attn(injection_1(x, M))
+                x = x + ff(injection_2(x, M))
             else:
                 x = x + attn(x)
                 x = x + ff(x)
@@ -2758,11 +2763,10 @@ class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
                         use_qk=self.use_qk,
                         use_vo=self.use_vo,
                         dropout=dropout, 
-                        # bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES),
                     )
                 )
             else:
-                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout)) #, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)))
+                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout))
             block.append(FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout))
             self.layers.append(block)
 
