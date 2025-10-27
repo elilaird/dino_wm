@@ -221,6 +221,7 @@ class VWorldModel(nn.Module):
                 pred[..., : -(self.proprio_dim + self.action_dim)],
                 tgt # already removed proprio and action dims
             )
+        ret_losses = ret_losses / len(self.retention_cache)
 
         return ret_losses * self.ret_loss_weight
 
