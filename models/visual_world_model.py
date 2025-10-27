@@ -220,8 +220,7 @@ class VWorldModel(nn.Module):
             ret_losses += self.aux_predictor_criterion(
                 pred[..., : -(self.proprio_dim + self.action_dim)],
                 tgt # already removed proprio and action dims
-            )
-        ret_losses = ret_losses / len(self.retention_cache)
+            ) * (1 / len(self.retention_cache))
 
         return ret_losses * self.ret_loss_weight
 
