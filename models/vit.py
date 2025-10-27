@@ -924,12 +924,13 @@ class MACTransformerBlock(nn.Module):
 
         out = x_aug[:, self.n_persistent + T :, :]  # [B, T, d]
 
+        out = self.norm2(out)
+
         #  update memory online
         if update_memory:
             memory_tokens = x_aug[
                 :, self.n_persistent : self.n_persistent + T, :
             ]
-            memory_tokens = self.norm2(memory_tokens)
             if self.update_type == "selfattention":
                 k = (
                     self.mem_W_Q(memory_tokens)
