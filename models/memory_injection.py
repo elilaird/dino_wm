@@ -450,6 +450,7 @@ class DynamicLoRALinear(nn.Module):
         use_bias: bool = True,
         gen_type: str = "A", 
         mem_features: int = None,
+        inject_pooled: bool = False,
     ):
         super().__init__()
         self.in_features = in_features
@@ -457,7 +458,7 @@ class DynamicLoRALinear(nn.Module):
         self.gen_type = gen_type
         self.mem_features = mem_features if mem_features is not None else in_features
         assert gen_type in {"A", "B", "AB"}, "Invalid type"
-   
+        self.inject_pooled = inject_pooled
         # base linear parameters
         self.W0 = nn.Parameter(
             torch.empty(out_features, in_features), requires_grad=True
@@ -504,8 +505,12 @@ class DynamicLoRALinear(nn.Module):
             m_tok_pooled = m_tok.mean(dim=1)
             # generate A and B
             A, B = self.generate_weights(m_tok_pooled)
-            Am = torch.einsum("...rd,btd->...tr", A, m_tok)  # [B,T,r]
+            if self.inject_pooled:
+                Am = torch.einsum("...rd,btd->...tr", A, m_tok_pooled.unsqueeze(1))  # [B,1,r]
+            else:
+                Am = torch.einsum("...rd,btd->...tr", A, m_tok)  # [B,T,r]
             BAm = torch.einsum("...ro,btr->...to", B, Am)  # [B,T,out_features]
+     
             y = y + self.scale * BAm  # [B,T,out_features]
 
         if self.b0 is not None:

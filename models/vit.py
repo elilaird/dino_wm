@@ -2763,6 +2763,7 @@ class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
                         use_qk=self.use_qk,
                         use_vo=self.use_vo,
                         dropout=dropout, 
+                        inject_pooled=True
                     )
                 )
             else:
@@ -3669,6 +3670,7 @@ class DynamicLoRAAttention(nn.Module):
         gen_type="A",
         dropout=0.0,
         bias=None,
+        inject_pooled=False,
     ):
         super().__init__()
         inner_dim = dim_head * heads
@@ -3693,6 +3695,7 @@ class DynamicLoRAAttention(nn.Module):
                 alpha=alpha,
                 gen_type=gen_type,
                 use_bias=False,
+                inject_pooled=inject_pooled,
             )
             self.k_proj = DynamicLoRALinear(
                 dim,
@@ -3701,6 +3704,7 @@ class DynamicLoRAAttention(nn.Module):
                 alpha=alpha,
                 gen_type=gen_type,
                 use_bias=False,
+                inject_pooled=inject_pooled,
             )
         else:
             self.q_proj = nn.Linear(dim, inner_dim, bias=False)
@@ -3714,6 +3718,7 @@ class DynamicLoRAAttention(nn.Module):
                 alpha=alpha,
                 gen_type=gen_type,
                 use_bias=False,
+                inject_pooled=inject_pooled,
             )
             self.o_proj = DynamicLoRALinear(
                 inner_dim,
@@ -3723,6 +3728,7 @@ class DynamicLoRAAttention(nn.Module):
                 gen_type=gen_type,
                 use_bias=False,
                 mem_features=dim,
+                inject_pooled=inject_pooled,
             )
         else:
             self.v_proj = nn.Linear(dim, inner_dim, bias=False)
