@@ -91,3 +91,12 @@ def pil_loader(path):
     with open(path, "rb") as f:
         with Image.open(f) as img:
             return img.convert("RGB")
+
+def _safe_convert_to_numpy(self, value):
+    """Safely convert tensor values to numpy for CSV storage."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    elif isinstance(value, (list, tuple)):
+        return [self._safe_convert_to_numpy(v) for v in value]
+    else:
+        return value

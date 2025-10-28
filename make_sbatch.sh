@@ -32,7 +32,6 @@ if [ "${TYPE}" = "jupyter" ]; then
     WORK_DIR=${HOME_DIR}
 fi
 
-# echo "WORK_DIR: ${WORK_DIR}"
 
 if [ "${TYPE}" = "minigrid" ]; then
     PY_FILE="env/minigrid/minigrid_env.py generate"
@@ -40,6 +39,8 @@ elif [ "${TYPE}" = "plan" ]; then
     PY_FILE="plan.py"
 elif [ "${TYPE}" = "train" ]; then
     PY_FILE="train.py"
+elif [ "${TYPE}" = "train_flow" ]; then
+    PY_FILE="train_flow.py"
 elif [ "${TYPE}" = "memory_maze_download" ]; then
     PY_FILE="memory_maze_download.py --output_dir ${DATA_DIR}/memory_maze"
 elif [ "${TYPE}" = "memory_maze_chunk" ]; then
