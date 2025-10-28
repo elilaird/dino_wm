@@ -120,6 +120,7 @@ def load_point_maze_slice_train_val(
     frameskip=0,
     num_frames=None,
     full_sequence=False,
+    include_test=False,
 ):
     dset = PointMazeDataset(
         n_rollout=n_rollout,
@@ -127,20 +128,31 @@ def load_point_maze_slice_train_val(
         data_path=data_path,
         normalize_action=normalize_action,
     )
-    if full_sequence:
-        dset_train, dset_val, train_slices, val_slices = get_train_val_full_sequence(
+
+    if include_test:
+        dset_train, dset_val, dset_test, train_slices, val_slices, test_slices = get_train_val_sliced(
             traj_dataset=dset, 
             train_fraction=split_ratio, 
+            num_frames=num_frames if num_frames else num_hist + num_pred, 
             frameskip=frameskip,
-            min_seq_length=num_frames if num_frames else num_hist + num_pred,
+            include_test=True
         )
+        datasets = {}
+        datasets['train'] = train_slices
+        datasets['valid'] = val_slices
+        datasets['test'] = test_slices
+        traj_dset = {}
+        traj_dset['train'] = dset_train
+        traj_dset['valid'] = dset_val
+        traj_dset['test'] = dset_test
+        return datasets, traj_dset
     else:
         dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
-        traj_dataset=dset, 
-        train_fraction=split_ratio, 
-        num_frames=num_frames if num_frames else num_hist + num_pred, 
-        frameskip=frameskip
-    )
+            traj_dataset=dset, 
+            train_fraction=split_ratio, 
+            num_frames=num_frames if num_frames else num_hist + num_pred, 
+            frameskip=frameskip,
+        )
 
 
     datasets = {}

@@ -14,6 +14,7 @@ debug: False
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
 ckpt_base_path: /projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/checkpoints # put absolute path here
+ckpt_name: "model_latest.pth"
 
 hydra:
   run:
@@ -25,7 +26,7 @@ hydra:
 training:
   seed: 0
   epochs: 100
-  batch_size: 256 # gpu_batch_size
+  batch_size: 32 # gpu_batch_size
   save_every_x_epoch: 10 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
@@ -40,15 +41,37 @@ training:
   max_grad_norm: 0.5
   # Cosine LR scheduler with warm restarts, decay, and warmup
   use_scheduler: True
-  T_0: 2  # Number of steps for the first restart
+  T_0: 100  # Number of steps for the first restart
   T_mult: 2  # A factor increases T_i after a restart
   eta_min_ratio: 0.1  # minimum LR as ratio of initial LR
   decay_factor: 0.9  # Factor to decay peak LR at each restart
   warmup_percent: 0.05 # warmup percentage of total steps
 
-horizon_treatment: null
 
+use_cls_token: False
+n_mem_blocks: null
 decoder_loss_type: mse
+
+pretrained_encoder_path: null
+train_encoder: False
+train_decoder: True
+train_predictor: True
+train_aux_predictor: False
+
+per_window_ret_frames: null
+ret_loss_weight: null
+max_retention_cache_size: null
+
+eval_every_x_epoch: 1
+num_eval_samples: 10
+horizon_treatment: null
+eval_long_imagination: False
+query_phase_start_idx: null
+eval_context_recall: False
+context_recall_data_path: null
+teleport_start_idx: null
+ctx_recall_num_frames: null
+eval_recent_memory_recall: False
 
 full_sequence: False
 img_size: 224 # should be a multiple of 224
@@ -65,9 +88,10 @@ num_action_repeat: 1
 proprio_emb_dim: 12 
 num_proprio_repeat: 1
 
-num_frames: null
+num_frames: 5
 num_hist: 4
 num_pred: 1 # only supports 1
+step_size: 5
 has_predictor: True # set this to False for only training a decoder
 has_decoder: True # set this to False for only training a predictor
 
