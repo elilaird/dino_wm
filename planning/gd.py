@@ -22,6 +22,7 @@ class GDPlanner(BasePlanner):
         wandb_run,
         logging_prefix="plan_0",
         log_filename="logs.json",
+        optimizer_type="sgd",
         **kwargs,
     ):
         super().__init__(
@@ -40,6 +41,7 @@ class GDPlanner(BasePlanner):
         self.opt_steps = opt_steps
         self.eval_every = eval_every
         self.logging_prefix = logging_prefix
+        self.optimizer_type = optimizer_type
 
     def init_actions(self, obs_0, actions=None):
         """
@@ -66,7 +68,12 @@ class GDPlanner(BasePlanner):
         return actions
 
     def get_action_optimizer(self, actions):
-        return torch.optim.SGD([actions], lr=self.lr)
+        if self.optimizer_type == "sgd":
+            return torch.optim.SGD([actions], lr=self.lr)
+        elif self.optimizer_type == "adam":
+            return torch.optim.Adam([actions], lr=self.lr)
+        else:
+            raise ValueError(f"Invalid optimizer type: {self.optimizer_type}")
 
     def plan(self, obs_0, obs_g, actions=None):
         """
