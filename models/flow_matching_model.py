@@ -311,12 +311,12 @@ class FlowMatchingModel(nn.Module):
         z_flow, _ = self.predict(z_t)
         loss = loss +  self.emb_criterion(z_flow, delta.detach())
 
-        # predict without z_t
-        if self.input_type != "causal":
-            z_pred, _ = self.predict(z_src)
-            z_pred = z_src + z_pred # z_pred is the predicted vector field
-        else:
-            z_pred = z_src + z_flow
+        # if self.input_type != "causal": # it appears this will also have grads for z_src and z_t (double the normal)
+        #     z_pred, _ = self.predict(z_src)
+        #     z_pred = z_src + z_pred # z_pred is the predicted vector field
+        # else:
+        #     z_pred = z_src + z_flow
+        z_pred = z_src + z_flow
         
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
