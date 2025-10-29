@@ -119,7 +119,7 @@ class PlanEvaluator:  # evaluator for planning
             exec_actions = self.preprocessor.denormalize_actions(exec_actions).numpy()
         else:
             exec_actions = actions.cpu().numpy()
-            
+
         e_obses, e_states = self.env.rollout(self.seed, self.state_0, exec_actions)
         e_visuals = e_obses["visual"]
         e_final_obs = self._get_trajdict_last(e_obses, action_len * self.frameskip + 1)
@@ -255,6 +255,7 @@ class PlanEvaluator:  # evaluator for planning
         if not self.plot_full:
             e_visuals = e_visuals[:, :: self.frameskip]
             i_visuals = i_visuals[:, :: self.frameskip]
+
 
         n_columns = e_visuals.shape[1]
         assert (

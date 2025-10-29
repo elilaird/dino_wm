@@ -422,7 +422,7 @@ class FlowMatchingModel(nn.Module):
 
         t = 0
         inc = 1
-        z_t = z[:,-1]
+        z_t = z[:,-1:, ...]
         while t < action.shape[1]:
             z_delta, _ = self.predict(z[:, -self.num_hist :])
             z_t = z_t + z_delta[:, -inc:, ...]
