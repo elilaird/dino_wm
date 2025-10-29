@@ -1229,7 +1229,7 @@ class MACTransformer(nn.Module):
                         update_type=update_type,
                         proj_k_eq_q=proj_k_eq_q,
                     )
-                elif self.injection_type == "admem":
+                elif self.injection_type == "adamem":
                     injection_layer = MACAdaMemTransformerBlock(
                         mem=memory_module,
                         num_patches=num_patches,

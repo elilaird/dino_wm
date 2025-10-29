@@ -323,6 +323,7 @@ class LowRankGenerator(nn.Module):
         self.out_features = out_features
         self.r = r
         gen_size = r * out_features
+        self.ln = nn.LayerNorm(in_features)
         self.fc = nn.Sequential(
             nn.Linear(in_features, gen_size * 2),
             nn.GELU(),
@@ -332,7 +333,7 @@ class LowRankGenerator(nn.Module):
         self.reset_parameters()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:        
-        return self.gate * self.fc(x)
+        return self.gate * self.fc(self.ln(x))
 
     def reset_parameters(self):
         nn.init.constant_(self.gate, 0.0)
@@ -459,6 +460,7 @@ class DynamicLoRALinear(nn.Module):
         self.mem_features = mem_features if mem_features is not None else in_features
         assert gen_type in {"A", "B", "AB"}, "Invalid type"
         self.inject_pooled = inject_pooled
+        self.out_ln = nn.LayerNorm(out_features)
         # base linear parameters
         self.W0 = nn.Parameter(
             torch.empty(out_features, in_features), requires_grad=True
@@ -511,7 +513,7 @@ class DynamicLoRALinear(nn.Module):
                 Am = torch.einsum("...rd,btd->...tr", A, m_tok)  # [B,T,r]
             BAm = torch.einsum("...ro,btr->...to", B, Am)  # [B,T,out_features]
      
-            y = y + self.scale * BAm  # [B,T,out_features]
+            y = y + self.scale * self.out_ln(BAm)  # [B,T,out_features]
 
         if self.b0 is not None:
             y = y + self.b0.view(1, 1, -1)
