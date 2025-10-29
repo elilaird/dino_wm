@@ -32,6 +32,7 @@ class FlowMatchingModel(nn.Module):
         per_window_ret_frames=2, # number of frames to cache for retention
         ret_loss_weight=1.0,
         max_retention_cache_size=10,
+        input_type="causal",
         **kwargs,
     ):
         super().__init__()
@@ -56,6 +57,7 @@ class FlowMatchingModel(nn.Module):
         self.per_window_ret_frames = per_window_ret_frames
         self.ret_loss_weight = ret_loss_weight
         self.max_retention_cache_size = max_retention_cache_size
+        self.input_type = input_type
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -278,6 +280,7 @@ class FlowMatchingModel(nn.Module):
 
         return delta, z_t
 
+
     def forward(self, obs, act, aux_obs=None):
         """
         input:  obs (dict):  "visual", "proprio" (b, num_frames, 3, img_size, img_size)
@@ -302,13 +305,18 @@ class FlowMatchingModel(nn.Module):
 
         # case 1: target flow is Enc(x_t) - Enc(x_{t-1})
         delta, z_t = self.get_target_flow(z_src, z_tgt)
+        if self.input_type == "causal":
+            z_t = z_src
 
         z_flow, _ = self.predict(z_t)
         loss = loss +  self.emb_criterion(z_flow, delta.detach())
 
         # predict without z_t
-        z_pred, _ = self.predict(z_src)
-        z_pred = z_src + z_pred # z_pred is the predicted vector field
+        if self.input_type != "causal":
+            z_pred, _ = self.predict(z_src)
+            z_pred = z_src + z_pred # z_pred is the predicted vector field
+        else:
+            z_pred = z_src + z_flow
         
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
