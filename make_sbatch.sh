@@ -79,6 +79,7 @@ echo "#!/usr/bin/env zsh
 #SBATCH --time=${TIME} 
 #SBATCH --partition=${PARTITION}
 #SBATCH --tasks-per-node=1
+#SBATCH --exclude=bcm-dgxa100-0011
 
 module purge
 module load conda
