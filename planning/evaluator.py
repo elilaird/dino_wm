@@ -28,6 +28,7 @@ class PlanEvaluator:  # evaluator for planning
         preprocessor,
         n_plot_samples,
         is_discrete=False,
+        plot_full=False,
     ):
         self.obs_0 = obs_0
         self.obs_g = obs_g
@@ -41,7 +42,7 @@ class PlanEvaluator:  # evaluator for planning
         self.n_plot_samples = n_plot_samples
         self.device = next(wm.parameters()).device
         self.is_discrete = is_discrete
-        self.plot_full = False  # plot all frames or frames after frameskip
+        self.plot_full = plot_full  # plot all frames or frames after frameskip
 
     def assign_init_cond(self, obs_0, state_0):
         self.obs_0 = obs_0
@@ -86,7 +87,7 @@ class PlanEvaluator:  # evaluator for planning
 
     @torch.no_grad()
     def eval_actions(
-        self, actions, action_len=None, filename="output", save_video=False
+        self, actions, action_len=None, filename="output", save_video=False, plot_full=False
     ):
         """
         actions: detached torch tensors on cuda
@@ -154,6 +155,7 @@ class PlanEvaluator:  # evaluator for planning
                 successes=successes,
                 save_video=save_video,
                 filename=filename,
+                plot_full=plot_full,
             )
 
         return logs, successes, e_obses, e_states
@@ -199,7 +201,7 @@ class PlanEvaluator:  # evaluator for planning
         return logs, successes
 
     def _plot_rollout_compare(
-        self, e_visuals, i_visuals, successes, save_video=False, filename=""
+        self, e_visuals, i_visuals, successes, save_video=False, filename="", plot_full=False
     ):
         """
         i_visuals may have less frames than e_visuals due to frameskip, so pad accordingly
@@ -252,7 +254,7 @@ class PlanEvaluator:  # evaluator for planning
                 video_writer.close()
 
         # pad i_visuals or subsample e_visuals
-        if not self.plot_full:
+        if not plot_full:
             e_visuals = e_visuals[:, :: self.frameskip]
             i_visuals = i_visuals[:, :: self.frameskip]
 
