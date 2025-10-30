@@ -1,3 +1,4 @@
+import math
 import torch
 from torch._C import parse_schema
 import torch.nn as nn
@@ -33,6 +34,8 @@ class FlowMatchingModel(nn.Module):
         ret_loss_weight=1.0,
         max_retention_cache_size=10,
         input_type="causal",
+        interpolation_type="linear",
+        sigma0=0.2,
         **kwargs,
     ):
         super().__init__()
@@ -58,7 +61,9 @@ class FlowMatchingModel(nn.Module):
         self.ret_loss_weight = ret_loss_weight
         self.max_retention_cache_size = max_retention_cache_size
         self.input_type = input_type
-
+        self.interpolation_type = interpolation_type
+        self.sigma0 = sigma0
+        
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
             encoder_patch_size = self.encoder.module.patch_size
@@ -265,6 +270,11 @@ class FlowMatchingModel(nn.Module):
             )  # (b, num_frames, num_patches, dim + action_dim)
         return z
 
+    def sine_sigma(self, t, sigma0=0.2):
+        sigma = sigma0 * torch.sin(math.pi * t)
+        sigmap = sigma0 * math.pi * torch.cos(math.pi * t)
+        return sigma, sigmap
+
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
         z_src = z_src.clone()
@@ -272,12 +282,33 @@ class FlowMatchingModel(nn.Module):
         t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
         z_src_obs, z_src_act = self.separate_emb(z_src)
         z_tgt_obs, _ = self.separate_emb(z_tgt)
+
+        z_src_obs_original = {k: v.clone() for k, v in z_src_obs.items()}
+
         z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (t * z_tgt_obs["visual"])
-        t = t.squeeze(-1)
-        z_src_obs["proprio"] = (1.0 - t) * z_src_obs["proprio"] + (t * z_tgt_obs["proprio"])
+        z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
 
-        delta = z_tgt - z_src
+        if self.interpolation_type == "nonlinear":
+            sigma_t, sigmap_t = self.sine_sigma(t, sigma0=self.sigma0)
+            eps_vis = torch.randn_like(z_src_obs["visual"]) * sigma_t.unsqueeze(-1)
+            eps_proprio = torch.randn_like(z_src_obs["proprio"]) * sigma_t.unsqueeze(-1)
 
+            # mu_0 + eps_t
+            z_src_obs["visual"] = z_src_obs["visual"] + eps_vis
+            z_src_obs["proprio"] = z_src_obs["proprio"] + eps_proprio
+
+            # (z_1 - z_0) + (sigma'(t)/sigma(t)) * (z_t - mu_t)
+            ratio = sigmap_t / torch.clamp(sigma_t, min=1e-6)
+            delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual'] + ratio.unsqueeze(-1) * (z_tgt_obs['visual'] - z_src_obs['visual'])
+            delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio'] + ratio.unsqueeze(-1) * (z_tgt_obs['proprio'] - z_src_obs['proprio'])
+            delta = torch.cat([delta_vis, delta_proprio], dim=-1)
+        else:
+            delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual']
+            delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio']
+
+        delta = self.merge_emb({"visual": delta_vis, "proprio": delta_proprio}, torch.zeros_like(z_src_act, device=z_src.device))
+    
+        # delta = z_tgt - z_src
         z_t = self.merge_emb(z_src_obs, z_src_act)
 
         return delta, z_t
@@ -310,7 +341,7 @@ class FlowMatchingModel(nn.Module):
             z_t = z_src
 
         z_flow, _ = self.predict(z_t)
-        loss = loss +  self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach())
+        loss = loss +  self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
         z_pred = z_src + z_flow
 
