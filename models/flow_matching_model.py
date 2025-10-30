@@ -35,7 +35,7 @@ class FlowMatchingModel(nn.Module):
         max_retention_cache_size=10,
         input_type="causal",
         interpolation_type="linear",
-        sigma0=0.2,
+        sigma0=0.1,
         **kwargs,
     ):
         super().__init__()
@@ -63,7 +63,7 @@ class FlowMatchingModel(nn.Module):
         self.input_type = input_type
         self.interpolation_type = interpolation_type
         self.sigma0 = sigma0
-        
+
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
             encoder_patch_size = self.encoder.module.patch_size
@@ -290,18 +290,18 @@ class FlowMatchingModel(nn.Module):
 
         if self.interpolation_type == "nonlinear":
             sigma_t, sigmap_t = self.sine_sigma(t, sigma0=self.sigma0)
-            eps_vis = torch.randn_like(z_src_obs["visual"]) * sigma_t.unsqueeze(-1)
-            eps_proprio = torch.randn_like(z_src_obs["proprio"]) * sigma_t.unsqueeze(-1)
+            eps_vis = torch.randn_like(z_src_obs["visual"]) * sigma_t
+            eps_proprio = torch.randn_like(z_src_obs["proprio"]) * sigma_t.squeeze(-1)
 
             # mu_0 + eps_t
             z_src_obs["visual"] = z_src_obs["visual"] + eps_vis
             z_src_obs["proprio"] = z_src_obs["proprio"] + eps_proprio
 
-            # (z_1 - z_0) + (sigma'(t)/sigma(t)) * (z_t - mu_t)
+            # target: (z_1 - z_0) + (sigma'(t)/sigma(t)) * (z_t - mu_t)
             ratio = sigmap_t / torch.clamp(sigma_t, min=1e-6)
-            delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual'] + ratio.unsqueeze(-1) * (z_tgt_obs['visual'] - z_src_obs['visual'])
-            delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio'] + ratio.unsqueeze(-1) * (z_tgt_obs['proprio'] - z_src_obs['proprio'])
-            delta = torch.cat([delta_vis, delta_proprio], dim=-1)
+            delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual'] + ratio * (z_tgt_obs['visual'] - z_src_obs['visual'])
+            delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio'] + ratio.squeeze(-1) * (z_tgt_obs['proprio'] - z_src_obs['proprio'])
+
         else:
             delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual']
             delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio']

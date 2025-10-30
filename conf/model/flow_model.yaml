@@ -12,3 +12,5 @@ per_window_ret_frames: ${per_window_ret_frames}
 ret_loss_weight: ${ret_loss_weight}
 max_retention_cache_size: ${max_retention_cache_size}
 input_type: "interp"
+interpolation_type: "linear"
+sigma0: 0.1
