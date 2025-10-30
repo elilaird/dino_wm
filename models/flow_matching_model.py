@@ -268,18 +268,18 @@ class FlowMatchingModel(nn.Module):
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
         z_src = z_src.clone()
-
-        delta = z_tgt - z_src
+        
         t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
-
         z_src_obs, z_src_act = self.separate_emb(z_src)
         z_tgt_obs, _ = self.separate_emb(z_tgt)
-
         z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (t * z_tgt_obs["visual"])
+        z_src_obs["proprio"] = (1.0 - t) * z_src_obs["proprio"] + (t * z_tgt_obs["proprio"])
+
+        delta = z_tgt - z_src
+
         z_t = self.merge_emb(z_src_obs, z_src_act)
 
         return delta, z_t
-
 
     def forward(self, obs, act, aux_obs=None):
         """
@@ -304,20 +304,15 @@ class FlowMatchingModel(nn.Module):
         ]  # (b, num_hist, 3, img_size, img_size)
 
         # case 1: target flow is Enc(x_t) - Enc(x_{t-1})
-        delta, z_t = self.get_target_flow(z_src, z_tgt)
+        delta, z_t = self.get_target_flow(z_src, z_tgt, self.include_action_delta)
         if self.input_type == "causal":
             z_t = z_src
 
         z_flow, _ = self.predict(z_t)
-        loss = loss +  self.emb_criterion(z_flow, delta.detach())
+        loss = loss +  self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach())
 
-        # if self.input_type != "causal": # it appears this will also have grads for z_src and z_t (double the normal)
-        #     z_pred, _ = self.predict(z_src)
-        #     z_pred = z_src + z_pred # z_pred is the predicted vector field
-        # else:
-        #     z_pred = z_src + z_flow
-        z_pred = z_src + z_flow
-        
+        z_pred = z_src[:, :, :, : -(self.action_dim)] + z_flow[:, :, :, : -(self.action_dim)]
+
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
             z_tgt[:, :, :, : -(self.proprio_dim + self.action_dim)].detach(),
@@ -425,13 +420,13 @@ class FlowMatchingModel(nn.Module):
         z_t = z[:,-1:, ...]
         while t < action.shape[1]:
             z_delta, _ = self.predict(z[:, -self.num_hist :])
-            z_t = z_t + z_delta[:, -inc:, ...]
+            z_t = z_t[:, :, :, : -(self.action_dim)] + z_delta[:, -inc:, :, : -(self.action_dim)]
             z_t = self.replace_actions_from_z(z_t, action[:, t : t + inc, :])
             z = torch.cat([z, z_t], dim=1)
             t += inc
 
         z_delta, _ = self.predict(z[:, -self.num_hist :])
-        z_t = z_t + z_delta[:, -1 :, ...]
+        z_t = z_t[:, :, :, : -(self.action_dim)] + z_delta[:, -1 :, :, : -(self.action_dim)]
         z = torch.cat([z, z_t], dim=1)
         z_obses, _ = self.separate_emb(z)
 
