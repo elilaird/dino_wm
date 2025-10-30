@@ -273,6 +273,7 @@ class FlowMatchingModel(nn.Module):
         z_src_obs, z_src_act = self.separate_emb(z_src)
         z_tgt_obs, _ = self.separate_emb(z_tgt)
         z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (t * z_tgt_obs["visual"])
+        t = t.squeeze(-1)
         z_src_obs["proprio"] = (1.0 - t) * z_src_obs["proprio"] + (t * z_tgt_obs["proprio"])
 
         delta = z_tgt - z_src
@@ -311,7 +312,7 @@ class FlowMatchingModel(nn.Module):
         z_flow, _ = self.predict(z_t)
         loss = loss +  self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach())
 
-        z_pred = z_src[:, :, :, : -(self.action_dim)] + z_flow[:, :, :, : -(self.action_dim)]
+        z_pred = z_src + z_flow
 
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
@@ -420,13 +421,13 @@ class FlowMatchingModel(nn.Module):
         z_t = z[:,-1:, ...]
         while t < action.shape[1]:
             z_delta, _ = self.predict(z[:, -self.num_hist :])
-            z_t = z_t[:, :, :, : -(self.action_dim)] + z_delta[:, -inc:, :, : -(self.action_dim)]
+            z_t[:, :, :, : -(self.action_dim)] = z_t[:, :, :, : -(self.action_dim)] + z_delta[:, -inc:, :, : -(self.action_dim)] # don't add action delta to z_t to prevent prev action corruption
             z_t = self.replace_actions_from_z(z_t, action[:, t : t + inc, :])
             z = torch.cat([z, z_t], dim=1)
             t += inc
 
         z_delta, _ = self.predict(z[:, -self.num_hist :])
-        z_t = z_t[:, :, :, : -(self.action_dim)] + z_delta[:, -1 :, :, : -(self.action_dim)]
+        z_t[:, :, :, : -(self.action_dim)] = z_t[:, :, :, : -(self.action_dim)] + z_delta[:, -1 :, :, : -(self.action_dim)]
         z = torch.cat([z, z_t], dim=1)
         z_obses, _ = self.separate_emb(z)
 
