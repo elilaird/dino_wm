@@ -304,7 +304,7 @@ class FlowMatchingModel(nn.Module):
         ]  # (b, num_hist, 3, img_size, img_size)
 
         # case 1: target flow is Enc(x_t) - Enc(x_{t-1})
-        delta, z_t = self.get_target_flow(z_src, z_tgt, self.include_action_delta)
+        delta, z_t = self.get_target_flow(z_src, z_tgt)
         if self.input_type == "causal":
             z_t = z_src
 
