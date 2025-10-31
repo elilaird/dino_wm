@@ -237,6 +237,9 @@ class FlowMatchingModel(nn.Module):
             # remove tiled dimensions
             z_proprio = z_proprio[:, :, 0, : self.proprio_dim // self.num_proprio_repeat]
             z_act = z_act[:, :, 0, : self.action_dim // self.num_action_repeat]
+        z_visual = z_visual.contiguous()
+        z_proprio = z_proprio.contiguous()
+        z_act = z_act.contiguous()
         z_obs = {"visual": z_visual, "proprio": z_proprio}
         return z_obs, z_act
 
@@ -305,6 +308,12 @@ class FlowMatchingModel(nn.Module):
         else:
             delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual']
             delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio']
+
+        delta_vis = delta_vis.contiguous()
+        delta_proprio = delta_proprio.contiguous()
+        z_src_obs['visual'] = z_src_obs['visual'].contiguous()
+        z_src_obs['proprio'] = z_src_obs['proprio'].contiguous()
+        z_src_act = z_src_act.contiguous()
 
         delta = self.merge_emb({"visual": delta_vis, "proprio": delta_proprio}, torch.zeros_like(z_src_act, device=z_src.device))
     
