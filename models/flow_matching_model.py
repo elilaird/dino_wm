@@ -36,6 +36,7 @@ class FlowMatchingModel(nn.Module):
         input_type="causal",
         interpolation_type="linear",
         sigma0=0.1,
+        K=1,
         **kwargs,
     ):
         super().__init__()
@@ -63,6 +64,7 @@ class FlowMatchingModel(nn.Module):
         self.input_type = input_type
         self.interpolation_type = interpolation_type
         self.sigma0 = sigma0
+        self.K = K
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -177,7 +179,7 @@ class FlowMatchingModel(nn.Module):
         proprio_emb = self.encode_proprio(proprio)
         return {"visual": visual_embs, "proprio": proprio_emb}
 
-    def predict(self, z):  # in embedding space
+    def predict(self, z, tau=None):  # in embedding space
         """
         input : z: (b, num_hist, num_patches, emb_dim)
         output: z: (b, num_hist, num_patches, emb_dim)
@@ -186,12 +188,13 @@ class FlowMatchingModel(nn.Module):
         # reshape to a batch of windows of inputs
         z = rearrange(z, "b t p d -> b (t p) d")
         # (b, num_hist * num_patches per img, emb_dim)
-        z, s = self.predictor(z)
+        if tau is not None:
+            z, _ = self.predictor(z, tau)
+        else:
+            z, _ = self.predictor(z)
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
-        if s is not None:
-            if s.ndim == 3:
-                s = rearrange(s, "b (t p) d -> b t p d", p=z.size(2))
-        return z, s
+
+        return z
 
     def predict_aux(self, ctx):
         pass
@@ -324,20 +327,31 @@ class FlowMatchingModel(nn.Module):
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
         z_src = z_src.clone()
-
         delta = z_tgt - z_src
-        t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
 
-        z_src_obs, z_src_act = self.separate_emb(z_src)
-        z_tgt_obs, _ = self.separate_emb(z_tgt)
+        if self.input_type == "causal":
+            z_t = z_src
 
-        z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (
-            t * z_tgt_obs["visual"]
-        )
-        z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
-        z_t = self.merge_emb(z_src_obs, z_src_act)
+        # interpolation
+        elif self.input_type == "interp":
+            t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
+
+            z_src_obs, z_src_act = self.separate_emb(z_src)
+            z_tgt_obs, _ = self.separate_emb(z_tgt)
+
+            z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (
+                t * z_tgt_obs["visual"]
+            )
+            z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
+
+            z_t = self.merge_emb(z_src_obs, z_src_act)
+        else:
+            raise ValueError(f"Invalid input type: {self.input_type}")
 
         return delta, z_t
+
+    def add_timestep_embedding(self, z, tau):
+        pass
 
     def forward(self, obs, act, aux_obs=None):
         """
@@ -363,10 +377,8 @@ class FlowMatchingModel(nn.Module):
 
         # case 1: target flow is Enc(x_t) - Enc(x_{t-1})
         delta, z_t = self.get_target_flow(z_src, z_tgt)
-        if self.input_type == "causal":
-            z_t = z_src
 
-        z_flow, _ = self.predict(z_t)
+        z_flow = self.predict(z_t)
         loss = loss +  self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
         z_pred = z_src + z_flow
@@ -477,17 +489,35 @@ class FlowMatchingModel(nn.Module):
         inc = 1
         z_t = z[:,-1:, ...]
         while t < action.shape[1]:
-            z_delta, _ = self.predict(z[:, -self.num_hist :])
+            z_delta = self.inference(z[:, -self.num_hist :])
             # z_t[:, -inc:, :, : -(self.action_dim)] = z_t[:, -inc:, :, : -(self.action_dim)] + z_delta[:, -inc:, :, : -(self.action_dim)] # don't add action delta to z_t to prevent prev action corruption
             z_t = z_t + z_delta[:, -inc:, ...]
             z_t = self.replace_actions_from_z(z_t, action[:, t : t + inc, :])
             z = torch.cat([z, z_t], dim=1)
             t += inc
 
-        z_delta, _ = self.predict(z[:, -self.num_hist :])
+        z_delta = self.inference(z[:, -self.num_hist :])
         # z_t[:, -1:, :, : -(self.action_dim)] = z_t[:, -1:, :, : -(self.action_dim)] + z_delta[:, -1 :, :, : -(self.action_dim)]
         z_t = z_t + z_delta[:, -1 :, ...]
         z = torch.cat([z, z_t], dim=1)
         z_obses, _ = self.separate_emb(z)
 
         return z_obses, z
+
+    def euler_forward(self, z_src, K=1):
+        z = z_src.clone()
+        h = 1.0 / K
+        tau = torch.zeros(z_src.size(0), 1, device=z_src.device)
+        for _ in range(K):
+            z_delta = self.predict(z, tau)
+            z[:,-1:,:, :-(self.action_dim)] = z[:,-1:,:, :-(self.action_dim)] + h * z_delta[:,-1:,:, :-(self.action_dim)]
+            tau = tau + h
+        return z
+    
+    def inference(self, z):
+        if self.input_type == "causal":
+            return self.predict(z)
+        elif self.input_type == "interp":
+            return self.euler_forward(z, K=self.K)
+        else:
+            raise ValueError(f"Invalid inference type: {self.input_type}")

@@ -14,3 +14,4 @@ max_retention_cache_size: ${max_retention_cache_size}
 input_type: "interp"
 interpolation_type: "linear"
 sigma0: 0.1
+K: 1

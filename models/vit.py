@@ -2537,7 +2537,7 @@ class CacheMemoryTransformer(nn.Module):
             return self.H_buffer
         else:
             return rearrange(self.H_buffer.clone(), "b t p d -> b (t p) d")
-            
+
 
 class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
     def __init__(
@@ -2616,7 +2616,6 @@ class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
 
         self._update_memory(x.detach().clone())
         return self.ln_out(x), self._get_memory()
-
 
 
 class CacheAdaMemTransformer(CacheMemoryTransformer):
@@ -2780,7 +2779,7 @@ class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
             x = x + ff(x)
         self._update_memory(x.detach().clone())
         return self.ln_out(x), self._get_memory()
-        
+
 class CacheCrossAttentionTransformer(CacheMemoryTransformer):
     def __init__(
         self,
@@ -4833,3 +4832,97 @@ class BlockRecurrentViTPredictor(nn.Module):
     
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)
+
+
+class ViTConditionalPredictor(ViTPredictor):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        pool="cls",
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+        time_embed_dim=128,
+        time_embed_n_freq=32,
+        time_embed_sigma=1.0,
+    ):
+        super().__init__(
+            num_patches=num_patches,
+            num_frames=num_frames,
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            pool=pool,
+        )
+        self.time_embed = TimeEmbed(emb_dim=time_embed_dim, n_freq=time_embed_n_freq, sigma=time_embed_sigma)
+        self.transformer = nn.ModuleList([])
+        self.adanorms = nn.ModuleList([])
+        for _ in range(depth):
+            self.transformer.append(nn.ModuleList([
+                Attention(dim, heads, dim_head, dropout),
+                FeedForward(dim, mlp_dim, dropout),
+            ]))
+            self.adanorms.append(
+                nn.ModuleList([
+                    AdaLN(dim, time_embed_dim),
+                    AdaLN(dim, time_embed_dim),
+                ])
+            )
+
+
+    def forward(self, x, tau=None):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        if tau is not None:
+            tau = self.time_embed(tau)
+        for i, (layers, norms) in enumerate(zip(self.transformer, self.adanorms)):
+            attn, ff = layers
+            adanorm_1, adanorm_2 = norms
+            x = x + attn(adanorm_1(x, tau))
+            x = x + ff(adanorm_2(x, tau))
+        return x, None
+
+
+class TimeEmbed(nn.Module):
+    def __init__(self, emb_dim=128, n_freq=32, sigma=1.0):
+        super().__init__()
+        B = torch.randn(1, n_freq) * sigma
+        self.register_buffer("B", B)
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * n_freq, emb_dim),
+            nn.SiLU(),
+            nn.Linear(emb_dim, emb_dim),
+        )
+
+    def forward(self, tau):  
+        x = tau @ self.B 
+        fourier = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+        return self.mlp(fourier)
+
+class AdaLN(nn.Module):
+    def __init__(self, hidden_dim, cond_dim):
+        super().__init__()
+        self.ln = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.to_scale_shift = nn.Linear(cond_dim, 2*hidden_dim)
+        nn.init.zeros_(self.to_scale_shift.weight); nn.init.zeros_(self.to_scale_shift.bias)  # Zero-init (AdaLN-Zero)
+
+    def forward(self, h, cond):
+        h = self.ln(h)
+        if cond is None:
+            return h
+
+        g, b = self.to_scale_shift(cond).chunk(2, dim=-1)   
+        return h * (1 + g.unsqueeze(1)) + b.unsqueeze(1)
+    
+    def reset_parameters(self):
+        nn.init.zeros_(self.to_scale_shift.weight)
+        nn.init.zeros_(self.to_scale_shift.bias)
+        self.ln.reset_parameters()

@@ -1,0 +1,10 @@
+_target_: models.vit.ViTConditionalPredictor
+depth: 6
+heads: 16
+mlp_dim: 2048
+dropout: 0.1
+emb_dropout: 0
+pool: 'mean'
+time_embed_dim: 64
+time_embed_n_freq: 32
+time_embed_sigma: 0.1
