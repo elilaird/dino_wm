@@ -348,7 +348,7 @@ class FlowMatchingModel(nn.Module):
         else:
             raise ValueError(f"Invalid input type: {self.input_type}")
 
-        return delta, z_t
+        return delta, z_t, t.view(t.size(0), 1)
 
     def add_timestep_embedding(self, z, tau):
         pass
@@ -376,9 +376,10 @@ class FlowMatchingModel(nn.Module):
         ]  # (b, num_hist, 3, img_size, img_size)
 
         # case 1: target flow is Enc(x_t) - Enc(x_{t-1})
-        delta, z_t = self.get_target_flow(z_src, z_tgt)
+        delta, z_t, t = self.get_target_flow(z_src, z_tgt)
+        t = None if self.input_type == "causal" else t
 
-        z_flow = self.predict(z_t)
+        z_flow = self.predict(z_t, t)
         loss = loss +  self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
         z_pred = z_src + z_flow
