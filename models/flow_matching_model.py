@@ -278,46 +278,63 @@ class FlowMatchingModel(nn.Module):
         sigmap = sigma0 * math.pi * torch.cos(math.pi * t)
         return sigma, sigmap
 
+    # @torch.no_grad()
+    # def get_target_flow(self, z_src, z_tgt):
+    #     z_src = z_src.clone()
+
+    #     t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
+    #     z_src_obs, z_src_act = self.separate_emb(z_src)
+    #     z_tgt_obs, _ = self.separate_emb(z_tgt)
+
+    #     z_src_obs_original = {k: v.clone() for k, v in z_src_obs.items()}
+
+    #     z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (t * z_tgt_obs["visual"])
+    #     z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
+
+    #     if self.interpolation_type == "nonlinear":
+    #         sigma_t, sigmap_t = self.sine_sigma(t, sigma0=self.sigma0)
+    #         eps_vis = torch.randn_like(z_src_obs["visual"]) * sigma_t
+    #         eps_proprio = torch.randn_like(z_src_obs["proprio"]) * sigma_t.squeeze(-1)
+
+    #         # mu_0 + eps_t
+    #         z_src_obs["visual"] = z_src_obs["visual"] + eps_vis
+    #         z_src_obs["proprio"] = z_src_obs["proprio"] + eps_proprio
+
+    #         # target: (z_1 - z_0) + (sigma'(t)/sigma(t)) * (z_t - mu_t)
+    #         ratio = sigmap_t / torch.clamp(sigma_t, min=1e-6)
+    #         delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual'] + ratio * (z_tgt_obs['visual'] - z_src_obs['visual'])
+    #         delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio'] + ratio.squeeze(-1) * (z_tgt_obs['proprio'] - z_src_obs['proprio'])
+
+    #     else:
+    #         delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual']
+    #         delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio']
+
+    #     delta_vis = delta_vis.contiguous()
+    #     delta_proprio = delta_proprio.contiguous()
+    #     z_src_obs['visual'] = z_src_obs['visual'].contiguous()
+    #     z_src_obs['proprio'] = z_src_obs['proprio'].contiguous()
+    #     z_src_act = z_src_act.contiguous()
+
+    #     delta = self.merge_emb({"visual": delta_vis, "proprio": delta_proprio}, torch.zeros_like(z_src_act, device=z_src.device))
+
+    #     # delta = z_tgt - z_src
+    #     z_t = self.merge_emb(z_src_obs, z_src_act)
+
+    #     return delta, z_t
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
         z_src = z_src.clone()
-        
+
+        delta = z_tgt - z_src
         t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
+
         z_src_obs, z_src_act = self.separate_emb(z_src)
         z_tgt_obs, _ = self.separate_emb(z_tgt)
 
-        z_src_obs_original = {k: v.clone() for k, v in z_src_obs.items()}
-
-        z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (t * z_tgt_obs["visual"])
+        z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (
+            t * z_tgt_obs["visual"]
+        )
         z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
-
-        if self.interpolation_type == "nonlinear":
-            sigma_t, sigmap_t = self.sine_sigma(t, sigma0=self.sigma0)
-            eps_vis = torch.randn_like(z_src_obs["visual"]) * sigma_t
-            eps_proprio = torch.randn_like(z_src_obs["proprio"]) * sigma_t.squeeze(-1)
-
-            # mu_0 + eps_t
-            z_src_obs["visual"] = z_src_obs["visual"] + eps_vis
-            z_src_obs["proprio"] = z_src_obs["proprio"] + eps_proprio
-
-            # target: (z_1 - z_0) + (sigma'(t)/sigma(t)) * (z_t - mu_t)
-            ratio = sigmap_t / torch.clamp(sigma_t, min=1e-6)
-            delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual'] + ratio * (z_tgt_obs['visual'] - z_src_obs['visual'])
-            delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio'] + ratio.squeeze(-1) * (z_tgt_obs['proprio'] - z_src_obs['proprio'])
-
-        else:
-            delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual']
-            delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio']
-
-        delta_vis = delta_vis.contiguous()
-        delta_proprio = delta_proprio.contiguous()
-        z_src_obs['visual'] = z_src_obs['visual'].contiguous()
-        z_src_obs['proprio'] = z_src_obs['proprio'].contiguous()
-        z_src_act = z_src_act.contiguous()
-
-        delta = self.merge_emb({"visual": delta_vis, "proprio": delta_proprio}, torch.zeros_like(z_src_act, device=z_src.device))
-    
-        # delta = z_tgt - z_src
         z_t = self.merge_emb(z_src_obs, z_src_act)
 
         return delta, z_t
@@ -461,13 +478,15 @@ class FlowMatchingModel(nn.Module):
         z_t = z[:,-1:, ...]
         while t < action.shape[1]:
             z_delta, _ = self.predict(z[:, -self.num_hist :])
-            z_t[:, -inc:, :, : -(self.action_dim)] = z_t[:, -inc:, :, : -(self.action_dim)] + z_delta[:, -inc:, :, : -(self.action_dim)] # don't add action delta to z_t to prevent prev action corruption
+            # z_t[:, -inc:, :, : -(self.action_dim)] = z_t[:, -inc:, :, : -(self.action_dim)] + z_delta[:, -inc:, :, : -(self.action_dim)] # don't add action delta to z_t to prevent prev action corruption
+            z_t = z_t + z_delta[:, -inc:, ...]
             z_t = self.replace_actions_from_z(z_t, action[:, t : t + inc, :])
             z = torch.cat([z, z_t], dim=1)
             t += inc
 
         z_delta, _ = self.predict(z[:, -self.num_hist :])
-        z_t[:, -1:, :, : -(self.action_dim)] = z_t[:, -1:, :, : -(self.action_dim)] + z_delta[:, -1 :, :, : -(self.action_dim)]
+        # z_t[:, -1:, :, : -(self.action_dim)] = z_t[:, -1:, :, : -(self.action_dim)] + z_delta[:, -1 :, :, : -(self.action_dim)]
+        z_t = z_t + z_delta[:, -1 :, ...]
         z = torch.cat([z, z_t], dim=1)
         z_obses, _ = self.separate_emb(z)
 
