@@ -490,16 +490,18 @@ class FlowMatchingModel(nn.Module):
         inc = 1
         z_t = z[:,-1:, ...]
         while t < action.shape[1]:
-            z_delta = self.inference(z[:, -self.num_hist :])
+            z_pred = self.inference(z[:, -self.num_hist :])
             # z_t[:, -inc:, :, : -(self.action_dim)] = z_t[:, -inc:, :, : -(self.action_dim)] + z_delta[:, -inc:, :, : -(self.action_dim)] # don't add action delta to z_t to prevent prev action corruption
-            z_t = z_t + z_delta[:, -inc:, ...]
+            # z_t = z_t + z_delta[:, -inc:, ...]
+            z_t = z_pred[:, -inc:, ...]
             z_t = self.replace_actions_from_z(z_t, action[:, t : t + inc, :])
             z = torch.cat([z, z_t], dim=1)
             t += inc
 
-        z_delta = self.inference(z[:, -self.num_hist :])
+        z_pred = self.inference(z[:, -self.num_hist :])
         # z_t[:, -1:, :, : -(self.action_dim)] = z_t[:, -1:, :, : -(self.action_dim)] + z_delta[:, -1 :, :, : -(self.action_dim)]
-        z_t = z_t + z_delta[:, -1 :, ...]
+        # z_t = z_t + z_delta[:, -1 :, ...]
+        z_t = z_pred[:, -1:, ...]
         z = torch.cat([z, z_t], dim=1)
         z_obses, _ = self.separate_emb(z)
 
