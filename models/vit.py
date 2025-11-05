@@ -4861,33 +4861,26 @@ class ViTConditionalPredictor(ViTPredictor):
             mlp_dim=mlp_dim,
             pool=pool,
         )
-        self.time_embed = TimeEmbed(emb_dim=time_embed_dim, n_freq=time_embed_n_freq, sigma=time_embed_sigma)
+        self.time_embed = TimeEmbed(emb_dim=dim, n_freq=time_embed_n_freq, sigma=time_embed_sigma)
         self.transformer = nn.ModuleList([])
-        self.adanorms = nn.ModuleList([])
         for _ in range(depth):
             self.transformer.append(nn.ModuleList([
                 Attention(dim, heads, dim_head, dropout),
                 FeedForward(dim, mlp_dim, dropout),
             ]))
-            self.adanorms.append(
-                nn.ModuleList([
-                    AdaLN(dim, time_embed_dim),
-                    AdaLN(dim, time_embed_dim),
-                ])
-            )
 
 
     def forward(self, x, tau=None):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
-        x = self.dropout(x)
         if tau is not None:
             tau = self.time_embed(tau)
-        for i, (layers, norms) in enumerate(zip(self.transformer, self.adanorms)):
-            attn, ff = layers
-            adanorm_1, adanorm_2 = norms
-            x = x + attn(adanorm_1(x, tau))
-            x = x + ff(adanorm_2(x, tau))
+            x = x + tau[:, None, :]
+        x = self.dropout(x)
+        
+        for attn, ff in self.transformer:
+            x = x + attn(x)
+            x = x + ff(x)
         return x, None
 
 
@@ -4896,6 +4889,7 @@ class TimeEmbed(nn.Module):
         super().__init__()
         B = torch.randn(1, n_freq) * sigma
         self.register_buffer("B", B)
+        self.norm = nn.LayerNorm(emb_dim)
         self.mlp = nn.Sequential(
             nn.Linear(2 * n_freq, emb_dim),
             nn.SiLU(),
@@ -4905,7 +4899,7 @@ class TimeEmbed(nn.Module):
     def forward(self, tau):  
         x = tau @ self.B 
         fourier = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
-        return self.mlp(fourier)
+        return self.norm(self.mlp(fourier))
 
 class AdaLN(nn.Module):
     def __init__(self, hidden_dim, cond_dim):
