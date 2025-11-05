@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import pyflex
-import gym
+import gymnasium as gym
 import math
 from scipy.spatial.distance import cdist
 

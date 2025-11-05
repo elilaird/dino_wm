@@ -27,6 +27,7 @@ ENV_DIR=${ENV_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/e
 WORK_DIR=${WORK_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/workdirs"}
 DATA_DIR=${DATA_DIR:-"/lustre/smuexa01/client/users/ejlaird/dino_wm_data"}
 MUJOCO_DIR=/users/ejlaird/.mujoco/mujoco210/bin
+PYFLEXROOT=${HOME_DIR}/PyFleX
 
 if [ "${TYPE}" = "jupyter" ]; then
     WORK_DIR=${HOME_DIR}
@@ -57,15 +58,15 @@ else
     # Use accelerate for distributed training
     if [ "${GPU}" -gt 1 ]; then
         # COMMAND="HYDRA_FULL_ERROR=1 DATASET_DIR=${DATA_DIR} accelerate launch --num_machines 1 --dynamo_backend no --num_processes=${GPU} ${PY_FILE} ${PY_ARGS}"
-        COMMAND="HYDRA_FULL_ERROR=1 DATASET_DIR=${DATA_DIR} ./launch.sh ${GPU} ${PY_FILE} ${PY_ARGS}"
+        COMMAND="PYFLEXROOT=${PYFLEXROOT} PYTHONPATH=${PYFLEXROOT}/bindings/build:${PYTHONPATH} LD_LIBRARY_PATH=${PYFLEXROOT}/external/SDL2-2.0.4/lib/x64:$LD_LIBRARY_PATH HYDRA_FULL_ERROR=1 DATASET_DIR=${DATA_DIR} ./launch.sh ${GPU} ${PY_FILE} ${PY_ARGS}"
     else
-        COMMAND="HYDRA_FULL_ERROR=1  DATASET_DIR=${DATA_DIR} python ${PY_FILE} ${PY_ARGS}"
+        COMMAND="PYFLEXROOT=${PYFLEXROOT} PYTHONPATH=${PYFLEXROOT}/bindings/build:${PYTHONPATH} LD_LIBRARY_PATH=${PYFLEXROOT}/external/SDL2-2.0.4/lib/x64:$LD_LIBRARY_PATH HYDRA_FULL_ERROR=1  DATASET_DIR=${DATA_DIR} python ${PY_FILE} ${PY_ARGS}"
     fi
 fi
 
 LOG_FILE="output/${TYPE}/${TYPE}_%j.out"
 
-echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} BRANCH ${BRANCH} PARTITION=${PARTITION} TIME=${TIME} TYPE=${TYPE} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
+echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} BRANCH ${BRANCH} PARTITION=${PARTITION} TIME=${TIME} TYPE=${TYPE} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh "
 
 # write sbatch script
 echo "#!/usr/bin/env zsh
@@ -79,7 +80,7 @@ echo "#!/usr/bin/env zsh
 #SBATCH --time=${TIME} 
 #SBATCH --partition=${PARTITION}
 #SBATCH --tasks-per-node=1
-#SBATCH --exclude=bcm-dgxa100-0011
+#SBATCH --exclude=bcm-dgxa100-0011,bcm-dgxa100-0005
 
 module purge
 module load conda

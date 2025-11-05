@@ -2,7 +2,7 @@ from .src.sim.sim_env.flex_env import FlexEnv
 
 import os
 import numpy as np
-import gym
+import gymnasium as gym
 import torch
 import math
 from .src.sim.utils import load_yaml
