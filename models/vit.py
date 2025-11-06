@@ -1,3 +1,4 @@
+import math
 import torch
 from torch import nn
 from einops import rearrange, repeat
@@ -4861,14 +4862,14 @@ class ViTConditionalPredictor(ViTPredictor):
             mlp_dim=mlp_dim,
             pool=pool,
         )
-        self.time_embed = TimeEmbed(emb_dim=dim, n_freq=time_embed_n_freq, sigma=time_embed_sigma)
+        # self.time_embed = TimeEmbed(emb_dim=dim, n_freq=time_embed_n_freq, sigma=time_embed_sigma)
+        self.time_embed = TimestepRFF(dim=dim, m=time_embed_n_freq, sigma=time_embed_sigma)
         self.transformer = nn.ModuleList([])
         for _ in range(depth):
             self.transformer.append(nn.ModuleList([
                 Attention(dim, heads, dim_head, dropout),
                 FeedForward(dim, mlp_dim, dropout),
             ]))
-
 
     def forward(self, x, tau=None):
         b, n, _ = x.shape
@@ -4877,11 +4878,77 @@ class ViTConditionalPredictor(ViTPredictor):
             tau = self.time_embed(tau)
             x = x + tau[:, None, :]
         x = self.dropout(x)
-        
+
         for attn, ff in self.transformer:
             x = x + attn(x)
             x = x + ff(x)
         return x, None
+
+
+class TimestepRFF(nn.Module):
+    """
+    Random Fourier Features for scalar timesteps.
+    t: shape [B] or [B, 1]
+    Returns: shape [B, 2*m] (cos and sin pairs)
+    """
+
+    def __init__(
+        self,
+        dim,
+        m=64,
+        sigma=1.0,
+        learnable=True,
+        include_t=False,
+        t_scale=1.0,
+        device=None,
+        dtype=None,
+    ):
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.m = m
+        self.include_t = include_t
+        self.t_scale = float(t_scale)
+
+        # Sample frequencies and phases
+        w = torch.randn(m, **factory_kwargs) * float(
+            sigma
+        )  # ω ~ N(0, sigma^2)
+        b = torch.rand(m, **factory_kwargs) * (
+            2 * math.pi
+        )  # b ~ Uniform[0, 2π)
+
+        if learnable:
+            self.w = nn.Parameter(w)  # make them trainable if you want
+            self.b = nn.Parameter(b)
+        else:
+            self.register_buffer("w", w, persistent=False)
+            self.register_buffer("b", b, persistent=False)
+
+        in_dim = 2 * m + (1 if include_t else 0)        
+        self.proj = nn.Sequential(nn.Linear(in_dim, dim), nn.SiLU())
+
+        # Normalization factor for kernel approximation
+        self.norm = math.sqrt(2.0 / m)
+
+    def forward(self, t):
+        # t: [B] or [B,1] -> [B,1]
+        if t.dim() == 1:
+            t = t[:, None]
+        tt = t * self.t_scale  # rescale if your times are large/small
+        # [B, m]
+        phases = tt @ self.w[None, :]
+
+        # Shift by random phase and make cos/sin
+        phases = phases + self.b
+        feats = (
+            torch.cat([torch.cos(phases), torch.sin(phases)], dim=-1)
+            * self.norm
+        )
+
+        if self.include_t:
+            feats = torch.cat([t, feats], dim=-1)
+
+        return self.proj(feats)
 
 
 class TimeEmbed(nn.Module):

@@ -37,6 +37,8 @@ class FlowMatchingModel(nn.Module):
         interpolation_type="linear",
         sigma0=0.1,
         K=1,
+        normalize_flow=False,
+        normalize_target=False,
         **kwargs,
     ):
         super().__init__()
@@ -65,6 +67,8 @@ class FlowMatchingModel(nn.Module):
         self.interpolation_type = interpolation_type
         self.sigma0 = sigma0
         self.K = K
+        self.normalize_flow = normalize_flow
+        self.normalize_target = normalize_target
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -194,7 +198,10 @@ class FlowMatchingModel(nn.Module):
             z, _ = self.predictor(z)
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
 
-        return z
+        if self.normalize_flow:
+            z = z / torch.norm(z, dim=-1, keepdim=True)
+
+        return z.contiguous()
 
     def predict_aux(self, ctx):
         pass
@@ -276,59 +283,16 @@ class FlowMatchingModel(nn.Module):
             )  # (b, num_frames, num_patches, dim + action_dim)
         return z
 
-    def sine_sigma(self, t, sigma0=0.2):
-        sigma = sigma0 * torch.sin(math.pi * t)
-        sigmap = sigma0 * math.pi * torch.cos(math.pi * t)
-        return sigma, sigmap
-
-    # @torch.no_grad()
-    # def get_target_flow(self, z_src, z_tgt):
-    #     z_src = z_src.clone()
-
-    #     t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
-    #     z_src_obs, z_src_act = self.separate_emb(z_src)
-    #     z_tgt_obs, _ = self.separate_emb(z_tgt)
-
-    #     z_src_obs_original = {k: v.clone() for k, v in z_src_obs.items()}
-
-    #     z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (t * z_tgt_obs["visual"])
-    #     z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
-
-    #     if self.interpolation_type == "nonlinear":
-    #         sigma_t, sigmap_t = self.sine_sigma(t, sigma0=self.sigma0)
-    #         eps_vis = torch.randn_like(z_src_obs["visual"]) * sigma_t
-    #         eps_proprio = torch.randn_like(z_src_obs["proprio"]) * sigma_t.squeeze(-1)
-
-    #         # mu_0 + eps_t
-    #         z_src_obs["visual"] = z_src_obs["visual"] + eps_vis
-    #         z_src_obs["proprio"] = z_src_obs["proprio"] + eps_proprio
-
-    #         # target: (z_1 - z_0) + (sigma'(t)/sigma(t)) * (z_t - mu_t)
-    #         ratio = sigmap_t / torch.clamp(sigma_t, min=1e-6)
-    #         delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual'] + ratio * (z_tgt_obs['visual'] - z_src_obs['visual'])
-    #         delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio'] + ratio.squeeze(-1) * (z_tgt_obs['proprio'] - z_src_obs['proprio'])
-
-    #     else:
-    #         delta_vis = z_tgt_obs['visual'] - z_src_obs_original['visual']
-    #         delta_proprio = z_tgt_obs['proprio'] - z_src_obs_original['proprio']
-
-    #     delta_vis = delta_vis.contiguous()
-    #     delta_proprio = delta_proprio.contiguous()
-    #     z_src_obs['visual'] = z_src_obs['visual'].contiguous()
-    #     z_src_obs['proprio'] = z_src_obs['proprio'].contiguous()
-    #     z_src_act = z_src_act.contiguous()
-
-    #     delta = self.merge_emb({"visual": delta_vis, "proprio": delta_proprio}, torch.zeros_like(z_src_act, device=z_src.device))
-
-    #     # delta = z_tgt - z_src
-    #     z_t = self.merge_emb(z_src_obs, z_src_act)
-
-    #     return delta, z_t
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
         z_src = z_src.clone()
         delta = z_tgt - z_src
+
+        if self.normalize_target:
+            delta = delta / torch.norm(delta, dim=-1, keepdim=True)
+
         t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
+        t = torch.clamp(t, 1e-4, 1.0 - 1e-4)
 
         if self.input_type == "causal":
             z_t = z_src
@@ -347,7 +311,7 @@ class FlowMatchingModel(nn.Module):
         else:
             raise ValueError(f"Invalid input type: {self.input_type}")
 
-        return delta, z_t, t.view(t.size(0), 1)
+        return delta.contiguous(), z_t.contiguous(), t.view(t.size(0), 1)
 
 
 
@@ -508,18 +472,17 @@ class FlowMatchingModel(nn.Module):
     def euler_forward(self, z_src, K=1):
         z = z_src.clone()
         h = 1.0 / K
-        tau = torch.zeros(z_src.size(0), 1, device=z_src.device)
+        # tau = torch.zeros(z_src.size(0), 1, device=z_src.device)
+        tau = torch.ones(z_src.size(0), 1, device=z_src.device) * 1e-4
         for _ in range(K):
             z_delta = self.predict(z, tau)
-            # z[:,-1:,:, :-(self.action_dim)] = z[:,-1:,:, :-(self.action_dim)] + h * z_delta[:,-1:,:, :-(self.action_dim)]
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * z_delta[..., :-(self.action_dim)]
             tau = tau + h
         return z
     
     def inference(self, z):
         if self.input_type == "causal":
-            delta = self.predict(z, torch.zeros(z.size(0), 1, device=z.device))
-            # z[:, -1:, :, :-(self.action_dim)] = z[:, -1:, :, :-(self.action_dim)] + delta[:, -1:, :, :-(self.action_dim)]
+            delta = self.predict(z, torch.ones(z.size(0), 1, device=z.device) * 1e-4)
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + delta[..., :-(self.action_dim)]
             return z
         elif self.input_type == "interp":

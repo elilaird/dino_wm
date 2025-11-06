@@ -15,3 +15,5 @@ input_type: "interp"
 interpolation_type: "linear"
 sigma0: 0.1
 K: 1
+normalize_flow: False
+normalize_target: False

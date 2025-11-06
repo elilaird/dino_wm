@@ -7,4 +7,4 @@ emb_dropout: 0
 pool: 'mean'
 time_embed_dim: 64
 time_embed_n_freq: 32
-time_embed_sigma: 0.1
+time_embed_sigma: 1.0
