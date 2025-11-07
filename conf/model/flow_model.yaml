@@ -19,3 +19,5 @@ normalize_flow: False
 normalize_target: False
 integrate_in_loss: False
 use_pred_loss: True
+integrator: "euler"
+l2_reg_lambda: 0.0

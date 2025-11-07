@@ -41,6 +41,8 @@ class FlowMatchingModel(nn.Module):
         normalize_target=False,
         integrate_in_loss=False,
         use_pred_loss=True,
+        integrator="euler",
+        l2_reg_lambda=0.0,
         **kwargs,
     ):
         super().__init__()
@@ -73,6 +75,8 @@ class FlowMatchingModel(nn.Module):
         self.normalize_target = normalize_target
         self.integrate_in_loss = integrate_in_loss
         self.use_pred_loss = use_pred_loss
+        self.integrator = integrator
+        self.l2_reg_lambda = l2_reg_lambda
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -192,6 +196,13 @@ class FlowMatchingModel(nn.Module):
         latent_norm = torch.norm(latent, dim=-1, keepdim=True)
         normalized_latent = latent / latent_norm
         z = torch.cat([normalized_latent, z[..., -(self.action_dim):]], dim=-1)
+        return z
+    
+    def scale_stddev(self, z):
+        latent = z[..., :-(self.action_dim)]
+        latent_var = latent.var(dim=-1, keepdim=True)
+        scaled_latent = latent / torch.sqrt(latent_var)
+        z = torch.cat([scaled_latent, z[..., -(self.action_dim):]], dim=-1)
         return z
 
     def predict(self, z, tau=None):  # in embedding space
@@ -354,6 +365,12 @@ class FlowMatchingModel(nn.Module):
         z_flow = self.predict(z_t, t)
         z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
+        if self.l2_reg_lambda > 0.0:
+            pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1, keepdim=True)
+            delta_norm = torch.norm(delta[:, :, :, : -(self.action_dim)].detach(), dim=-1, keepdim=True)
+            l2_reg_loss = self.l2_reg_lambda * (pred_norm + delta_norm)
+            z_flow_loss = z_flow_loss + l2_reg_loss
+
         if self.integrate_in_loss:
                 z_pred = self.inference(z_src)
         else:
@@ -467,19 +484,14 @@ class FlowMatchingModel(nn.Module):
 
         t = 0
         inc = 1
-        # z_t = z[:,-1:, ...]
         while t < action.shape[1]:
             z_pred = self.inference(z[:, -self.num_hist :])
-            # z_t[:, -inc:, :, : -(self.action_dim)] = z_t[:, -inc:, :, : -(self.action_dim)] + z_delta[:, -inc:, :, : -(self.action_dim)] # don't add action delta to z_t to prevent prev action corruption
-            # z_t = z_t + z_delta[:, -inc:, ...]
             z_t = z_pred[:, -inc:, ...]
             z_t = self.replace_actions_from_z(z_t, action[:, t : t + inc, :])
             z = torch.cat([z, z_t], dim=1)
             t += inc
 
         z_pred = self.inference(z[:, -self.num_hist :])
-        # z_t[:, -1:, :, : -(self.action_dim)] = z_t[:, -1:, :, : -(self.action_dim)] + z_delta[:, -1 :, :, : -(self.action_dim)]
-        # z_t = z_t + z_delta[:, -1 :, ...]
         z_t = z_pred[:, -1:, ...]
         z = torch.cat([z, z_t], dim=1)
         z_obses, _ = self.separate_emb(z)
@@ -496,6 +508,18 @@ class FlowMatchingModel(nn.Module):
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * z_delta[..., :-(self.action_dim)]
             tau = tau + h
         return z
+
+    def heun_forward(self, z, K=1):
+        z = z.clone()
+        h = 1.0 / K
+        tau = torch.ones(z.size(0), 1, device=z.device) * 1e-4
+        for _ in range(K):
+            z_delta = self.predict(z, tau)
+            z_pred = z[..., :-(self.action_dim)] + h * z_delta[..., :-(self.action_dim)]
+            z_delta_half = self.predict(z_pred, (tau+h))
+            z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + 0.5 * h * (z_delta[..., :-(self.action_dim)] + z_delta_half[..., :-(self.action_dim)])
+            tau = tau + h
+        return z
     
     def inference(self, z):
         if self.input_type == "causal":
@@ -503,6 +527,11 @@ class FlowMatchingModel(nn.Module):
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + delta[..., :-(self.action_dim)]
             return z
         elif self.input_type == "interp":
-            return self.euler_forward(z, K=self.K)
+            if self.integrator == "euler":
+                return self.euler_forward(z, K=self.K)
+            elif self.integrator == "heun":
+                return self.heun_forward(z, K=self.K)
+            else:
+                raise ValueError(f"Invalid integrator: {self.integrator}")
         else:
             raise ValueError(f"Invalid inference type: {self.input_type}")
