@@ -183,6 +183,13 @@ class FlowMatchingModel(nn.Module):
         proprio_emb = self.encode_proprio(proprio)
         return {"visual": visual_embs, "proprio": proprio_emb}
 
+    def normalize(self, z):
+        latent = z[..., :-(self.action_dim)]
+        latent_norm = torch.norm(latent, dim=-1, keepdim=True)
+        normalized_latent = latent / latent_norm
+        z = torch.cat([normalized_latent, z[..., -(self.action_dim):]], dim=-1)
+        return z
+
     def predict(self, z, tau=None):  # in embedding space
         """
         input : z: (b, num_hist, num_patches, emb_dim)
@@ -199,7 +206,7 @@ class FlowMatchingModel(nn.Module):
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
 
         if self.normalize_flow:
-            z = z / torch.norm(z, dim=-1, keepdim=True)
+            z = self.normalize(z)
 
         return z.contiguous()
 
@@ -289,7 +296,7 @@ class FlowMatchingModel(nn.Module):
         delta = z_tgt - z_src
 
         if self.normalize_target:
-            delta = delta / torch.norm(delta, dim=-1, keepdim=True)
+            delta = self.normalize(delta)
 
         t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
         t = torch.clamp(t, 1e-4, 1.0 - 1e-4)
