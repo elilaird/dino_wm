@@ -40,6 +40,7 @@ class FlowMatchingModel(nn.Module):
         normalize_flow=False,
         normalize_target=False,
         integrate_in_loss=False,
+        use_pred_loss=True,
         **kwargs,
     ):
         super().__init__()
@@ -71,7 +72,8 @@ class FlowMatchingModel(nn.Module):
         self.normalize_flow = normalize_flow
         self.normalize_target = normalize_target
         self.integrate_in_loss = integrate_in_loss
-        
+        self.use_pred_loss = use_pred_loss
+
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
             encoder_patch_size = self.encoder.module.patch_size
@@ -353,10 +355,10 @@ class FlowMatchingModel(nn.Module):
         z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
         if self.integrate_in_loss:
-            z_pred = self.inference(z_src)
+                z_pred = self.inference(z_src)
         else:
             z_pred = z_src + z_flow
-        
+
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
             z_tgt[:, :, :, : -(self.proprio_dim + self.action_dim)].detach(),
@@ -383,7 +385,11 @@ class FlowMatchingModel(nn.Module):
             z_pred[:, :, :, : -self.action_dim],
             z_tgt[:, :, :, : -self.action_dim].detach(),
         )
-        loss = loss + z_visual_loss + z_proprio_loss + z_loss + z_flow_loss
+
+        if self.use_pred_loss:
+            loss = loss + z_visual_loss + z_proprio_loss + z_loss
+        else:
+            loss = loss + z_flow_loss
 
         if self.decoder is not None:
             # decoding from z_pred (not connected to predictor loss)
