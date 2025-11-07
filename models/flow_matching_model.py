@@ -348,10 +348,9 @@ class FlowMatchingModel(nn.Module):
 
         # case 1: target flow is Enc(x_t) - Enc(x_{t-1})
         delta, z_t, t = self.get_target_flow(z_src, z_tgt)
-        # t = None if self.input_type == "causal" else t
 
         z_flow = self.predict(z_t, t)
-        loss = loss +  self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
+        z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
         if self.integrate_in_loss:
             z_pred = self.inference(z_src)
@@ -384,7 +383,7 @@ class FlowMatchingModel(nn.Module):
             z_pred[:, :, :, : -self.action_dim],
             z_tgt[:, :, :, : -self.action_dim].detach(),
         )
-        loss = loss + z_visual_loss + z_proprio_loss + z_loss
+        loss = loss + z_visual_loss + z_proprio_loss + z_loss + z_flow_loss
 
         if self.decoder is not None:
             # decoding from z_pred (not connected to predictor loss)
@@ -433,7 +432,7 @@ class FlowMatchingModel(nn.Module):
         loss_components["z_visual_loss"] = z_visual_loss
         loss_components["z_proprio_loss"] = z_proprio_loss
         loss_components["z_loss"] = z_loss
-        loss_components["flow_loss"] = loss
+        loss_components["flow_loss"] = z_flow_loss
         return z_pred, visual_pred, visual_reconstructed, loss, loss_components
 
     def replace_actions_from_z(self, z, act):
