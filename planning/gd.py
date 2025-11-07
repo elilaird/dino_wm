@@ -23,6 +23,7 @@ class GDPlanner(BasePlanner):
         logging_prefix="plan_0",
         log_filename="logs.json",
         optimizer_type="sgd",
+        max_grad_norm=3.0,
         **kwargs,
     ):
         super().__init__(
@@ -42,6 +43,7 @@ class GDPlanner(BasePlanner):
         self.eval_every = eval_every
         self.logging_prefix = logging_prefix
         self.optimizer_type = optimizer_type
+        self.max_grad_norm = max_grad_norm
 
     def init_actions(self, obs_0, actions=None):
         """
@@ -120,6 +122,9 @@ class GDPlanner(BasePlanner):
                 # Check for exploding gradients (very large gradients)
                 exploding_threshold = 1e3
                 is_exploding = grad_norm > exploding_threshold
+
+                # apply gradient norm clipping
+                torch.nn.utils.clip_grad_norm_(actions.grad, max_norm=self.max_grad_norm)
                 
                 # Log gradient statistics
                 grad_logs = {
