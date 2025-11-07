@@ -39,6 +39,7 @@ class FlowMatchingModel(nn.Module):
         K=1,
         normalize_flow=False,
         normalize_target=False,
+        integrate_in_loss=False,
         **kwargs,
     ):
         super().__init__()
@@ -69,7 +70,8 @@ class FlowMatchingModel(nn.Module):
         self.K = K
         self.normalize_flow = normalize_flow
         self.normalize_target = normalize_target
-
+        self.integrate_in_loss = integrate_in_loss
+        
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
             encoder_patch_size = self.encoder.module.patch_size
@@ -351,8 +353,11 @@ class FlowMatchingModel(nn.Module):
         z_flow = self.predict(z_t, t)
         loss = loss +  self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
-        z_pred = z_src + z_flow
-
+        if self.integrate_in_loss:
+            z_pred = self.inference(z_src)
+        else:
+            z_pred = z_src + z_flow
+        
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
             z_tgt[:, :, :, : -(self.proprio_dim + self.action_dim)].detach(),

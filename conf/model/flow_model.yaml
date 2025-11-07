@@ -17,3 +17,4 @@ sigma0: 0.1
 K: 1
 normalize_flow: False
 normalize_target: False
+integrate_in_loss: False
