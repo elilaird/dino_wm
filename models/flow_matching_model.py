@@ -197,7 +197,7 @@ class FlowMatchingModel(nn.Module):
         normalized_latent = latent / latent_norm
         z = torch.cat([normalized_latent, z[..., -(self.action_dim):]], dim=-1)
         return z
-    
+
     def scale_stddev(self, z):
         latent = z[..., :-(self.action_dim)]
         latent_var = latent.var(dim=-1, keepdim=True)
@@ -335,8 +335,6 @@ class FlowMatchingModel(nn.Module):
 
         return delta.contiguous(), z_t.contiguous(), t.view(t.size(0), 1)
 
-
-
     def forward(self, obs, act, aux_obs=None):
         """
         input:  obs (dict):  "visual", "proprio" (b, num_frames, 3, img_size, img_size)
@@ -365,14 +363,18 @@ class FlowMatchingModel(nn.Module):
         z_flow = self.predict(z_t, t)
         z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
-        if self.l2_reg_lambda > 0.0:
-            pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1, keepdim=True)
-            delta_norm = torch.norm(delta[:, :, :, : -(self.action_dim)].detach(), dim=-1, keepdim=True)
-            l2_reg_loss = self.l2_reg_lambda * (pred_norm + delta_norm)
-            z_flow_loss = z_flow_loss + l2_reg_loss
+        pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1).mean()
+        delta_norm = torch.norm(delta[:, :, :, : -(self.action_dim)].detach(), dim=-1).mean()
+        
+        l2_reg_loss = self.l2_reg_lambda * (pred_norm + delta_norm)
+        z_flow_loss = z_flow_loss + l2_reg_loss
+        
+        loss_components["pred_norm"] = pred_norm
+        loss_components["delta_norm"] = delta_norm
+        loss_components["l2_reg_loss"] = l2_reg_loss
 
         if self.integrate_in_loss:
-                z_pred = self.inference(z_src)
+            z_pred = self.inference(z_src)
         else:
             z_pred = z_src + z_flow
 
@@ -403,10 +405,10 @@ class FlowMatchingModel(nn.Module):
             z_tgt[:, :, :, : -self.action_dim].detach(),
         )
 
+        loss = loss + z_flow_loss
+
         if self.use_pred_loss:
             loss = loss + z_visual_loss + z_proprio_loss + z_loss
-        else:
-            loss = loss + z_flow_loss
 
         if self.decoder is not None:
             # decoding from z_pred (not connected to predictor loss)
@@ -520,7 +522,7 @@ class FlowMatchingModel(nn.Module):
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + 0.5 * h * (z_delta[..., :-(self.action_dim)] + z_delta_half[..., :-(self.action_dim)])
             tau = tau + h
         return z
-    
+
     def inference(self, z):
         if self.input_type == "causal":
             delta = self.predict(z, torch.ones(z.size(0), 1, device=z.device) * 1e-4)
