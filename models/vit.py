@@ -4853,6 +4853,8 @@ class ViTConditionalPredictor(ViTPredictor):
         time_embed_n_freq=32,
         time_embed_sigma=1.0,
     ):
+        dim = dim + time_embed_dim
+        self.dim = dim
         super().__init__(
             num_patches=num_patches,
             num_frames=num_frames,
@@ -4862,8 +4864,10 @@ class ViTConditionalPredictor(ViTPredictor):
             mlp_dim=mlp_dim,
             pool=pool,
         )
-        # self.time_embed = TimeEmbed(emb_dim=dim, n_freq=time_embed_n_freq, sigma=time_embed_sigma)
-        self.time_embed = TimestepRFF(dim=dim, m=time_embed_n_freq, sigma=time_embed_sigma)
+        self.norm_out = nn.LayerNorm(dim - time_embed_dim)
+        self.time_embed_dim = time_embed_dim
+        self.num_patches = num_patches
+        self.time_embed = TimestepRFF(dim=time_embed_dim, m=time_embed_n_freq, sigma=time_embed_sigma)
         self.transformer = nn.ModuleList([])
         for _ in range(depth):
             self.transformer.append(nn.ModuleList([
@@ -4873,16 +4877,28 @@ class ViTConditionalPredictor(ViTPredictor):
 
     def forward(self, x, tau=None):
         b, n, _ = x.shape
-        x = x + self.pos_embedding[:, :n]
+        x = rearrange(x, "b (t p) d -> b t p d", p=self.num_patches)
+
         if tau is not None:
             tau = self.time_embed(tau)
-            x = x + tau[:, None, :]
+            tau_tiled = repeat(tau[:, None, None, :], "b 1 1 d -> b t p d", t=x.shape[1], p=self.num_patches)
+        else:
+            tau_tiled = torch.zeros(b, x.shape[1], self.num_patches, self.time_embed_dim, device=x.device)
+
+        x = torch.cat([
+            x, tau_tiled
+        ], dim=3)
+        x = rearrange(x, "b t p d -> b (t p) d")
+
+        x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
 
         for attn, ff in self.transformer:
             x = x + attn(x)
             x = x + ff(x)
-        return x, None
+        
+        out = x[:, :, :-self.time_embed_dim]
+        return self.norm_out(out), None
 
 
 class TimestepRFF(nn.Module):
