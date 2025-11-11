@@ -5,7 +5,7 @@ defaults:
   - action_encoder: proprio
   - proprio_encoder: proprio
   - decoder: vqvae
-  - predictor: vit
+  - predictor: vit_cond
   - model: flow_model
   - aux_predictor: retention
 
