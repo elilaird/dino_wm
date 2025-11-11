@@ -17,7 +17,7 @@ sigma0: 0.1
 K: 4
 normalize_flow: False
 normalize_target: False
-integrate_in_loss: True
-use_pred_loss: True
+integrate_in_loss: False
+use_pred_loss: False
 integrator: "euler"
 l2_reg_lambda: 0.0
