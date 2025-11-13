@@ -2,6 +2,7 @@ import math
 import torch
 from torch._C import parse_schema
 import torch.nn as nn
+import torch.utils.checkpoint as checkpoint
 from torchvision import transforms
 from einops import rearrange, repeat
 
@@ -365,10 +366,10 @@ class FlowMatchingModel(nn.Module):
 
         pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1).mean()
         delta_norm = torch.norm(delta[:, :, :, : -(self.action_dim)].detach(), dim=-1).mean()
-        
+
         l2_reg_loss = self.l2_reg_lambda * (pred_norm + delta_norm)
         z_flow_loss = z_flow_loss + l2_reg_loss
-        
+
         loss_components["pred_norm"] = pred_norm
         loss_components["delta_norm"] = delta_norm
         loss_components["l2_reg_loss"] = l2_reg_loss
@@ -511,6 +512,26 @@ class FlowMatchingModel(nn.Module):
             tau = tau + h
         return z
 
+    def euler_forward_ckpt(self, z_src, K=1):
+        z = z_src.clone()
+        h = 1.0 / K
+        tau = torch.ones(z_src.size(0), 1, device=z_src.device) * 1e-4
+
+        def euler_step(z, tau):
+            z_delta = self.predict(z, tau)
+            z_new = z.clone()
+            z_new[..., : -(self.action_dim)] = (
+                z[..., : -(self.action_dim)]
+                + h * z_delta[..., : -(self.action_dim)]
+            )
+            tau_new = tau + h
+            return z_new, tau_new
+
+        for _ in range(K):
+            z, tau = checkpoint.checkpoint(euler_step, z, tau, use_reentrant=False)
+
+        return z
+
     def heun_forward(self, z, K=1):
         z = z.clone()
         h = 1.0 / K
@@ -530,7 +551,7 @@ class FlowMatchingModel(nn.Module):
             return z
         elif self.input_type == "interp":
             if self.integrator == "euler":
-                return self.euler_forward(z, K=self.K)
+                return self.euler_forward_ckpt(z, K=self.K)
             elif self.integrator == "heun":
                 return self.heun_forward(z, K=self.K)
             else:
