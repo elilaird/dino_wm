@@ -138,12 +138,17 @@ class GDPlanner(BasePlanner):
                 }
                 self.wandb_run.log(grad_logs)
             
+            
             with torch.no_grad():
-                actions_new = actions - optimizer.param_groups[0]["lr"] * actions.grad
-                actions_new += (
-                    torch.randn_like(actions_new) * self.action_noise
-                )  # Add Gaussian noise
-                actions.copy_(actions_new)
+                if self.optimizer_type == "adam":
+                    optimizer.step()
+                    actions += torch.randn_like(actions) * self.action_noise
+                else:
+                    actions_new = actions - optimizer.param_groups[0]["lr"] * actions.grad
+                    actions_new += (
+                        torch.randn_like(actions_new) * self.action_noise
+                    )  # Add Gaussian noise
+                    actions.copy_(actions_new)
 
             self.wandb_run.log(
                 {f"{self.logging_prefix}/loss": total_loss.item(), "step": i + 1}
