@@ -21,6 +21,7 @@ n_evals: 10
 goal_source: 'random_state'
 goal_H: 5 
 n_plot_samples: 10
+K: null
 
 debug_dset_init: False
 
