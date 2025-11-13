@@ -464,3 +464,17 @@ class VWorldModel(nn.Module):
             self.predictor.module.reset_memory()
 
         self.clear_retention_cache()
+
+    def estimate_lipschitz(self, z_pred, z_tgt):
+        src = z_pred.clone()
+        src_shift = z_pred[:, 1:, ...]
+        tgt = z_tgt.clone()
+        tgt_shift = z_tgt[:, 1:, ...]
+
+        pred_norm = (src_shift - src[:, :-1, ...]).norm(dim=-1)
+        tgt_norm = (tgt_shift - tgt[:, :-1, ...]).norm(dim=-1) + 1e-6
+        lipschitz_bound = pred_norm / tgt_norm
+        return {
+            "mean_bound": torch.mean(lipschitz_bound, dim=1),
+            "max_bound": torch.amax(lipschitz_bound, dim=1),
+        }
