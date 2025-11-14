@@ -44,6 +44,7 @@ class FlowMatchingModel(nn.Module):
         use_pred_loss=True,
         integrator="euler",
         l2_reg_lambda=0.0,
+        use_discrete_tau=False,
         **kwargs,
     ):
         super().__init__()
@@ -78,6 +79,8 @@ class FlowMatchingModel(nn.Module):
         self.use_pred_loss = use_pred_loss
         self.integrator = integrator
         self.l2_reg_lambda = l2_reg_lambda
+        self.use_discrete_tau = use_discrete_tau
+        self.clamp_tau = 1e-6
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -314,8 +317,13 @@ class FlowMatchingModel(nn.Module):
         if self.normalize_target:
             delta = self.normalize(delta)
 
-        t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
-        t = torch.clamp(t, 1e-4, 1.0 - 1e-4)
+        if self.use_discrete_tau:
+            t = torch.arange(0, 1.0, 1.0 / self.K, device=z_src.device)
+            t = t.unsqueeze(0).repeat(z_src.size(0) // self.K, 1).flatten().view(-1, 1, 1, 1)
+            t = torch.clamp(t, self.clamp_tau, 1.0 - self.clamp_tau)
+        else:
+            t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
+            t = torch.clamp(t, self.clamp_tau, 1.0 - self.clamp_tau)
 
         if self.input_type == "causal":
             z_t = z_src
@@ -349,15 +357,21 @@ class FlowMatchingModel(nn.Module):
         loss_components = {}
 
         z = self.encode(obs, act)
+        if self.use_discrete_tau:
+            z = z.repeat_interleave(self.K, dim=0)
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
-        visual_src = obs["visual"][
-            :, : self.num_hist, ...
-        ]  # (b, num_hist, 3, img_size, img_size)
+        # visual_src = obs["visual"][
+        #     :, : self.num_hist, ...
+        # ]  # (b, num_hist, 3, img_size, img_size)
         visual_tgt = obs["visual"][
             :, self.num_pred :, ...
         ]  # (b, num_hist, 3, img_size, img_size)
-
+        if self.use_discrete_tau:
+            visual_tgt = visual_tgt.repeat_interleave(self.K, dim=0)
+            obs = {k: v.repeat_interleave(self.K, dim=0) for k, v in obs.items()}
+            
+        
         # case 1: target flow is Enc(x_t) - Enc(x_{t-1})
         delta, z_t, t = self.get_target_flow(z_src, z_tgt)
 
@@ -505,7 +519,7 @@ class FlowMatchingModel(nn.Module):
         z = z_src.clone()
         h = 1.0 / K
         # tau = torch.zeros(z_src.size(0), 1, device=z_src.device)
-        tau = torch.ones(z_src.size(0), 1, device=z_src.device) * 1e-4
+        tau = torch.ones(z_src.size(0), 1, device=z_src.device) * self.clamp_tau
         for _ in range(K):
             z_delta = self.predict(z, tau)
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * z_delta[..., :-(self.action_dim)]
@@ -515,7 +529,7 @@ class FlowMatchingModel(nn.Module):
     def euler_forward_ckpt(self, z_src, K=1):
         z = z_src.clone()
         h = 1.0 / K
-        tau = torch.ones(z_src.size(0), 1, device=z_src.device) * 1e-4
+        tau = torch.ones(z_src.size(0), 1, device=z_src.device) * self.clamp_tau
 
         def euler_step(z, tau):
             z_delta = self.predict(z, tau)
@@ -535,7 +549,7 @@ class FlowMatchingModel(nn.Module):
     def heun_forward(self, z, K=1):
         z = z.clone()
         h = 1.0 / K
-        tau = torch.ones(z.size(0), 1, device=z.device) * 1e-4
+        tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
         for _ in range(K):
             z_delta = self.predict(z, tau)
             z_pred = z[..., :-(self.action_dim)] + h * z_delta[..., :-(self.action_dim)]
@@ -546,7 +560,7 @@ class FlowMatchingModel(nn.Module):
 
     def inference(self, z):
         if self.input_type == "causal":
-            delta = self.predict(z, torch.ones(z.size(0), 1, device=z.device) * 1e-4)
+            delta = self.predict(z, torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau)
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + delta[..., :-(self.action_dim)]
             return z
         elif self.input_type == "interp":

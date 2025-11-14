@@ -240,7 +240,6 @@ class Trainer:
             log.info(f"Valid dataset length: {len(self.datasets['valid'])}")
             log.info(f"Test dataset length: {len(self.datasets['test'])}")
 
-        
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
         self.test_traj_dset = traj_dsets["test"]
@@ -301,10 +300,10 @@ class Trainer:
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
         self._keys_to_save += ["aux_predictor", "aux_predictor_optimizer"] if self.cfg.train_aux_predictor else []
-        
+
         self.init_models()
         self.init_optimizers()
-        
+
         # Load checkpoint after all models are instantiated
         with self.accelerator.main_process_first():
             model_ckpt = (
@@ -482,7 +481,7 @@ class Trainer:
                     else:
                         self.encoder.load_state_dict(ckpt)
                     print(f"Loaded pretrained encoder from {self.cfg.pretrained_encoder_path}")
-                
+
         self.accelerator.wait_for_everyone()
 
         # Sanity: make sure everyone actually built it and it has params
@@ -506,12 +505,11 @@ class Trainer:
                 # unfreeze the layernorm
                 for param in self.encoder.base_model.norm.parameters():
                     param.requires_grad = True
-        
+
         else:
             print("Freezing the all blocks for encoder", flush=True)
             for param in self.encoder.parameters():
                 param.requires_grad = False
-            
 
         self.proprio_encoder = hydra.utils.instantiate(
             self.cfg.proprio_encoder,
@@ -559,7 +557,7 @@ class Trainer:
 
         if self.cfg.use_cls_token:
             num_patches += 1
-        
+
         print(f"Num patches: {num_patches}", flush=True)
 
         predictor_dim = None
@@ -612,7 +610,7 @@ class Trainer:
             if not self.train_decoder:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
-        
+
         self.aux_predictor = None
         if self.cfg.train_aux_predictor:
             print(f"Initializing aux predictor with dim: {predictor_dim}", flush=True)
@@ -647,7 +645,6 @@ class Trainer:
         if self.cfg.train_aux_predictor:
             self.aux_predictor = self.accelerator.prepare(self.aux_predictor)
 
-
         self.model = hydra.utils.instantiate(
             self.cfg.model,
             image_size=self.cfg.img_size,
@@ -673,8 +670,6 @@ class Trainer:
             print(f"Using aux predictor: {self.cfg.train_aux_predictor}")
             print(f"Model type: {type(self.model)}")
             print(self.model)
-
-        
 
     def init_optimizers(self):
         # Scale learning rates by number of processes for proper multi-GPU training
@@ -752,7 +747,7 @@ class Trainer:
                 log.info(
                     f"Decoder LR: {self.cfg.training.decoder_lr} -> {self.cfg.training.decoder_lr * lr_scale}"
                 )
-        
+
         if self.cfg.train_aux_predictor:
             self.aux_predictor_optimizer = torch.optim.AdamW(
                 self.aux_predictor.parameters(),
@@ -986,7 +981,6 @@ class Trainer:
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
-            
 
             batch_loss_components = defaultdict(float)
 
@@ -1031,8 +1025,14 @@ class Trainer:
                     "train_num_frames": [N],
                 }
                 self.logs_update(time_logs)
-            
+
             if self.cfg.has_decoder and plot:
+                if self.accelerator.unwrap_model(self.model).use_discrete_tau:
+                    obs_window = {
+                        k: v.repeat_interleave(self.accelerator.unwrap_model(self.model).K, dim=0)
+                        for k, v in obs_window.items()
+                    }
+
                 self.decoder_eval(i, obs_window, z_components)
 
             self.logs_update(
@@ -1070,7 +1070,6 @@ class Trainer:
                 }
                 self.logs_update(val_rollout_logs)
 
-
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
             tqdm(self.dataloaders["valid"], desc=f"Epoch {self.epoch} Valid")
@@ -1107,9 +1106,15 @@ class Trainer:
                         )
 
             if self.cfg.has_decoder and i == 0 and self.decoder is not None:
+                if self.accelerator.unwrap_model(self.model).use_discrete_tau:
+                    obs_window = {
+                        k: v.repeat_interleave(self.accelerator.unwrap_model(self.model).K, dim=0)
+                        for k, v in obs_window.items()
+                    }
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     z_obs_out, _ = self.model.separate_emb(z_out)
+
                     z_gt = self.model.encode_obs(obs_window)
                     z_tgt = slice_trajdict_with_t(
                         z_gt, start_idx=self.cfg.num_pred
@@ -1178,7 +1183,6 @@ class Trainer:
             if self.cfg.dry_run:
                 break
 
-
     def test(self):
         """Test function that mimics val() but uses test dataset and saves results to CSV."""
         self.model.eval()
@@ -1211,8 +1215,6 @@ class Trainer:
             B, N = obs["visual"].shape[:2]
             num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
 
-            
-
             for window_idx in range(num_windows):
                 start_idx = window_idx * self.step_size
                 end_idx = min(start_idx + self.window_size, N)
@@ -1240,6 +1242,13 @@ class Trainer:
                         )
 
             if self.cfg.has_decoder and i == 0 and self.decoder is not None:
+                if self.accelerator.unwrap_model(self.model).use_discrete_tau:
+                    obs_window = {
+                        k: v.repeat_interleave(
+                            self.accelerator.unwrap_model(self.model).K, dim=0
+                        )
+                        for k, v in obs_window.items()
+                    }
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     z_obs_out, _ = self.model.separate_emb(z_out)
@@ -1259,7 +1268,6 @@ class Trainer:
 
                     self.logs_update(err_logs)
 
-          
                 if visual_out is not None:
                     for t in range(
                         self.cfg.num_hist,
@@ -1295,8 +1303,6 @@ class Trainer:
                         }
                         self.logs_update(img_reconstruction_scores)
 
-            
-
                 self.plot_samples(
                     obs_window["visual"],
                     visual_out,
@@ -1311,7 +1317,6 @@ class Trainer:
             batch_loss_logs = {f"test_{k}": [v] for k, v in batch_loss_components.items()}
             self.logs_update(batch_loss_logs)
 
- 
             if self.cfg.dry_run:
                 break
 
@@ -1372,7 +1377,6 @@ class Trainer:
         except Exception as e:
             log.error(f"Error saving test results to CSV: {e}")
 
-    
     def err_eval_single(self, z_pred, z_tgt):
         logs = {}
         for k in z_pred.keys():
@@ -1491,7 +1495,6 @@ class Trainer:
 
         # rollout with both num_hist and 1 frame as context
         num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
-        
 
         # sample traj
         for idx in range(num_rollout):
@@ -1586,14 +1589,13 @@ class Trainer:
                     div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": visuals, "proprio": obs_tgt["proprio"]}, z_cycle)
                     for k in div_loss.keys():
                         logs[f"{k}_err_horizon_{postfix}_h{horizon}"].append(div_loss[k].cpu().numpy())
-                
+
                 # estimate lipschitz bound
                 z_tgts = self.model.encode_obs({k: v.unsqueeze(0).to(self.device) for k, v in obs.items()})
                 lipschitz_metrics = self.model.estimate_lipschitz(z_obses['visual'], z_tgts['visual'])
                 for k in lipschitz_metrics.keys():
                     logs[f"lipschitz_{k}_err_rollout{postfix}_h{horizon}"].append(lipschitz_metrics[k].cpu().numpy())
 
-    
         for k, v in logs.items():
             logs[k] = np.mean(v) if v else 0
 
@@ -1717,7 +1719,7 @@ class Trainer:
     def get_alpha_values(self):
         """Get current alpha values from the additive control transformer"""
         unwrapped_predictor = self.accelerator.unwrap_model(self.predictor)
-        
+
         if hasattr(unwrapped_predictor, "transformer") and hasattr(
             unwrapped_predictor.transformer, "alphas"
         ):
