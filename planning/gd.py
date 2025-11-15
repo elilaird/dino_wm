@@ -85,9 +85,7 @@ class GDPlanner(BasePlanner):
             actions: (B, T, action_dim) torch.Tensor
         """
         trans_obs_0 = move_to_device(
-            self.preprocessor.transform_obs(
-                
-            ), self.device
+            self.preprocessor.transform_obs(obs_0), self.device
         )
         trans_obs_g = move_to_device(
             self.preprocessor.transform_obs(obs_g), self.device

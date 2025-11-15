@@ -136,7 +136,6 @@ class PlanEvaluator:  # evaluator for planning
         )
 
         try:
-            del e_final_state, e_final_obs, i_final_z_obs
             torch.cuda.empty_cache()
         except:
             pass
