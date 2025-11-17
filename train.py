@@ -1,7 +1,6 @@
 import os
 import time
 import hydra
-from numpy.random import logseries
 import psutil
 import torch
 import wandb

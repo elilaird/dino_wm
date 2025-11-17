@@ -224,9 +224,6 @@ class FlowMatchingModel(nn.Module):
             z, _ = self.predictor(z)
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
 
-        if self.normalize_flow:
-            z = self.normalize(z)
-
         return z.contiguous()
 
     def predict_aux(self, ctx):
@@ -370,8 +367,7 @@ class FlowMatchingModel(nn.Module):
         if self.use_discrete_tau:
             visual_tgt = visual_tgt.repeat_interleave(self.K, dim=0)
             obs = {k: v.repeat_interleave(self.K, dim=0) for k, v in obs.items()}
-            
-        
+
         # case 1: target flow is Enc(x_t) - Enc(x_{t-1})
         delta, z_t, t = self.get_target_flow(z_src, z_tgt)
 
@@ -391,7 +387,7 @@ class FlowMatchingModel(nn.Module):
         if self.integrate_in_loss:
             z_pred = self.inference(z_src)
         else:
-            z_pred = z_src + z_flow
+            z_pred = self.delta_step(z_src, z_flow, 1.0)
 
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
@@ -493,6 +489,7 @@ class FlowMatchingModel(nn.Module):
                 visuals: (b, t+n+1, 3, img_size, img_size)
                 z: (b, t+n+1, num_patches, emb_dim)
         """
+        act = act.clone()
 
         num_obs_init = obs_0['visual'].shape[1]
         act_0 = act[:, :num_obs_init]
@@ -515,53 +512,54 @@ class FlowMatchingModel(nn.Module):
 
         return z_obses, z
 
-    def euler_forward(self, z_src, K=1):
-        z = z_src.clone()
+    def delta_step(self, z, delta, h=1.0):
+        z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * delta[..., :-(self.action_dim)]
+        if self.normalize_flow:
+            z = self.normalize(z)
+        return z
+
+    def euler_forward(self, z, K=1):
         h = 1.0 / K
         # tau = torch.zeros(z_src.size(0), 1, device=z_src.device)
-        tau = torch.ones(z_src.size(0), 1, device=z_src.device) * self.clamp_tau
+        tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
         for _ in range(K):
             z_delta = self.predict(z, tau)
-            z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * z_delta[..., :-(self.action_dim)]
+            z = self.delta_step(z, z_delta, h)
             tau = tau + h
         return z
 
-    def euler_forward_ckpt(self, z_src, K=1):
-        z = z_src.clone()
+    def euler_forward_ckpt(self, z, K=1):
         h = 1.0 / K
-        tau = torch.ones(z_src.size(0), 1, device=z_src.device) * self.clamp_tau
+        tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
 
         def euler_step(z, tau):
             z_delta = self.predict(z, tau)
-            z_new = z.clone()
-            z_new[..., : -(self.action_dim)] = (
-                z[..., : -(self.action_dim)]
-                + h * z_delta[..., : -(self.action_dim)]
-            )
-            tau_new = tau + h
-            return z_new, tau_new
-
+            z = self.delta_step(z, z_delta, h)
+            tau = tau + h
+            return z, tau
         for _ in range(K):
-            z, tau = checkpoint.checkpoint(euler_step, z, tau, use_reentrant=False)
+            z, tau = checkpoint.checkpoint(
+                euler_step, z, tau, use_reentrant=False
+            )
 
         return z
 
     def heun_forward(self, z, K=1):
-        z = z.clone()
         h = 1.0 / K
         tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
         for _ in range(K):
             z_delta = self.predict(z, tau)
-            z_pred = z[..., :-(self.action_dim)] + h * z_delta[..., :-(self.action_dim)]
+            z_pred = self.delta_step(z, z_delta, h)
             z_delta_half = self.predict(z_pred, (tau+h))
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + 0.5 * h * (z_delta[..., :-(self.action_dim)] + z_delta_half[..., :-(self.action_dim)])
             tau = tau + h
         return z
 
     def inference(self, z):
+        z = z.clone()
         if self.input_type == "causal":
             delta = self.predict(z, torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau)
-            z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + delta[..., :-(self.action_dim)]
+            z = self.delta_step(z, delta, 1.0)
             return z
         elif self.input_type == "interp":
             if self.integrator == "euler":

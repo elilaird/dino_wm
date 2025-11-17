@@ -12,7 +12,8 @@ hydra:
     subdir: ${hydra.job.num}
 
 # model to load for planning
-ckpt_base_path: /projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/checkpoints # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
+ckpt_base_path: /lustre/smuexa01/client/users/ejlaird/dino_wm/checkpoints # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
+# ckpt_base_path: /projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/checkpoints # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
 model_name: null
 model_epoch: latest
 
@@ -20,7 +21,7 @@ seed: 99
 n_evals: 10 
 goal_source: 'random_state'
 goal_H: 5 
-n_plot_samples: 10
+n_plot_samples: 4
 K: null
 
 debug_dset_init: False
@@ -42,5 +43,5 @@ planner:
     num_samples: 300
     var_scale: 1
     opt_steps: 10
-    eval_every: 1
+    eval_every: 5
   name: mpc_cem

@@ -1,7 +1,6 @@
 import os
 import time
 import hydra
-from numpy.random import logseries
 import psutil
 import torch
 import wandb
@@ -1591,10 +1590,10 @@ class Trainer:
                         logs[f"{k}_err_horizon_{postfix}_h{horizon}"].append(div_loss[k].cpu().numpy())
 
                 # estimate lipschitz bound
-                z_tgts = self.model.encode_obs({k: v.unsqueeze(0).to(self.device) for k, v in obs.items()})
-                lipschitz_metrics = self.model.estimate_lipschitz(z_obses['visual'], z_tgts['visual'])
-                for k in lipschitz_metrics.keys():
-                    logs[f"lipschitz_{k}_err_rollout{postfix}_h{horizon}"].append(lipschitz_metrics[k].cpu().numpy())
+                # z_tgts = self.model.encode_obs({k: v.unsqueeze(0).to(self.device) for k, v in obs.items()})
+                # lipschitz_metrics = self.model.estimate_lipschitz(z_obses['visual'], z_tgts['visual'])
+                # for k in lipschitz_metrics.keys():
+                #     logs[f"lipschitz_{k}_err_rollout{postfix}_h{horizon}"].append(lipschitz_metrics[k].cpu().numpy())
 
         for k, v in logs.items():
             logs[k] = np.mean(v) if v else 0

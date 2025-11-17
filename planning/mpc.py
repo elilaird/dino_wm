@@ -108,7 +108,7 @@ class MPCPlanner(BasePlanner):
                 obs_0=init_obs_0,
                 state_0=init_state_0,
             )
-            save_video = self.iter % 1 == 0
+            save_video = self.iter % 5 == 0
             logs, successes, e_obses, e_states = self.evaluator.eval_actions(
                 action_so_far,
                 self.action_len,
