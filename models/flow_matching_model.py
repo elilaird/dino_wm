@@ -195,10 +195,10 @@ class FlowMatchingModel(nn.Module):
         proprio_emb = self.encode_proprio(proprio)
         return {"visual": visual_embs, "proprio": proprio_emb}
 
-    def normalize(self, z):
+    def normalize(self, z, data_norm=1.0):
         latent = z[..., :-(self.action_dim)]
-        latent_norm = torch.norm(latent, dim=-1, keepdim=True)
-        normalized_latent = latent / latent_norm
+        latent_norm = torch.norm(latent, dim=-1, keepdim=True) 
+        normalized_latent = (latent / latent_norm) * data_norm
         z = torch.cat([normalized_latent, z[..., -(self.action_dim):]], dim=-1)
         return z
 
@@ -354,13 +354,13 @@ class FlowMatchingModel(nn.Module):
         loss_components = {}
 
         z = self.encode(obs, act)
+
+        z_norm = torch.norm(z[:, :, :, : -(self.proprio_dim + self.action_dim)], dim=-1).mean()
+
         if self.use_discrete_tau:
             z = z.repeat_interleave(self.K, dim=0)
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
-        # visual_src = obs["visual"][
-        #     :, : self.num_hist, ...
-        # ]  # (b, num_hist, 3, img_size, img_size)
         visual_tgt = obs["visual"][
             :, self.num_pred :, ...
         ]  # (b, num_hist, 3, img_size, img_size)
@@ -368,26 +368,26 @@ class FlowMatchingModel(nn.Module):
             visual_tgt = visual_tgt.repeat_interleave(self.K, dim=0)
             obs = {k: v.repeat_interleave(self.K, dim=0) for k, v in obs.items()}
 
-        # case 1: target flow is Enc(x_t) - Enc(x_{t-1})
+        # target flow is Enc(x_t) - Enc(x_{t-1})
         delta, z_t, t = self.get_target_flow(z_src, z_tgt)
 
         z_flow = self.predict(z_t, t)
         z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
-        pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1).mean()
-        delta_norm = torch.norm(delta[:, :, :, : -(self.action_dim)].detach(), dim=-1).mean()
+        pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)#.mean()
+        delta_norm = torch.norm(delta[:, :, :, : -(self.action_dim)].detach(), dim=-1)#.mean()
 
-        l2_reg_loss = self.l2_reg_lambda * (pred_norm + delta_norm)
+        l2_reg_loss = self.l2_reg_lambda * torch.nn.functional.l1_loss(pred_norm, delta_norm.detach())
         z_flow_loss = z_flow_loss + l2_reg_loss
 
-        loss_components["pred_norm"] = pred_norm
-        loss_components["delta_norm"] = delta_norm
+        loss_components["pred_norm"] = pred_norm.mean()
+        loss_components["delta_norm"] = delta_norm.mean()
         loss_components["l2_reg_loss"] = l2_reg_loss
 
         if self.integrate_in_loss:
-            z_pred = self.inference(z_src)
+            z_pred = self.inference(z_src, data_norm=z_norm)
         else:
-            z_pred = self.delta_step(z_src, z_flow, 1.0)
+            z_pred = self.delta_step(z_src, z_flow, 1.0, data_norm=z_norm)
 
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
@@ -495,11 +495,12 @@ class FlowMatchingModel(nn.Module):
         act_0 = act[:, :num_obs_init]
         action = act[:, num_obs_init:] 
         z = self.encode(obs_0, act_0)
+        z_norm = torch.norm(z[:, :, :, : -(self.proprio_dim + self.action_dim)], dim=-1).mean()
 
         t = 0
         inc = 1
         while t < action.shape[1]:
-            z_pred = self.inference(z[:, -self.num_hist :])
+            z_pred = self.inference(z[:, -self.num_hist :], data_norm=z_norm)
             z_t = z_pred[:, -inc:, ...]
             z_t = self.replace_actions_from_z(z_t, action[:, t : t + inc, :])
             z = torch.cat([z, z_t], dim=1)
@@ -512,30 +513,30 @@ class FlowMatchingModel(nn.Module):
 
         return z_obses, z
 
-    def delta_step(self, z, delta, h=1.0):
+    def delta_step(self, z, delta, h=1.0, data_norm=1.0):
         z_new = z.clone()
         z_new[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * delta[..., :-(self.action_dim)]
         if self.normalize_flow:
-            z_new = self.normalize(z_new)
+            z_new = self.normalize(z_new, data_norm)
         return z_new
 
-    def euler_forward(self, z, K=1):
+    def euler_forward(self, z, K=1, data_norm=1.0):
         h = 1.0 / K
         # tau = torch.zeros(z_src.size(0), 1, device=z_src.device)
         tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
         for _ in range(K):
             z_delta = self.predict(z, tau)
-            z = self.delta_step(z, z_delta, h)
+            z = self.delta_step(z, z_delta, h, data_norm=data_norm)
             tau = tau + h
         return z
 
-    def euler_forward_ckpt(self, z, K=1):
+    def euler_forward_ckpt(self, z, K=1, data_norm=1.0):
         h = 1.0 / K
         tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
 
         def euler_step(z, tau):
             z_delta = self.predict(z, tau)
-            z = self.delta_step(z, z_delta, h)
+            z = self.delta_step(z, z_delta, h, data_norm=data_norm)
             tau = tau + h
             return z, tau
         for _ in range(K):
@@ -545,28 +546,28 @@ class FlowMatchingModel(nn.Module):
 
         return z
 
-    def heun_forward(self, z, K=1):
+    def heun_forward(self, z, K=1, data_norm=1.0):
         h = 1.0 / K
         tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
         for _ in range(K):
             z_delta = self.predict(z, tau)
-            z_pred = self.delta_step(z, z_delta, h)
+            z_pred = self.delta_step(z, z_delta, h, data_norm=data_norm)
             z_delta_half = self.predict(z_pred, (tau+h))
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + 0.5 * h * (z_delta[..., :-(self.action_dim)] + z_delta_half[..., :-(self.action_dim)])
             tau = tau + h
         return z
 
-    def inference(self, z):
+    def inference(self, z, data_norm=1.0):
         z = z.clone()
         if self.input_type == "causal":
             delta = self.predict(z, torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau)
-            z = self.delta_step(z, delta, 1.0)
+            z = self.delta_step(z, delta, 1.0, data_norm=data_norm)
             return z
         elif self.input_type == "interp":
             if self.integrator == "euler":
-                return self.euler_forward_ckpt(z, K=self.K)
+                return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
             elif self.integrator == "heun":
-                return self.heun_forward(z, K=self.K)
+                return self.heun_forward(z, K=self.K, data_norm=data_norm)
             else:
                 raise ValueError(f"Invalid integrator: {self.integrator}")
         else:
