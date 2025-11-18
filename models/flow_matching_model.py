@@ -513,10 +513,11 @@ class FlowMatchingModel(nn.Module):
         return z_obses, z
 
     def delta_step(self, z, delta, h=1.0):
-        z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * delta[..., :-(self.action_dim)]
+        z_new = z.clone()
+        z_new[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * delta[..., :-(self.action_dim)]
         if self.normalize_flow:
-            z = self.normalize(z)
-        return z
+            z_new = self.normalize(z_new)
+        return z_new
 
     def euler_forward(self, z, K=1):
         h = 1.0 / K
