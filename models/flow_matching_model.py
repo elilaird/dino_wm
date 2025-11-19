@@ -506,7 +506,7 @@ class FlowMatchingModel(nn.Module):
             z = torch.cat([z, z_t], dim=1)
             t += inc
 
-        z_pred = self.inference(z[:, -self.num_hist :])
+        z_pred = self.inference(z[:, -self.num_hist :], data_norm=z_norm)
         z_t = z_pred[:, -1:, ...]
         z = torch.cat([z, z_t], dim=1)
         z_obses, _ = self.separate_emb(z)
