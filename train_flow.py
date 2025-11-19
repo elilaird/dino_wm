@@ -392,7 +392,7 @@ class Trainer:
 
     def load_ckpt(self, filename="model_latest.pth"):
         """Load checkpoint, handling both legacy full modules and new state dict format."""
-        ckpt = torch.load(filename)
+        ckpt = torch.load(filename, weights_only=False)
 
         # Check if this is a state dict format checkpoint
         if "train_cfg" in ckpt and any(
@@ -474,7 +474,7 @@ class Trainer:
                     self.cfg.encoder,
                 )
                 if not self.train_encoder and self.cfg.pretrained_encoder_path is not None:
-                    ckpt = torch.load(self.cfg.pretrained_encoder_path)
+                    ckpt = torch.load(self.cfg.pretrained_encoder_path, weights_only=False)
                     if isinstance(ckpt, dict):
                         self.encoder.load_state_dict(ckpt["encoder"])
                     else:
@@ -592,11 +592,11 @@ class Trainer:
                     decoder_path = os.path.join(
                         self.base_path, self.cfg.env.decoder_path
                     )
-                    ckpt = torch.load(decoder_path)
+                    ckpt = torch.load(decoder_path, weights_only=False)
                     if isinstance(ckpt, dict):
                         self.decoder = ckpt["decoder"]
                     else:
-                        self.decoder = torch.load(decoder_path)
+                        self.decoder = torch.load(decoder_path, weights_only=False)
                     log.info(f"Loaded decoder from {decoder_path}")
                 else:
                     self.decoder = hydra.utils.instantiate(
