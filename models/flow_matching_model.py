@@ -11,7 +11,7 @@ from models.encoder.resnet import ResNetSmallTokens
 class FlowMatchingModel(nn.Module):
     def __init__(
         self,
-        image_size,  # 224
+        image_size,  
         num_hist,
         num_pred,
         encoder,
@@ -28,15 +28,6 @@ class FlowMatchingModel(nn.Module):
         train_predictor=False,
         train_decoder=True,
         decoder_loss_type='mse',
-        step_size=1,
-        use_cls_token=False,
-        aux_predictor=None,
-        per_window_ret_frames=2, # number of frames to cache for retention
-        ret_loss_weight=1.0,
-        max_retention_cache_size=10,
-        input_type="causal",
-        interpolation_type="linear",
-        sigma0=0.1,
         K=1,
         normalize_flow=False,
         normalize_target=False,
@@ -45,6 +36,9 @@ class FlowMatchingModel(nn.Module):
         integrator="euler",
         l2_reg_lambda=0.0,
         use_discrete_tau=False,
+        clamp_tau=1e-6,
+        tgt_type="delta",
+        use_shortcut_loss=False,
         **kwargs,
     ):
         super().__init__()
@@ -63,15 +57,6 @@ class FlowMatchingModel(nn.Module):
         self.proprio_dim = proprio_dim * num_proprio_repeat 
         self.action_dim = action_dim * num_action_repeat
         self.decoder_loss_type = decoder_loss_type 
-        self.step_size = step_size
-        self.use_cls_token = use_cls_token
-        self.aux_predictor = aux_predictor
-        self.per_window_ret_frames = per_window_ret_frames
-        self.ret_loss_weight = ret_loss_weight
-        self.max_retention_cache_size = max_retention_cache_size
-        self.input_type = input_type
-        self.interpolation_type = interpolation_type
-        self.sigma0 = sigma0
         self.K = K
         self.normalize_flow = normalize_flow
         self.normalize_target = normalize_target
@@ -80,7 +65,10 @@ class FlowMatchingModel(nn.Module):
         self.integrator = integrator
         self.l2_reg_lambda = l2_reg_lambda
         self.use_discrete_tau = use_discrete_tau
-        self.clamp_tau = 1e-6
+        self.clamp_tau = clamp_tau
+        self.tgt_type = tgt_type
+        self.use_shortcut_loss = use_shortcut_loss
+        assert tgt_type == "delta" or tgt_type == "data", f"Invalid tgt type: {tgt_type}"
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -135,8 +123,6 @@ class FlowMatchingModel(nn.Module):
         self.action_encoder.train(mode)
         if self.decoder is not None and self.train_decoder:
             self.decoder.train(mode)
-        if self.aux_predictor is not None:
-            self.aux_predictor.train(mode)
 
     def eval(self):
         super().eval()
@@ -147,8 +133,6 @@ class FlowMatchingModel(nn.Module):
         self.action_encoder.eval()
         if self.decoder is not None:
             self.decoder.eval()
-        if self.aux_predictor is not None:
-            self.aux_predictor.eval()
 
     def encode(self, obs, act): 
         """
@@ -202,13 +186,6 @@ class FlowMatchingModel(nn.Module):
         z = torch.cat([normalized_latent, z[..., -(self.action_dim):]], dim=-1)
         return z
 
-    def scale_stddev(self, z):
-        latent = z[..., :-(self.action_dim)]
-        latent_var = latent.var(dim=-1, keepdim=True)
-        scaled_latent = latent / torch.sqrt(latent_var)
-        z = torch.cat([scaled_latent, z[..., -(self.action_dim):]], dim=-1)
-        return z
-
     def predict(self, z, tau=None):  # in embedding space
         """
         input : z: (b, num_hist, num_patches, emb_dim)
@@ -226,9 +203,6 @@ class FlowMatchingModel(nn.Module):
 
         return z.contiguous()
 
-    def predict_aux(self, ctx):
-        pass
-
     def decode(self, z):
         """
         input :   z: (b, num_frames, num_patches, emb_dim)
@@ -245,9 +219,6 @@ class FlowMatchingModel(nn.Module):
         """
         b, num_frames, num_patches, emb_dim = z_obs["visual"].shape
         z = {k: v.clone() for k, v in z_obs.items()}
-        if self.use_cls_token:
-            # remove cls token
-            z["visual"] = z["visual"][:, :, 1:, :]
         visual, diff = self.decoder(z["visual"])  # (b*num_frames, 3, 224, 224)
         visual = rearrange(visual, "(b t) c h w -> b t c h w", t=num_frames)
         obs = {
@@ -309,10 +280,13 @@ class FlowMatchingModel(nn.Module):
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
         z_src = z_src.clone()
-        delta = z_tgt - z_src
+        if self.tgt_type == "delta":
+            target = z_tgt - z_src
+        elif self.tgt_type == "data":
+            target = z_tgt
 
         if self.normalize_target:
-            delta = self.normalize(delta)
+            target = self.normalize(target)
 
         if self.use_discrete_tau:
             t = torch.arange(0, 1.0, 1.0 / self.K, device=z_src.device)
@@ -322,24 +296,18 @@ class FlowMatchingModel(nn.Module):
             t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
             t = torch.clamp(t, self.clamp_tau, 1.0 - self.clamp_tau)
 
-        if self.input_type == "causal":
-            z_t = z_src
-
         # interpolation
-        elif self.input_type == "interp":
-            z_src_obs, z_src_act = self.separate_emb(z_src)
-            z_tgt_obs, _ = self.separate_emb(z_tgt)
+        z_src_obs, z_src_act = self.separate_emb(z_src)
+        z_tgt_obs, _ = self.separate_emb(z_tgt)
 
-            z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (
-                t * z_tgt_obs["visual"]
-            )
-            z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
+        z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (
+            t * z_tgt_obs["visual"]
+        )
+        z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
 
-            z_t = self.merge_emb(z_src_obs, z_src_act)
-        else:
-            raise ValueError(f"Invalid input type: {self.input_type}")
+        z_t = self.merge_emb(z_src_obs, z_src_act)
 
-        return delta.contiguous(), z_t.contiguous(), t.view(t.size(0), 1)
+        return target.contiguous(), z_t.contiguous(), t.view(t.size(0), 1)
 
     def forward(self, obs, act, aux_obs=None):
         """
@@ -369,19 +337,19 @@ class FlowMatchingModel(nn.Module):
             obs = {k: v.repeat_interleave(self.K, dim=0) for k, v in obs.items()}
 
         # target flow is Enc(x_t) - Enc(x_{t-1})
-        delta, z_t, t = self.get_target_flow(z_src, z_tgt)
+        target, z_t, t = self.get_target_flow(z_src, z_tgt)
 
         z_flow = self.predict(z_t, t)
-        z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
+        z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], target[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
-        pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)#.mean()
-        delta_norm = torch.norm(delta[:, :, :, : -(self.action_dim)].detach(), dim=-1)#.mean()
+        pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)
+        target_norm = torch.norm(target[:, :, :, : -(self.action_dim)].detach(), dim=-1)
 
-        l2_reg_loss = self.l2_reg_lambda * torch.nn.functional.l1_loss(pred_norm, delta_norm.detach())
+        l2_reg_loss = self.l2_reg_lambda * torch.nn.functional.l1_loss(pred_norm, target_norm.detach())
         z_flow_loss = z_flow_loss + l2_reg_loss
 
         loss_components["pred_norm"] = pred_norm.mean()
-        loss_components["delta_norm"] = delta_norm.mean()
+        loss_components["target_norm"] = target_norm.mean()
         loss_components["l2_reg_loss"] = l2_reg_loss
 
         if self.integrate_in_loss:
@@ -552,26 +520,19 @@ class FlowMatchingModel(nn.Module):
         for _ in range(K):
             z_delta = self.predict(z, tau)
             z_pred = self.delta_step(z, z_delta, h, data_norm=data_norm)
-            z_delta_half = self.predict(z_pred, (tau+h))
+            z_delta_half = self.predict(z_pred, (tau + h))
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + 0.5 * h * (z_delta[..., :-(self.action_dim)] + z_delta_half[..., :-(self.action_dim)])
             tau = tau + h
         return z
 
     def inference(self, z, data_norm=1.0):
         z = z.clone()
-        if self.input_type == "causal":
-            delta = self.predict(z, torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau)
-            z = self.delta_step(z, delta, 1.0, data_norm=data_norm)
-            return z
-        elif self.input_type == "interp":
-            if self.integrator == "euler":
-                return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
-            elif self.integrator == "heun":
-                return self.heun_forward(z, K=self.K, data_norm=data_norm)
-            else:
-                raise ValueError(f"Invalid integrator: {self.integrator}")
+        if self.integrator == "euler":
+            return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
+        elif self.integrator == "heun":
+            return self.heun_forward(z, K=self.K, data_norm=data_norm)
         else:
-            raise ValueError(f"Invalid inference type: {self.input_type}")
+            raise ValueError(f"Invalid integrator: {self.integrator}")
 
     def estimate_lipschitz(self, z_pred, z_tgt):
         src = z_pred.clone()
@@ -586,3 +547,4 @@ class FlowMatchingModel(nn.Module):
             "mean_bound": torch.mean(lipschitz_bound, dim=1),
             "max_bound": torch.amax(lipschitz_bound, dim=1),
         }
+
