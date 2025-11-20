@@ -70,6 +70,8 @@ class FlowMatchingModel(nn.Module):
         self.use_delta_tau = use_delta_tau
 
         assert tgt_type == "delta" or tgt_type == "data", f"Invalid tgt type: {tgt_type}"
+        if self.use_shortcut_loss:
+            assert self.use_delta_tau, "Shortcut loss requires delta tau"
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -353,8 +355,14 @@ class FlowMatchingModel(nn.Module):
         # target flow is Enc(x_t) - Enc(x_{t-1})
         target, z_t, t, dt = self.get_target_flow(z_src, z_tgt)
 
+        # flow matching loss
         z_flow = self.predict(z_t, t, delta_tau=dt if self.use_delta_tau else None)
         z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], target[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
+
+        # shortcut loss
+        if self.use_shortcut_loss and self.tgt_type == "delta":
+            shortcut_loss = self.shortcut_loss_delta(z_src, target, t, dt, data_norm=z_norm)
+            z_flow_loss = z_flow_loss + shortcut_loss
 
         pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)
         target_norm = torch.norm(target[:, :, :, : -(self.action_dim)].detach(), dim=-1)
@@ -566,7 +574,19 @@ class FlowMatchingModel(nn.Module):
             "max_bound": torch.amax(lipschitz_bound, dim=1),
         }
 
-    def shortcut_loss(self, z, target):
-        pass
+    def shortcut_loss_delta(self, z, target, t, dt, data_norm=1.0):
+        target = target.clone()
+        b_1 = self.predict(z, t, dt * 0.5) 
+        z_prime = self.delta_step(z, b_1, dt * 0.5, data_norm=data_norm)
+        b_2 = self.predict(z_prime, t + dt * 0.5, dt * 0.5)
+        z_hat = self.predict(z, t, dt)
+        shortcut_tgt = (b_1.detach() + b_2.detach()) / 2
+
+        mask = (dt.squeeze() == (1.0 / self.K))
+        shortcut_tgt[mask] = target[mask].detach()
+
+        loss = self.emb_criterion(z_hat[..., :-(self.action_dim)], shortcut_tgt[..., :-(self.action_dim)])
+        return loss
+
 
 
