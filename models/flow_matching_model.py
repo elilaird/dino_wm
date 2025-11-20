@@ -280,6 +280,22 @@ class FlowMatchingModel(nn.Module):
             )  # (b, num_frames, num_patches, dim + action_dim)
         return z
 
+    def sample_tau(self, batch_size, steps):
+        steps_log2 = int(torch.log2(torch.tensor(steps))) + 1
+        pw2_steps = 2 ** torch.arange(0, steps_log2)
+
+        delta_taus = 1.0 / pw2_steps
+        delta_tau = delta_taus[torch.randint(0, len(delta_taus), (batch_size,))]
+
+        taus = (
+            torch.floor(
+                torch.rand(batch_size, device=delta_tau.device) / delta_tau
+            )
+            * delta_tau
+        )
+        return delta_tau, taus
+        
+
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
         z_src = z_src.clone()
@@ -291,8 +307,13 @@ class FlowMatchingModel(nn.Module):
         if self.normalize_target:
             target = self.normalize(target)
 
-        t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
-        t = torch.clamp(t, self.clamp_tau, 1.0 - self.clamp_tau)
+        if self.use_delta_tau:
+            dt, t = self.sample_tau(z_src.size(0), self.K)
+            dt = dt.to(z_src.device)
+            t = t.view(-1, 1, 1, 1).to(z_src.device)
+        else:
+            t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
+            dt = torch.full_like(t, 1.0 / self.K, device=z_src.device)
 
         # interpolation
         z_src_obs, z_src_act = self.separate_emb(z_src)
@@ -305,7 +326,7 @@ class FlowMatchingModel(nn.Module):
 
         z_t = self.merge_emb(z_src_obs, z_src_act)
 
-        return target.contiguous(), z_t.contiguous(), t.view(t.size(0), 1)
+        return target.contiguous(), z_t.contiguous(), t.view(t.size(0), 1), dt.view(dt.size(0), 1)
 
     def forward(self, obs, act, aux_obs=None):
         """
@@ -330,10 +351,9 @@ class FlowMatchingModel(nn.Module):
         ]  # (b, num_hist, 3, img_size, img_size)
 
         # target flow is Enc(x_t) - Enc(x_{t-1})
-        target, z_t, t = self.get_target_flow(z_src, z_tgt)
-        delta_tau = torch.full_like(t, 1.0 / self.K, device=z.device) if self.use_delta_tau else None
+        target, z_t, t, dt = self.get_target_flow(z_src, z_tgt)
 
-        z_flow = self.predict(z_t, t, delta_tau=delta_tau)
+        z_flow = self.predict(z_t, t, delta_tau=dt if self.use_delta_tau else None)
         z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], target[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
         pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)
@@ -349,7 +369,7 @@ class FlowMatchingModel(nn.Module):
         if self.integrate_in_loss:
             z_pred = self.inference(z_src, data_norm=z_norm)
         else:
-            z_pred = self.delta_step(z_src, z_flow, 1.0, data_norm=z_norm)
+            z_pred = self.delta_step(z_src, z_flow, torch.ones_like(dt, device=z_src.device), data_norm=z_norm)
 
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
@@ -475,36 +495,37 @@ class FlowMatchingModel(nn.Module):
 
         return z_obses, z
 
-    def delta_step(self, z, delta, h=1.0, data_norm=1.0):
+    def delta_step(self, z, delta, dt, data_norm=1.0):
+        if dt.ndim > 1:
+            dt = dt.clone().squeeze().view(-1, 1, 1, 1)
+
         z_new = z.clone()
-        z_new[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * delta[..., :-(self.action_dim)]
+        z_new[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + dt * delta[..., :-(self.action_dim)]
         if self.normalize_flow:
             z_new = self.normalize(z_new, data_norm)
         return z_new
 
     def euler_forward(self, z, K=1, data_norm=1.0):
-        h = 1.0 / K
-        # tau = torch.zeros(z_src.size(0), 1, device=z_src.device)
-        tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
+        dt = 1.0 / K * torch.ones(z.size(0), 1, device=z.device)
+        tau = torch.zeros(z.size(0), 1, device=z.device)
         for _ in range(K):
             z_delta = self.predict(z, tau)
-            z = self.delta_step(z, z_delta, h, data_norm=data_norm)
-            tau = tau + h
+            z = self.delta_step(z, z_delta, dt, data_norm=data_norm)
+            tau = tau + dt
         return z
 
     def euler_forward_ckpt(self, z, K=1, data_norm=1.0):
-        h = 1.0 / K
-        tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
-        delta_tau = torch.full_like(tau, h, device=z.device) if self.use_delta_tau else None
+        dt = 1.0 / K * torch.ones(z.size(0), 1, device=z.device)
+        tau = torch.zeros(z.size(0), 1, device=z.device)
 
-        def euler_step(z, tau, delta_tau):
-            z_delta = self.predict(z, tau, delta_tau=delta_tau)
-            z = self.delta_step(z, z_delta, h, data_norm=data_norm)
-            tau = tau + h
+        def euler_step(z, tau, dt):
+            z_delta = self.predict(z, tau, delta_tau=dt)
+            z = self.delta_step(z, z_delta, dt, data_norm=data_norm)
+            tau = tau + dt
             return z, tau
         for _ in range(K):
             z, tau = checkpoint.checkpoint(
-                euler_step, z, tau, delta_tau, use_reentrant=False
+                euler_step, z, tau, dt, use_reentrant=False
             )
 
         return z
@@ -544,4 +565,8 @@ class FlowMatchingModel(nn.Module):
             "mean_bound": torch.mean(lipschitz_bound, dim=1),
             "max_bound": torch.amax(lipschitz_bound, dim=1),
         }
+
+    def shortcut_loss(self, z, target):
+        pass
+
 
