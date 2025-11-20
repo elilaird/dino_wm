@@ -8,3 +8,4 @@ pool: 'mean'
 time_embed_dim: 64
 time_embed_n_freq: 32
 time_embed_sigma: 1.0
+use_delta_tau: False

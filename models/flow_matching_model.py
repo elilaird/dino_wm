@@ -35,10 +35,10 @@ class FlowMatchingModel(nn.Module):
         use_pred_loss=True,
         integrator="euler",
         l2_reg_lambda=0.0,
-        use_discrete_tau=False,
         clamp_tau=1e-6,
         tgt_type="delta",
         use_shortcut_loss=False,
+        use_delta_tau=False,
         **kwargs,
     ):
         super().__init__()
@@ -64,10 +64,11 @@ class FlowMatchingModel(nn.Module):
         self.use_pred_loss = use_pred_loss
         self.integrator = integrator
         self.l2_reg_lambda = l2_reg_lambda
-        self.use_discrete_tau = use_discrete_tau
         self.clamp_tau = clamp_tau
         self.tgt_type = tgt_type
         self.use_shortcut_loss = use_shortcut_loss
+        self.use_delta_tau = use_delta_tau
+
         assert tgt_type == "delta" or tgt_type == "data", f"Invalid tgt type: {tgt_type}"
 
         if hasattr(self.encoder, "module"):
@@ -106,9 +107,6 @@ class FlowMatchingModel(nn.Module):
         else:  # default to mse
             self.decoder_criterion = nn.MSELoss()
         print(f"Decoder loss type: {self.decoder_criterion}")
-
-        if self.aux_predictor is not None:
-            self.aux_predictor_criterion = nn.MSELoss()
 
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
@@ -186,19 +184,24 @@ class FlowMatchingModel(nn.Module):
         z = torch.cat([normalized_latent, z[..., -(self.action_dim):]], dim=-1)
         return z
 
-    def predict(self, z, tau=None):  # in embedding space
+    def predict(self, z, tau, delta_tau=None): 
         """
         input : z: (b, num_hist, num_patches, emb_dim)
         output: z: (b, num_hist, num_patches, emb_dim)
         """
+        if self.use_delta_tau:
+            assert delta_tau is not None, "delta_tau must be provided if use_delta_tau is True"
+        assert tau is not None, "tau must be provided"
+            
         T = z.shape[1]
         # reshape to a batch of windows of inputs
         z = rearrange(z, "b t p d -> b (t p) d")
         # (b, num_hist * num_patches per img, emb_dim)
-        if tau is not None:
-            z, _ = self.predictor(z, tau)
+        if self.use_delta_tau:
+            z, _ = self.predictor(z, tau, delta_tau=delta_tau)
         else:
-            z, _ = self.predictor(z)
+            z, _ = self.predictor(z, tau)
+
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
 
         return z.contiguous()
@@ -288,13 +291,8 @@ class FlowMatchingModel(nn.Module):
         if self.normalize_target:
             target = self.normalize(target)
 
-        if self.use_discrete_tau:
-            t = torch.arange(0, 1.0, 1.0 / self.K, device=z_src.device)
-            t = t.unsqueeze(0).repeat(z_src.size(0) // self.K, 1).flatten().view(-1, 1, 1, 1)
-            t = torch.clamp(t, self.clamp_tau, 1.0 - self.clamp_tau)
-        else:
-            t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
-            t = torch.clamp(t, self.clamp_tau, 1.0 - self.clamp_tau)
+        t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
+        t = torch.clamp(t, self.clamp_tau, 1.0 - self.clamp_tau)
 
         # interpolation
         z_src_obs, z_src_act = self.separate_emb(z_src)
@@ -325,21 +323,17 @@ class FlowMatchingModel(nn.Module):
 
         z_norm = torch.norm(z[:, :, :, : -(self.proprio_dim + self.action_dim)], dim=-1).mean()
 
-        if self.use_discrete_tau:
-            z = z.repeat_interleave(self.K, dim=0)
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
         visual_tgt = obs["visual"][
             :, self.num_pred :, ...
         ]  # (b, num_hist, 3, img_size, img_size)
-        if self.use_discrete_tau:
-            visual_tgt = visual_tgt.repeat_interleave(self.K, dim=0)
-            obs = {k: v.repeat_interleave(self.K, dim=0) for k, v in obs.items()}
 
         # target flow is Enc(x_t) - Enc(x_{t-1})
         target, z_t, t = self.get_target_flow(z_src, z_tgt)
+        delta_tau = torch.full_like(t, 1.0 / self.K, device=z.device) if self.use_delta_tau else None
 
-        z_flow = self.predict(z_t, t)
+        z_flow = self.predict(z_t, t, delta_tau=delta_tau)
         z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], target[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
         pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)
@@ -501,15 +495,16 @@ class FlowMatchingModel(nn.Module):
     def euler_forward_ckpt(self, z, K=1, data_norm=1.0):
         h = 1.0 / K
         tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
+        delta_tau = torch.full_like(tau, h, device=z.device) if self.use_delta_tau else None
 
-        def euler_step(z, tau):
-            z_delta = self.predict(z, tau)
+        def euler_step(z, tau, delta_tau):
+            z_delta = self.predict(z, tau, delta_tau=delta_tau)
             z = self.delta_step(z, z_delta, h, data_norm=data_norm)
             tau = tau + h
             return z, tau
         for _ in range(K):
             z, tau = checkpoint.checkpoint(
-                euler_step, z, tau, use_reentrant=False
+                euler_step, z, tau, delta_tau, use_reentrant=False
             )
 
         return z
@@ -517,10 +512,12 @@ class FlowMatchingModel(nn.Module):
     def heun_forward(self, z, K=1, data_norm=1.0):
         h = 1.0 / K
         tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
+        delta_tau = torch.full_like(tau, h, device=z.device) if self.use_delta_tau else None
+
         for _ in range(K):
-            z_delta = self.predict(z, tau)
+            z_delta = self.predict(z, tau, delta_tau=delta_tau)
             z_pred = self.delta_step(z, z_delta, h, data_norm=data_norm)
-            z_delta_half = self.predict(z_pred, (tau + h))
+            z_delta_half = self.predict(z_pred, (tau + h), delta_tau=delta_tau)
             z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + 0.5 * h * (z_delta[..., :-(self.action_dim)] + z_delta_half[..., :-(self.action_dim)])
             tau = tau + h
         return z

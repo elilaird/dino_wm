@@ -13,6 +13,6 @@ integrate_in_loss: False
 use_pred_loss: False
 integrator: "euler"
 l2_reg_lambda: 0.0
-use_discrete_tau: False
 tgt_type: "delta"
 use_shortcut_loss: False
+use_delta_tau: False
