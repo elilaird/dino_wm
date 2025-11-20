@@ -7,7 +7,7 @@ train_predictor: ${train_predictor}
 train_decoder: ${train_decoder}
 decoder_loss_type: ${decoder_loss_type}
 K: 4
-normalize_flow: False
+normalize_flow: True
 normalize_target: False
 integrate_in_loss: False
 use_pred_loss: False
