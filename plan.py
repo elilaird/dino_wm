@@ -332,7 +332,7 @@ class PlanWorkspace:
 
 def load_ckpt(snapshot_path, device):
     with snapshot_path.open("rb") as f:
-        payload = torch.load(f, map_location=device)
+        payload = torch.load(f, map_location=device, weights_only=False)
     loaded_keys = []
     result = {}
     for k, v in payload.items():
@@ -346,7 +346,7 @@ def load_ckpt(snapshot_path, device):
 def load_ckpt_state_dict(snapshot_path, device):
     """Load checkpoint with state dicts and return both state dicts and training config."""
     with snapshot_path.open("rb") as f:
-        payload = torch.load(f, map_location=device)
+        payload = torch.load(f, map_location=device, weights_only=False)
     
     loaded_keys = []
     state_dicts = {}
@@ -387,11 +387,11 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
         base_path = os.path.dirname(os.path.abspath(__file__))
         if train_cfg.env.decoder_path is not None:
             decoder_path = os.path.join(base_path, train_cfg.env.decoder_path)
-            ckpt = torch.load(decoder_path)
+            ckpt = torch.load(decoder_path, weights_only=False)
             if isinstance(ckpt, dict):
                 result["decoder"] = ckpt["decoder"]
             else:
-                result["decoder"] = torch.load(decoder_path)
+                result["decoder"] = torch.load(decoder_path, weights_only=False)
         else:
             raise ValueError(
                 "Decoder path not found in model checkpoint \
@@ -488,11 +488,11 @@ def load_model_state_dict(model_ckpt, train_cfg, num_action_repeat, device):
             print(f"Loaded untrained decoder from config")
             if train_cfg.env.decoder_path is not None:
                 decoder_path = os.path.join(base_path, train_cfg.env.decoder_path)
-                ckpt = torch.load(decoder_path)
+                ckpt = torch.load(decoder_path, weights_only=False)
                 if isinstance(ckpt, dict):
                     models["decoder"] = ckpt["decoder"]
                 else:
-                    models["decoder"] = torch.load(decoder_path)
+                    models["decoder"] = torch.load(decoder_path, weights_only=False)
             else:
                 raise ValueError(
                     "Decoder path not found in model checkpoint and is not provided in config"
