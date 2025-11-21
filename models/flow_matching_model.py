@@ -39,6 +39,7 @@ class FlowMatchingModel(nn.Module):
         tgt_type="delta",
         use_shortcut_loss=False,
         use_delta_tau=False,
+        sigma_min=0.0,
         **kwargs,
     ):
         super().__init__()
@@ -68,6 +69,7 @@ class FlowMatchingModel(nn.Module):
         self.tgt_type = tgt_type
         self.use_shortcut_loss = use_shortcut_loss
         self.use_delta_tau = use_delta_tau
+        self.sigma_min = sigma_min
 
         assert tgt_type == "delta" or tgt_type == "data", f"Invalid tgt type: {tgt_type}"
         if self.use_shortcut_loss:
@@ -300,6 +302,7 @@ class FlowMatchingModel(nn.Module):
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
         z_src = z_src.clone()
+
         if self.tgt_type == "delta":
             target = z_tgt - z_src
         elif self.tgt_type == "data":
@@ -316,16 +319,35 @@ class FlowMatchingModel(nn.Module):
             t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
             dt = torch.full_like(t, 1.0 / self.K, device=z_src.device)
 
-        # interpolation
-        z_src_obs, z_src_act = self.separate_emb(z_src)
-        z_tgt_obs, _ = self.separate_emb(z_tgt)
-
-        z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (
-            t * z_tgt_obs["visual"]
+        noise = (
+            self.sigma_min # if 0, then simplifies to rectified flows
+            * torch.sqrt(t * (1 - t))
+            * torch.randn_like(z_tgt, device=z_src.device)
         )
-        z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
+        target = target + ((1 - 2 * t) / (2 * t * (1 - t))) * noise
 
-        z_t = self.merge_emb(z_src_obs, z_src_act)
+        z_t = z_src.clone()
+        z_t[..., :-self.action_dim] = (1.0 - t) * z_src[..., :-self.action_dim] + (t * z_tgt[..., :-self.action_dim]) + noise[..., : -self.action_dim]
+        
+        # interpolation
+        # z_src_obs, z_src_act = self.separate_emb(z_src)
+        # z_tgt_obs, _ = self.separate_emb(z_tgt)
+
+        # z_src_obs["visual"] = (
+        #     (1.0 - t) * z_src_obs["visual"]
+        #     + (t * z_tgt_obs["visual"])
+        #     + noise[..., : -(self.proprio_dim + self.action_dim)]
+        # )
+        # print(f"z_src_obs['proprio'] shape: {z_src_obs['proprio'].shape}")
+        # print(f"noise shape: {noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim].shape}")
+
+        # z_src_obs["proprio"] = (
+        #     (1.0 - t.squeeze(-1)) * z_src_obs["proprio"]
+        #     + (t.squeeze(-1) * z_tgt_obs["proprio"])
+        #     + noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim]
+        # )
+
+        # z_t = self.merge_emb(z_src_obs, z_src_act)
 
         return target.contiguous(), z_t.contiguous(), t.view(t.size(0), 1), dt.view(dt.size(0), 1)
 
@@ -587,7 +609,7 @@ class FlowMatchingModel(nn.Module):
         b_2 = (self.predict(z_prime, t + dt * 0.5, dt * 0.5) - z_prime) / (
             1.0 - (t + dt * 0.5)
         )[:, None, None]
-        
+
         z_hat = self.predict(z, t, dt)
         shortcut_tgt = (b_1.detach() + b_2.detach()) / 2
         mask = (dt.squeeze() == (1.0 / self.K))

@@ -16,3 +16,4 @@ l2_reg_lambda: 0.0
 tgt_type: "delta"
 use_shortcut_loss: False
 use_delta_tau: False
+sigma_min: 0.0
