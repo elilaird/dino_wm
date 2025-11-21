@@ -194,7 +194,7 @@ class FlowMatchingModel(nn.Module):
         if self.use_delta_tau:
             assert delta_tau is not None, "delta_tau must be provided if use_delta_tau is True"
         assert tau is not None, "tau must be provided"
-            
+
         T = z.shape[1]
         # reshape to a batch of windows of inputs
         z = rearrange(z, "b t p d -> b (t p) d")
@@ -296,7 +296,6 @@ class FlowMatchingModel(nn.Module):
             * delta_tau
         )
         return delta_tau, taus
-        
 
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
@@ -364,6 +363,10 @@ class FlowMatchingModel(nn.Module):
             shortcut_loss = self.shortcut_loss_delta(z_src, target, t, dt, data_norm=z_norm)
             z_flow_loss = z_flow_loss + shortcut_loss
             loss_components["shortcut_loss"] = shortcut_loss
+        elif self.use_shortcut_loss and self.tgt_type == "data":
+            shortcut_loss = self.shortcut_loss_data(z_src, target, t, dt, data_norm=z_norm)
+            z_flow_loss = z_flow_loss + shortcut_loss
+            loss_components["shortcut_loss"] = shortcut_loss
 
         pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)
         target_norm = torch.norm(target[:, :, :, : -(self.action_dim)].detach(), dim=-1)
@@ -371,15 +374,16 @@ class FlowMatchingModel(nn.Module):
         l2_reg_loss = self.l2_reg_lambda * torch.nn.functional.l1_loss(pred_norm, target_norm.detach())
         z_flow_loss = z_flow_loss + l2_reg_loss
 
-
         loss_components["pred_norm"] = pred_norm.mean()
         loss_components["target_norm"] = target_norm.mean()
         loss_components["l2_reg_loss"] = l2_reg_loss
 
-        if self.integrate_in_loss:
+        if self.integrate_in_loss and self.tgt_type == "delta":
             z_pred = self.inference(z_src, data_norm=z_norm)
-        else:
+        elif self.tgt_type == "delta":
             z_pred = self.delta_step(z_src, z_flow, torch.ones_like(dt, device=z_src.device), data_norm=z_norm)
+        else:
+            z_pred = z_flow
 
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
@@ -529,7 +533,11 @@ class FlowMatchingModel(nn.Module):
         tau = torch.zeros(z.size(0), 1, device=z.device)
 
         def euler_step(z, tau, dt):
-            z_delta = self.predict(z, tau, delta_tau=dt)
+            z_pred = self.predict(z, tau, delta_tau=dt)
+            if self.tgt_type == "data":
+                z_delta = (z_pred - z) / (1.0 - tau)
+            else:
+                z_delta = z_pred
             z = self.delta_step(z, z_delta, dt, data_norm=data_norm)
             tau = tau + dt
             return z, tau
@@ -540,27 +548,9 @@ class FlowMatchingModel(nn.Module):
 
         return z
 
-    def heun_forward(self, z, K=1, data_norm=1.0):
-        h = 1.0 / K
-        tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
-        delta_tau = torch.full_like(tau, h, device=z.device) if self.use_delta_tau else None
-
-        for _ in range(K):
-            z_delta = self.predict(z, tau, delta_tau=delta_tau)
-            z_pred = self.delta_step(z, z_delta, h, data_norm=data_norm)
-            z_delta_half = self.predict(z_pred, (tau + h), delta_tau=delta_tau)
-            z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + 0.5 * h * (z_delta[..., :-(self.action_dim)] + z_delta_half[..., :-(self.action_dim)])
-            tau = tau + h
-        return z
-
     def inference(self, z, data_norm=1.0):
-        z = z.clone()
-        if self.integrator == "euler":
-            return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
-        elif self.integrator == "heun":
-            return self.heun_forward(z, K=self.K, data_norm=data_norm)
-        else:
-            raise ValueError(f"Invalid integrator: {self.integrator}")
+        z = z.clone()    
+        return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
 
     def estimate_lipschitz(self, z_pred, z_tgt):
         src = z_pred.clone()
@@ -590,5 +580,20 @@ class FlowMatchingModel(nn.Module):
         loss = self.emb_criterion(z_hat[..., :-(self.action_dim)], shortcut_tgt[..., :-(self.action_dim)])
         return loss
 
+    def shortcut_loss_data(self, z, target, t, dt, data_norm=1.0):
+        target = target.clone()
+        b_1 = (self.predict(z, t, dt * 0.5) - z) / (1.0 - t)[:, None, None]
+        z_prime = self.delta_step(z, b_1, dt * 0.5, data_norm=data_norm)        
+        b_2 = (self.predict(z_prime, t + dt * 0.5, dt * 0.5) - z_prime) / (
+            1.0 - (t + dt * 0.5)
+        )[:, None, None]
+        
+        z_hat = self.predict(z, t, dt)
+        shortcut_tgt = (b_1.detach() + b_2.detach()) / 2
+        mask = (dt.squeeze() == (1.0 / self.K))
+        shortcut_tgt[mask] = target[mask].detach() # dt_min loss: MSE(z_hat, z_tgt)
+        z_hat[~mask] = (z_hat[~mask] - z[~mask]) / (1.0 - t[~mask])[:, None, None] # shortcut loss: MSE(z_hat - z, (b1 + b2) / 2)
 
-
+        loss = torch.nn.functional.mse_loss(z_hat[..., :-(self.action_dim)], shortcut_tgt[..., :-(self.action_dim)], reduction="none")
+        loss[~mask] = loss[~mask] * (1.0 - t[~mask][:, None, None])**2
+        return loss.mean()
