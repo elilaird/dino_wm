@@ -363,12 +363,14 @@ class FlowMatchingModel(nn.Module):
         if self.use_shortcut_loss and self.tgt_type == "delta":
             shortcut_loss = self.shortcut_loss_delta(z_src, target, t, dt, data_norm=z_norm)
             z_flow_loss = z_flow_loss + shortcut_loss
+            loss_components["shortcut_loss"] = shortcut_loss
 
         pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)
         target_norm = torch.norm(target[:, :, :, : -(self.action_dim)].detach(), dim=-1)
 
         l2_reg_loss = self.l2_reg_lambda * torch.nn.functional.l1_loss(pred_norm, target_norm.detach())
         z_flow_loss = z_flow_loss + l2_reg_loss
+
 
         loss_components["pred_norm"] = pred_norm.mean()
         loss_components["target_norm"] = target_norm.mean()
