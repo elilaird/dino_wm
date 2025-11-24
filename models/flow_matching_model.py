@@ -321,10 +321,11 @@ class FlowMatchingModel(nn.Module):
 
         noise = (
             self.sigma_min # if 0, then simplifies to rectified flows
-            * torch.sqrt(t * (1 - t))
+            * (t * (1 - t))
             * torch.randn_like(z_tgt, device=z_src.device)
         )
-        target = target + ((1 - 2 * t) / (2 * t * (1 - t))) * noise
+        if self.sigma_min > 0:
+            target = target + ((1 - 2 * t) * noise)
 
         z_t = z_src.clone()
         z_t[..., :-self.action_dim] = (1.0 - t) * z_src[..., :-self.action_dim] + (t * z_tgt[..., :-self.action_dim]) + noise[..., : -self.action_dim]
@@ -336,15 +337,15 @@ class FlowMatchingModel(nn.Module):
         # z_src_obs["visual"] = (
         #     (1.0 - t) * z_src_obs["visual"]
         #     + (t * z_tgt_obs["visual"])
-        #     + noise[..., : -(self.proprio_dim + self.action_dim)]
+        #     # + noise[..., : -(self.proprio_dim + self.action_dim)]
         # )
-        # print(f"z_src_obs['proprio'] shape: {z_src_obs['proprio'].shape}")
-        # print(f"noise shape: {noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim].shape}")
+        # # print(f"z_src_obs['proprio'] shape: {z_src_obs['proprio'].shape}")
+        # # print(f"noise shape: {noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim].shape}")
 
         # z_src_obs["proprio"] = (
         #     (1.0 - t.squeeze(-1)) * z_src_obs["proprio"]
         #     + (t.squeeze(-1) * z_tgt_obs["proprio"])
-        #     + noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim]
+        #     # + noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim]
         # )
 
         # z_t = self.merge_emb(z_src_obs, z_src_act)
