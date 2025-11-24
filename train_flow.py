@@ -190,14 +190,11 @@ class Trainer:
             # Try to get SLURM job ID, fallback to readable datetime
             slurm_job_id = os.environ.get("SLURM_JOB_ID")
             wandb_run_id = f"dino_wm_{slurm_job_id}"
-            resume_from = None
             if os.path.exists("hydra.yaml"):
                 existing_cfg = OmegaConf.load("hydra.yaml")
                 wandb_run_id = existing_cfg["wandb_run_id"]
                 log.info(f"Resuming Wandb run {wandb_run_id}")
-                if self.cfg.resume_step is not None:
-                    resume_from=f'{wandb_run_id}?_step={self.cfg.resume_step}'
-                
+       
 
             wandb_dict = OmegaConf.to_container(cfg, resolve=True)
             run_name = "{}".format(model_name) + f"_{slurm_job_id}"
@@ -209,7 +206,7 @@ class Trainer:
                     project="dino_wm_debug",
                     config=wandb_dict,
                     id=wandb_run_id,
-                    resume="allow" if self.cfg.resume_step is None else None,
+                    resume="allow",
                     name=run_name,
                 )
             else:
@@ -217,9 +214,8 @@ class Trainer:
                     project="dino_flow_matching",
                     config=wandb_dict,
                     id=wandb_run_id,
-                    resume="allow" if self.cfg.resume_step is None else None,
+                    resume="allow",
                     name=run_name,
-                    resume_from=resume_from,
                 )
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
