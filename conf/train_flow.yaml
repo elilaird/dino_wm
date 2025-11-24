@@ -9,6 +9,7 @@ defaults:
   - model: flow_model
   - aux_predictor: retention
 
+resume_step: null
 dry_run: False
 debug: False 
 
