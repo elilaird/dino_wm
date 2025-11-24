@@ -209,7 +209,7 @@ class Trainer:
                     project="dino_wm_debug",
                     config=wandb_dict,
                     id=wandb_run_id,
-                    resume="allow",
+                    resume="allow" if self.cfg.resume_step is None else None,
                     name=run_name,
                 )
             else:
@@ -217,7 +217,7 @@ class Trainer:
                     project="dino_flow_matching",
                     config=wandb_dict,
                     id=wandb_run_id,
-                    resume="allow",
+                    resume="allow" if self.cfg.resume_step is None else None,
                     name=run_name,
                     resume_from=resume_from,
                 )
