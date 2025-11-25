@@ -558,7 +558,7 @@ class FlowMatchingModel(nn.Module):
         def euler_step(z, tau, dt):
             z_pred = self.predict(z, tau, delta_tau=dt)
             if self.tgt_type == "data":
-                z_delta = (z_pred - z) / (1.0 - tau)
+                z_delta = (z_pred - z) / (1.0 - tau.squeeze().view(-1, 1, 1, 1))
             else:
                 z_delta = z_pred
             z = self.delta_step(z, z_delta, dt, data_norm=data_norm)
