@@ -11,7 +11,7 @@ from models.encoder.resnet import ResNetSmallTokens
 class FlowMatchingModel(nn.Module):
     def __init__(
         self,
-        image_size,  # 224
+        image_size,  
         num_hist,
         num_pred,
         encoder,
@@ -28,15 +28,6 @@ class FlowMatchingModel(nn.Module):
         train_predictor=False,
         train_decoder=True,
         decoder_loss_type='mse',
-        step_size=1,
-        use_cls_token=False,
-        aux_predictor=None,
-        per_window_ret_frames=2, # number of frames to cache for retention
-        ret_loss_weight=1.0,
-        max_retention_cache_size=10,
-        input_type="causal",
-        interpolation_type="linear",
-        sigma0=0.1,
         K=1,
         normalize_flow=False,
         normalize_target=False,
@@ -44,7 +35,11 @@ class FlowMatchingModel(nn.Module):
         use_pred_loss=True,
         integrator="euler",
         l2_reg_lambda=0.0,
-        use_discrete_tau=False,
+        clamp_tau=1e-6,
+        tgt_type="delta",
+        use_shortcut_loss=False,
+        use_delta_tau=False,
+        sigma_min=0.0,
         **kwargs,
     ):
         super().__init__()
@@ -63,15 +58,6 @@ class FlowMatchingModel(nn.Module):
         self.proprio_dim = proprio_dim * num_proprio_repeat 
         self.action_dim = action_dim * num_action_repeat
         self.decoder_loss_type = decoder_loss_type 
-        self.step_size = step_size
-        self.use_cls_token = use_cls_token
-        self.aux_predictor = aux_predictor
-        self.per_window_ret_frames = per_window_ret_frames
-        self.ret_loss_weight = ret_loss_weight
-        self.max_retention_cache_size = max_retention_cache_size
-        self.input_type = input_type
-        self.interpolation_type = interpolation_type
-        self.sigma0 = sigma0
         self.K = K
         self.normalize_flow = normalize_flow
         self.normalize_target = normalize_target
@@ -79,8 +65,15 @@ class FlowMatchingModel(nn.Module):
         self.use_pred_loss = use_pred_loss
         self.integrator = integrator
         self.l2_reg_lambda = l2_reg_lambda
-        self.use_discrete_tau = use_discrete_tau
-        self.clamp_tau = 1e-6
+        self.clamp_tau = clamp_tau
+        self.tgt_type = tgt_type
+        self.use_shortcut_loss = use_shortcut_loss
+        self.use_delta_tau = use_delta_tau
+        self.sigma_min = sigma_min
+
+        assert tgt_type == "delta" or tgt_type == "data", f"Invalid tgt type: {tgt_type}"
+        if self.use_shortcut_loss:
+            assert self.use_delta_tau, "Shortcut loss requires delta tau"
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -119,9 +112,6 @@ class FlowMatchingModel(nn.Module):
             self.decoder_criterion = nn.MSELoss()
         print(f"Decoder loss type: {self.decoder_criterion}")
 
-        if self.aux_predictor is not None:
-            self.aux_predictor_criterion = nn.MSELoss()
-
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
 
@@ -135,8 +125,6 @@ class FlowMatchingModel(nn.Module):
         self.action_encoder.train(mode)
         if self.decoder is not None and self.train_decoder:
             self.decoder.train(mode)
-        if self.aux_predictor is not None:
-            self.aux_predictor.train(mode)
 
     def eval(self):
         super().eval()
@@ -147,8 +135,6 @@ class FlowMatchingModel(nn.Module):
         self.action_encoder.eval()
         if self.decoder is not None:
             self.decoder.eval()
-        if self.aux_predictor is not None:
-            self.aux_predictor.eval()
 
     def encode(self, obs, act): 
         """
@@ -202,32 +188,27 @@ class FlowMatchingModel(nn.Module):
         z = torch.cat([normalized_latent, z[..., -(self.action_dim):]], dim=-1)
         return z
 
-    def scale_stddev(self, z):
-        latent = z[..., :-(self.action_dim)]
-        latent_var = latent.var(dim=-1, keepdim=True)
-        scaled_latent = latent / torch.sqrt(latent_var)
-        z = torch.cat([scaled_latent, z[..., -(self.action_dim):]], dim=-1)
-        return z
-
-    def predict(self, z, tau=None):  # in embedding space
+    def predict(self, z, tau, delta_tau=None): 
         """
         input : z: (b, num_hist, num_patches, emb_dim)
         output: z: (b, num_hist, num_patches, emb_dim)
         """
+        if self.use_delta_tau:
+            assert delta_tau is not None, "delta_tau must be provided if use_delta_tau is True"
+        assert tau is not None, "tau must be provided"
+
         T = z.shape[1]
         # reshape to a batch of windows of inputs
         z = rearrange(z, "b t p d -> b (t p) d")
         # (b, num_hist * num_patches per img, emb_dim)
-        if tau is not None:
-            z, _ = self.predictor(z, tau)
+        if self.use_delta_tau:
+            z, _ = self.predictor(z, tau, delta_tau=delta_tau)
         else:
-            z, _ = self.predictor(z)
+            z, _ = self.predictor(z, tau)
+
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
 
         return z.contiguous()
-
-    def predict_aux(self, ctx):
-        pass
 
     def decode(self, z):
         """
@@ -245,9 +226,6 @@ class FlowMatchingModel(nn.Module):
         """
         b, num_frames, num_patches, emb_dim = z_obs["visual"].shape
         z = {k: v.clone() for k, v in z_obs.items()}
-        if self.use_cls_token:
-            # remove cls token
-            z["visual"] = z["visual"][:, :, 1:, :]
         visual, diff = self.decoder(z["visual"])  # (b*num_frames, 3, 224, 224)
         visual = rearrange(visual, "(b t) c h w -> b t c h w", t=num_frames)
         obs = {
@@ -306,40 +284,73 @@ class FlowMatchingModel(nn.Module):
             )  # (b, num_frames, num_patches, dim + action_dim)
         return z
 
+    def sample_tau(self, batch_size, steps):
+        steps_log2 = int(torch.log2(torch.tensor(steps))) + 1
+        pw2_steps = 2 ** torch.arange(0, steps_log2)
+
+        delta_taus = 1.0 / pw2_steps
+        delta_tau = delta_taus[torch.randint(0, len(delta_taus), (batch_size,))]
+
+        taus = (
+            torch.floor(
+                torch.rand(batch_size, device=delta_tau.device) / delta_tau
+            )
+            * delta_tau
+        )
+        return delta_tau, taus
+
     @torch.no_grad()
     def get_target_flow(self, z_src, z_tgt):
         z_src = z_src.clone()
-        delta = z_tgt - z_src
+
+        if self.tgt_type == "delta":
+            target = z_tgt - z_src
+        elif self.tgt_type == "data":
+            target = z_tgt
 
         if self.normalize_target:
-            delta = self.normalize(delta)
+            target = self.normalize(target)
 
-        if self.use_discrete_tau:
-            t = torch.arange(0, 1.0, 1.0 / self.K, device=z_src.device)
-            t = t.unsqueeze(0).repeat(z_src.size(0) // self.K, 1).flatten().view(-1, 1, 1, 1)
-            t = torch.clamp(t, self.clamp_tau, 1.0 - self.clamp_tau)
+        if self.use_delta_tau:
+            dt, t = self.sample_tau(z_src.size(0), self.K)
+            dt = dt.to(z_src.device)
+            t = t.view(-1, 1, 1, 1).to(z_src.device)
         else:
             t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
-            t = torch.clamp(t, self.clamp_tau, 1.0 - self.clamp_tau)
+            dt = torch.full_like(t, 1.0 / self.K, device=z_src.device)
 
-        if self.input_type == "causal":
-            z_t = z_src
+        noise = (
+            self.sigma_min # if 0, then simplifies to rectified flows
+            * (t * (1 - t))
+            * torch.randn_like(z_tgt, device=z_src.device)
+        )
+        if self.sigma_min > 0:
+            target = target + ((1 - 2 * t) * noise)
 
+        z_t = z_src.clone()
+        z_t[..., :-self.action_dim] = (1.0 - t) * z_src[..., :-self.action_dim] + (t * z_tgt[..., :-self.action_dim]) + noise[..., : -self.action_dim]
+        
         # interpolation
-        elif self.input_type == "interp":
-            z_src_obs, z_src_act = self.separate_emb(z_src)
-            z_tgt_obs, _ = self.separate_emb(z_tgt)
+        # z_src_obs, z_src_act = self.separate_emb(z_src)
+        # z_tgt_obs, _ = self.separate_emb(z_tgt)
 
-            z_src_obs["visual"] = (1.0 - t) * z_src_obs["visual"] + (
-                t * z_tgt_obs["visual"]
-            )
-            z_src_obs["proprio"] = (1.0 - t.squeeze(-1)) * z_src_obs["proprio"] + (t.squeeze(-1) * z_tgt_obs["proprio"])
+        # z_src_obs["visual"] = (
+        #     (1.0 - t) * z_src_obs["visual"]
+        #     + (t * z_tgt_obs["visual"])
+        #     # + noise[..., : -(self.proprio_dim + self.action_dim)]
+        # )
+        # # print(f"z_src_obs['proprio'] shape: {z_src_obs['proprio'].shape}")
+        # # print(f"noise shape: {noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim].shape}")
 
-            z_t = self.merge_emb(z_src_obs, z_src_act)
-        else:
-            raise ValueError(f"Invalid input type: {self.input_type}")
+        # z_src_obs["proprio"] = (
+        #     (1.0 - t.squeeze(-1)) * z_src_obs["proprio"]
+        #     + (t.squeeze(-1) * z_tgt_obs["proprio"])
+        #     # + noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim]
+        # )
 
-        return delta.contiguous(), z_t.contiguous(), t.view(t.size(0), 1)
+        # z_t = self.merge_emb(z_src_obs, z_src_act)
+
+        return target.contiguous(), z_t.contiguous(), t.view(t.size(0), 1), dt.view(dt.size(0), 1)
 
     def forward(self, obs, act, aux_obs=None):
         """
@@ -357,37 +368,45 @@ class FlowMatchingModel(nn.Module):
 
         z_norm = torch.norm(z[:, :, :, : -(self.proprio_dim + self.action_dim)], dim=-1).mean()
 
-        if self.use_discrete_tau:
-            z = z.repeat_interleave(self.K, dim=0)
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
         visual_tgt = obs["visual"][
             :, self.num_pred :, ...
         ]  # (b, num_hist, 3, img_size, img_size)
-        if self.use_discrete_tau:
-            visual_tgt = visual_tgt.repeat_interleave(self.K, dim=0)
-            obs = {k: v.repeat_interleave(self.K, dim=0) for k, v in obs.items()}
 
         # target flow is Enc(x_t) - Enc(x_{t-1})
-        delta, z_t, t = self.get_target_flow(z_src, z_tgt)
+        target, z_t, t, dt = self.get_target_flow(z_src, z_tgt)
 
-        z_flow = self.predict(z_t, t)
-        z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], delta[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
+        # flow matching loss
+        z_flow = self.predict(z_t, t, delta_tau=dt if self.use_delta_tau else None)
+        z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], target[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
-        pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)#.mean()
-        delta_norm = torch.norm(delta[:, :, :, : -(self.action_dim)].detach(), dim=-1)#.mean()
+        # shortcut loss
+        if self.use_shortcut_loss and self.tgt_type == "delta":
+            shortcut_loss = self.shortcut_loss_delta(z_src, target, t, dt, data_norm=z_norm)
+            z_flow_loss = z_flow_loss + shortcut_loss
+            loss_components["shortcut_loss"] = shortcut_loss
+        elif self.use_shortcut_loss and self.tgt_type == "data":
+            shortcut_loss = self.shortcut_loss_data(z_src, target, t, dt, data_norm=z_norm)
+            z_flow_loss = z_flow_loss + shortcut_loss
+            loss_components["shortcut_loss"] = shortcut_loss
 
-        l2_reg_loss = self.l2_reg_lambda * torch.nn.functional.l1_loss(pred_norm, delta_norm.detach())
+        pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)
+        target_norm = torch.norm(target[:, :, :, : -(self.action_dim)].detach(), dim=-1)
+
+        l2_reg_loss = self.l2_reg_lambda * torch.nn.functional.l1_loss(pred_norm, target_norm.detach())
         z_flow_loss = z_flow_loss + l2_reg_loss
 
         loss_components["pred_norm"] = pred_norm.mean()
-        loss_components["delta_norm"] = delta_norm.mean()
+        loss_components["target_norm"] = target_norm.mean()
         loss_components["l2_reg_loss"] = l2_reg_loss
 
-        if self.integrate_in_loss:
+        if self.integrate_in_loss and self.tgt_type == "delta":
             z_pred = self.inference(z_src, data_norm=z_norm)
+        elif self.tgt_type == "delta":
+            z_pred = self.delta_step(z_src, z_flow, torch.ones_like(dt, device=z_src.device), data_norm=z_norm)
         else:
-            z_pred = self.delta_step(z_src, z_flow, 1.0, data_norm=z_norm)
+            z_pred = z_flow
 
         z_visual_loss = self.emb_criterion(
             z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
@@ -513,65 +532,48 @@ class FlowMatchingModel(nn.Module):
 
         return z_obses, z
 
-    def delta_step(self, z, delta, h=1.0, data_norm=1.0):
+    def delta_step(self, z, delta, dt, data_norm=1.0):
+        if dt.ndim > 1:
+            dt = dt.clone().squeeze().view(-1, 1, 1, 1)
+
         z_new = z.clone()
-        z_new[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + h * delta[..., :-(self.action_dim)]
+        z_new[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + dt * delta[..., :-(self.action_dim)]
         if self.normalize_flow:
             z_new = self.normalize(z_new, data_norm)
         return z_new
 
     def euler_forward(self, z, K=1, data_norm=1.0):
-        h = 1.0 / K
-        # tau = torch.zeros(z_src.size(0), 1, device=z_src.device)
-        tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
+        dt = 1.0 / K * torch.ones(z.size(0), 1, device=z.device)
+        tau = torch.zeros(z.size(0), 1, device=z.device)
         for _ in range(K):
             z_delta = self.predict(z, tau)
-            z = self.delta_step(z, z_delta, h, data_norm=data_norm)
-            tau = tau + h
+            z = self.delta_step(z, z_delta, dt, data_norm=data_norm)
+            tau = tau + dt
         return z
 
     def euler_forward_ckpt(self, z, K=1, data_norm=1.0):
-        h = 1.0 / K
-        tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
+        dt = 1.0 / K * torch.ones(z.size(0), 1, device=z.device)
+        tau = torch.zeros(z.size(0), 1, device=z.device)
 
-        def euler_step(z, tau):
-            z_delta = self.predict(z, tau)
-            z = self.delta_step(z, z_delta, h, data_norm=data_norm)
-            tau = tau + h
+        def euler_step(z, tau, dt):
+            z_pred = self.predict(z, tau, delta_tau=dt)
+            if self.tgt_type == "data":
+                z_delta = (z_pred - z) / (1.0 - tau)
+            else:
+                z_delta = z_pred
+            z = self.delta_step(z, z_delta, dt, data_norm=data_norm)
+            tau = tau + dt
             return z, tau
         for _ in range(K):
             z, tau = checkpoint.checkpoint(
-                euler_step, z, tau, use_reentrant=False
+                euler_step, z, tau, dt, use_reentrant=False
             )
 
         return z
 
-    def heun_forward(self, z, K=1, data_norm=1.0):
-        h = 1.0 / K
-        tau = torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau
-        for _ in range(K):
-            z_delta = self.predict(z, tau)
-            z_pred = self.delta_step(z, z_delta, h, data_norm=data_norm)
-            z_delta_half = self.predict(z_pred, (tau+h))
-            z[..., :-(self.action_dim)] = z[..., :-(self.action_dim)] + 0.5 * h * (z_delta[..., :-(self.action_dim)] + z_delta_half[..., :-(self.action_dim)])
-            tau = tau + h
-        return z
-
     def inference(self, z, data_norm=1.0):
-        z = z.clone()
-        if self.input_type == "causal":
-            delta = self.predict(z, torch.ones(z.size(0), 1, device=z.device) * self.clamp_tau)
-            z = self.delta_step(z, delta, 1.0, data_norm=data_norm)
-            return z
-        elif self.input_type == "interp":
-            if self.integrator == "euler":
-                return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
-            elif self.integrator == "heun":
-                return self.heun_forward(z, K=self.K, data_norm=data_norm)
-            else:
-                raise ValueError(f"Invalid integrator: {self.integrator}")
-        else:
-            raise ValueError(f"Invalid inference type: {self.input_type}")
+        z = z.clone()    
+        return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
 
     def estimate_lipschitz(self, z_pred, z_tgt):
         src = z_pred.clone()
@@ -586,3 +588,35 @@ class FlowMatchingModel(nn.Module):
             "mean_bound": torch.mean(lipschitz_bound, dim=1),
             "max_bound": torch.amax(lipschitz_bound, dim=1),
         }
+
+    def shortcut_loss_delta(self, z, target, t, dt, data_norm=1.0):
+        target = target.clone()
+        b_1 = self.predict(z, t, dt * 0.5) 
+        z_prime = self.delta_step(z, b_1, dt * 0.5, data_norm=data_norm)
+        b_2 = self.predict(z_prime, t + dt * 0.5, dt * 0.5)
+        z_hat = self.predict(z, t, dt)
+        shortcut_tgt = (b_1.detach() + b_2.detach()) / 2
+
+        mask = (dt.squeeze() == (1.0 / self.K))
+        shortcut_tgt[mask] = target[mask].detach()
+
+        loss = self.emb_criterion(z_hat[..., :-(self.action_dim)], shortcut_tgt[..., :-(self.action_dim)])
+        return loss
+
+    def shortcut_loss_data(self, z, target, t, dt, data_norm=1.0):
+        target = target.clone()
+        b_1 = (self.predict(z, t, dt * 0.5) - z) / (1.0 - t)[:, None, None]
+        z_prime = self.delta_step(z, b_1, dt * 0.5, data_norm=data_norm)        
+        b_2 = (self.predict(z_prime, t + dt * 0.5, dt * 0.5) - z_prime) / (
+            1.0 - (t + dt * 0.5)
+        )[:, None, None]
+
+        z_hat = self.predict(z, t, dt)
+        shortcut_tgt = (b_1.detach() + b_2.detach()) / 2
+        mask = (dt.squeeze() == (1.0 / self.K))
+        shortcut_tgt[mask] = target[mask].detach() # dt_min loss: MSE(z_hat, z_tgt)
+        z_hat[~mask] = (z_hat[~mask] - z[~mask]) / (1.0 - t[~mask])[:, None, None] # shortcut loss: MSE(z_hat - z, (b1 + b2) / 2)
+
+        loss = torch.nn.functional.mse_loss(z_hat[..., :-(self.action_dim)], shortcut_tgt[..., :-(self.action_dim)], reduction="none")
+        loss[~mask] = loss[~mask] * (1.0 - t[~mask][:, None, None])**2
+        return loss.mean()

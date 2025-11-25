@@ -4852,8 +4852,9 @@ class ViTConditionalPredictor(ViTPredictor):
         time_embed_dim=128,
         time_embed_n_freq=32,
         time_embed_sigma=1.0,
+        use_delta_tau=False,
     ):
-        dim = dim + time_embed_dim
+        dim = dim + time_embed_dim + (time_embed_dim if use_delta_tau else 0)
         self.dim = dim
         super().__init__(
             num_patches=num_patches,
@@ -4864,10 +4865,16 @@ class ViTConditionalPredictor(ViTPredictor):
             mlp_dim=mlp_dim,
             pool=pool,
         )
-        self.norm_out = nn.LayerNorm(dim - time_embed_dim)
-        self.time_embed_dim = time_embed_dim
+        self.norm_out = nn.LayerNorm(dim - time_embed_dim - (time_embed_dim if use_delta_tau else 0))
+        self.time_embed_dim = time_embed_dim + (time_embed_dim if use_delta_tau else 0)
+        self.use_delta_tau = use_delta_tau
         self.num_patches = num_patches
         self.time_embed = TimestepRFF(dim=time_embed_dim, m=time_embed_n_freq, sigma=time_embed_sigma)
+        if use_delta_tau:
+            self.delta_tau_embed = TimestepRFF(dim=time_embed_dim, m=time_embed_n_freq, sigma=time_embed_sigma)
+        else:
+            self.delta_tau_embed = None
+
         self.transformer = nn.ModuleList([])
         for _ in range(depth):
             self.transformer.append(nn.ModuleList([
@@ -4875,7 +4882,10 @@ class ViTConditionalPredictor(ViTPredictor):
                 FeedForward(dim, mlp_dim, dropout),
             ]))
 
-    def forward(self, x, tau=None):
+    def forward(self, x, tau=None, delta_tau=None):
+        if self.use_delta_tau:
+            assert delta_tau is not None, "delta_tau must be provided if use_delta_tau is True"
+            
         b, n, _ = x.shape
         x = rearrange(x, "b (t p) d -> b t p d", p=self.num_patches)
 
@@ -4883,10 +4893,18 @@ class ViTConditionalPredictor(ViTPredictor):
             tau = self.time_embed(tau)
             tau_tiled = repeat(tau[:, None, None, :], "b 1 1 d -> b t p d", t=x.shape[1], p=self.num_patches)
         else:
-            tau_tiled = torch.zeros(b, x.shape[1], self.num_patches, self.time_embed_dim, device=x.device)
+            # tau_tiled = torch.zeros(b, x.shape[1], self.num_patches, self.time_embed_dim, device=x.device)
+            tau_tiled = torch.tensor([], device=x.device)
+
+        if delta_tau is not None:
+            delta_tau = self.delta_tau_embed(delta_tau)
+            delta_tau_tiled = repeat(delta_tau[:, None, None, :], "b 1 1 d -> b t p d", t=x.shape[1], p=self.num_patches)
+        else:
+            # delta_tau_tiled = torch.zeros(b, x.shape[1], self.num_patches, self.time_embed_dim, device=x.device)
+            delta_tau_tiled = torch.tensor([], device=x.device)
 
         x = torch.cat([
-            x, tau_tiled
+            x, tau_tiled, delta_tau_tiled
         ], dim=3)
         x = rearrange(x, "b t p d -> b (t p) d")
 
@@ -4896,7 +4914,7 @@ class ViTConditionalPredictor(ViTPredictor):
         for attn, ff in self.transformer:
             x = x + attn(x)
             x = x + ff(x)
-        
+
         out = x[:, :, :-self.time_embed_dim]
         return self.norm_out(out), None
 

@@ -194,6 +194,7 @@ class Trainer:
                 existing_cfg = OmegaConf.load("hydra.yaml")
                 wandb_run_id = existing_cfg["wandb_run_id"]
                 log.info(f"Resuming Wandb run {wandb_run_id}")
+       
 
             wandb_dict = OmegaConf.to_container(cfg, resolve=True)
             run_name = "{}".format(model_name) + f"_{slurm_job_id}"
@@ -1026,12 +1027,6 @@ class Trainer:
                 self.logs_update(time_logs)
 
             if self.cfg.has_decoder and plot:
-                if self.accelerator.unwrap_model(self.model).use_discrete_tau:
-                    obs_window = {
-                        k: v.repeat_interleave(self.accelerator.unwrap_model(self.model).K, dim=0)
-                        for k, v in obs_window.items()
-                    }
-
                 self.decoder_eval(i, obs_window, z_components)
 
             self.logs_update(
@@ -1104,12 +1099,7 @@ class Trainer:
                             value.mean().item() / num_windows
                         )
 
-            if self.cfg.has_decoder and i == 0 and self.decoder is not None:
-                if self.accelerator.unwrap_model(self.model).use_discrete_tau:
-                    obs_window = {
-                        k: v.repeat_interleave(self.accelerator.unwrap_model(self.model).K, dim=0)
-                        for k, v in obs_window.items()
-                    }
+            if self.cfg.has_decoder and i == 0 and self.decoder is not None:               
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     z_obs_out, _ = self.model.separate_emb(z_out)
@@ -1241,13 +1231,6 @@ class Trainer:
                         )
 
             if self.cfg.has_decoder and i == 0 and self.decoder is not None:
-                if self.accelerator.unwrap_model(self.model).use_discrete_tau:
-                    obs_window = {
-                        k: v.repeat_interleave(
-                            self.accelerator.unwrap_model(self.model).K, dim=0
-                        )
-                        for k, v in obs_window.items()
-                    }
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     z_obs_out, _ = self.model.separate_emb(z_out)
