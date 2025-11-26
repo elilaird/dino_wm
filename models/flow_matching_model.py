@@ -558,7 +558,7 @@ class FlowMatchingModel(nn.Module):
         def euler_step(z, tau, dt):
             z_pred = self.predict(z, tau, delta_tau=dt)
             if self.tgt_type == "data":
-                z_delta = (z_pred - z) / (1.0 - tau)
+                z_delta = (z_pred - z) / (1.0 - tau.squeeze().view(-1, 1, 1, 1))
             else:
                 z_delta = z_pred
             z = self.delta_step(z, z_delta, dt, data_norm=data_norm)
@@ -620,3 +620,72 @@ class FlowMatchingModel(nn.Module):
         loss = torch.nn.functional.mse_loss(z_hat[..., :-(self.action_dim)], shortcut_tgt[..., :-(self.action_dim)], reduction="none")
         loss[~mask] = loss[~mask] * (1.0 - t[~mask][:, None, None])**2
         return loss.mean()
+
+
+class TimeFlowMatchingModel(FlowMatchingModel):
+    def __init__(
+        self,
+        image_size,  
+        num_hist,
+        num_pred,
+        encoder,
+        proprio_encoder,
+        action_encoder,
+        decoder,
+        predictor,
+        proprio_dim=0,
+        action_dim=0,
+        concat_dim=0,
+        num_action_repeat=7,
+        num_proprio_repeat=7,
+        train_encoder=True,
+        train_predictor=False,
+        train_decoder=True,
+        decoder_loss_type='mse',
+        K=1,
+        normalize_flow=False,
+        normalize_target=False,
+        integrate_in_loss=False,
+        use_pred_loss=True,
+        integrator="euler",
+        l2_reg_lambda=0.0,
+        clamp_tau=1e-6,
+        tgt_type="delta",
+        use_shortcut_loss=False,
+        use_delta_tau=False,
+        sigma_min=0.0,
+        **kwargs,
+    ):
+        super().__init__(
+            image_size,
+            num_hist,
+            num_pred,
+            encoder,
+            proprio_encoder,
+            action_encoder,
+            decoder,
+            predictor,
+            proprio_dim,
+            action_dim,
+            concat_dim,
+            num_action_repeat,
+            num_proprio_repeat,
+            train_encoder,
+            train_predictor,
+            train_decoder,
+            decoder_loss_type,
+            K,
+            normalize_flow,
+            normalize_target,
+            integrate_in_loss,
+            use_pred_loss,
+            integrator,
+            l2_reg_lambda,
+            clamp_tau,
+            tgt_type,
+            use_shortcut_loss,
+            use_delta_tau,
+            sigma_min,
+        )
+
+        
