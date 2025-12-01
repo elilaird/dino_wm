@@ -1,9 +1,8 @@
-import math
 import torch
-from torch._C import parse_schema
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from torchvision import transforms
+from torchdiffeq import odeint, odeint_adjoint
 from einops import rearrange, repeat
 
 from models.encoder.resnet import ResNetSmallTokens
@@ -114,6 +113,11 @@ class FlowMatchingModel(nn.Module):
 
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
+
+        if self.integrator == "odeint" or self.integrator == "odeint_adjoint":
+            self.ode_wrapper = ODE_Wrapper(self.predictor, tgt_type=self.tgt_type, action_dim=self.action_dim)
+        else:
+            self.ode_wrapper = None
 
     def train(self, mode=True):
         super().train(mode)
@@ -401,7 +405,7 @@ class FlowMatchingModel(nn.Module):
         loss_components["target_norm"] = target_norm.mean()
         loss_components["l2_reg_loss"] = l2_reg_loss
 
-        if self.integrate_in_loss and self.tgt_type == "delta":
+        if self.integrate_in_loss:
             z_pred = self.inference(z_src, data_norm=z_norm)
         elif self.tgt_type == "delta":
             z_pred = self.delta_step(z_src, z_flow, torch.ones_like(dt, device=z_src.device), data_norm=z_norm)
@@ -571,9 +575,26 @@ class FlowMatchingModel(nn.Module):
 
         return z
 
+    def odeint_forward(self, z, K=1, data_norm=1.0):
+        t_span = torch.linspace(0, 1, K + 1, device=z.device)[:-1]
+        z_out = odeint(self.ode_wrapper, z, t_span, method="euler", options={"step_size": 1.0 / K})[-1]
+        return z_out
+
+    def odeint_adjoint_forward(self, z, K=1, data_norm=1.0):
+        t_span = torch.linspace(0, 1, K + 1, device=z.device)[:-1]
+        z_out = odeint_adjoint(self.ode_wrapper, z, t_span, method="euler", options={"step_size": 1.0 / K})[-1]
+        return z_out
+
     def inference(self, z, data_norm=1.0):
         z = z.clone()    
-        return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
+        if self.integrator == "euler":
+            return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
+        elif self.integrator == "odeint":
+            return self.odeint_forward(z, K=self.K, data_norm=data_norm)
+        elif self.integrator == "odeint_adjoint":
+            return self.odeint_adjoint_forward(z, K=self.K, data_norm=data_norm)
+        else:
+            raise ValueError(f"Invalid integrator: {self.integrator}")
 
     def estimate_lipschitz(self, z_pred, z_tgt):
         src = z_pred.clone()
@@ -608,6 +629,7 @@ class FlowMatchingModel(nn.Module):
         b_1 = (self.predict(z, t, dt * 0.5) - z) / (1.0 - t)[:, None, None]
         z_prime = self.delta_step(z, b_1, dt * 0.5, data_norm=data_norm)        
         b_2 = (self.predict(z_prime, t + dt * 0.5, dt * 0.5) - z_prime) / (
+            
             1.0 - (t + dt * 0.5)
         )[:, None, None]
 
@@ -620,3 +642,39 @@ class FlowMatchingModel(nn.Module):
         loss = torch.nn.functional.mse_loss(z_hat[..., :-(self.action_dim)], shortcut_tgt[..., :-(self.action_dim)], reduction="none")
         loss[~mask] = loss[~mask] * (1.0 - t[~mask][:, None, None])**2
         return loss.mean()
+
+
+class ODE_Wrapper(nn.Module):
+    def __init__(self, model, tgt_type, action_dim):
+        super().__init__()
+        self.model = model
+        self.tgt_type = tgt_type
+        self.action_dim = action_dim
+
+    def prepare(self, z, tau):
+        T = z.shape[1]
+        z = rearrange(z, "b t p d -> b (t p) d")
+        z, _ = self.model(z, tau)
+        z = rearrange(z, "b (t p) d -> b t p d", t=T)
+        return z
+
+    def forward(self, t, z):
+        B, F = z.shape[0], z.shape[1]        
+        if t.ndim < 1:
+            t = t.view(-1)
+
+        # repeat t
+        t = t.repeat(B, 1)
+
+        z_in = rearrange(z, "b f p d -> b (f p) d")
+        z_pred, _ = self.model(z_in, t)
+        z_pred = rearrange(z_pred, "b (f p) d -> b f p d", f=F)
+
+        if self.tgt_type == "data":
+            z_delta = (z_pred - z) / (1.0 - t.squeeze().view(-1, 1, 1, 1))
+        else:
+            z_delta = z_pred
+        
+        z_delta[..., -self.action_dim:] = 0.0 # keep actions the same
+
+        return z_delta
