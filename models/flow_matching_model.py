@@ -672,7 +672,7 @@ class ODE_Wrapper(nn.Module):
 
         z_in = rearrange(z, "b f p d -> b (f p) d")
         z_pred, _ = self.model(z_in, t)
-        z_pred = rearrange(z_pred, "b (f p) d -> b f p d", f=F)
+        z_pred = rearrange(z_pred, "b (f p) d -> b f p d", f=F).contiguous()
 
         if self.tgt_type == "data":
             z_delta = (z_pred - z) / (1.0 - t.squeeze().view(-1, 1, 1, 1))
