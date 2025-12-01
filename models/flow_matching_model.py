@@ -27,11 +27,11 @@ class FlowMatchingModel(nn.Module):
         train_predictor=False,
         train_decoder=True,
         decoder_loss_type='mse',
-        K=1,
+        K=4,
         normalize_flow=False,
         normalize_target=False,
         integrate_in_loss=False,
-        use_pred_loss=True,
+        use_pred_loss=False,
         integrator="euler",
         l2_reg_lambda=0.0,
         clamp_tau=1e-6,
@@ -336,26 +336,6 @@ class FlowMatchingModel(nn.Module):
 
         z_t = z_src.clone()
         z_t[..., :-self.action_dim] = (1.0 - t) * z_src[..., :-self.action_dim] + (t * z_tgt[..., :-self.action_dim]) + noise[..., : -self.action_dim]
-        
-        # interpolation
-        # z_src_obs, z_src_act = self.separate_emb(z_src)
-        # z_tgt_obs, _ = self.separate_emb(z_tgt)
-
-        # z_src_obs["visual"] = (
-        #     (1.0 - t) * z_src_obs["visual"]
-        #     + (t * z_tgt_obs["visual"])
-        #     # + noise[..., : -(self.proprio_dim + self.action_dim)]
-        # )
-        # # print(f"z_src_obs['proprio'] shape: {z_src_obs['proprio'].shape}")
-        # # print(f"noise shape: {noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim].shape}")
-
-        # z_src_obs["proprio"] = (
-        #     (1.0 - t.squeeze(-1)) * z_src_obs["proprio"]
-        #     + (t.squeeze(-1) * z_tgt_obs["proprio"])
-        #     # + noise[..., -(self.proprio_dim + self.action_dim) :-self.action_dim]
-        # )
-
-        # z_t = self.merge_emb(z_src_obs, z_src_act)
 
         return target.contiguous(), z_t.contiguous(), t.view(t.size(0), 1), dt.view(dt.size(0), 1)
 
@@ -681,11 +661,12 @@ class ODE_Wrapper(nn.Module):
         z_delta[..., -self.action_dim:] = 0.0 # keep actions the same
 
         return z_delta
-        
+
 class TimeFlowMatchingModel(FlowMatchingModel):
+
     def __init__(
         self,
-        image_size,  
+        image_size,
         num_hist,
         num_pred,
         encoder,
@@ -701,12 +682,12 @@ class TimeFlowMatchingModel(FlowMatchingModel):
         train_encoder=True,
         train_predictor=False,
         train_decoder=True,
-        decoder_loss_type='mse',
-        K=1,
+        decoder_loss_type="mse",
+        K=4,
         normalize_flow=False,
         normalize_target=False,
         integrate_in_loss=False,
-        use_pred_loss=True,
+        use_pred_loss=False,
         integrator="euler",
         l2_reg_lambda=0.0,
         clamp_tau=1e-6,
@@ -714,6 +695,8 @@ class TimeFlowMatchingModel(FlowMatchingModel):
         use_shortcut_loss=False,
         use_delta_tau=False,
         sigma_min=0.0,
+        integration_method="euler",
+        horizon_length=None,
         **kwargs,
     ):
         super().__init__(
@@ -746,6 +729,181 @@ class TimeFlowMatchingModel(FlowMatchingModel):
             use_shortcut_loss,
             use_delta_tau,
             sigma_min,
+            integration_method,
+        )
+        assert horizon_length is not None, "horizon_length must be provided"
+        self.horizon_length = horizon_length
+
+    @torch.no_grad()
+    def get_target_flow(self, z_src, z_tgt):
+        z_src = z_src.clone()
+
+        if self.tgt_type == "delta":
+            target = z_tgt - z_src
+        elif self.tgt_type == "data":
+            target = z_tgt
+
+        if self.normalize_target:
+            target = self.normalize(target)
+
+        if self.use_delta_tau:
+            dt, t = self.sample_tau(z_src.size(0), self.K)
+            dt = dt.to(z_src.device)
+            t = t.view(-1, 1, 1, 1).to(z_src.device)
+        else:
+            t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
+            dt = torch.full_like(t, 1.0 / self.K, device=z_src.device)
+
+        noise = (
+            self.sigma_min # if 0, then simplifies to rectified flows
+            * (t * (1 - t))
+            * torch.randn_like(z_tgt, device=z_src.device)
+        )
+        if self.sigma_min > 0:
+            target = target + ((1 - 2 * t) * noise)
+
+        z_t = z_src.clone()
+        z_t[..., :-self.action_dim] = (1.0 - t) * z_src[..., :-self.action_dim] + (t * z_tgt[..., :-self.action_dim]) + noise[..., : -self.action_dim]
+
+        return target.contiguous(), z_t.contiguous(), t.view(t.size(0), 1), dt.view(dt.size(0), 1)
+
+    def forward(self, obs, act, aux_obs=None):
+        """
+        input:  obs (dict):  "visual", "proprio" (b, num_frames, 3, img_size, img_size)
+                act: (b, num_frames, action_dim)
+                aux_obs: "visual", "proprio", "actions"
+        output: z_pred: (b, num_hist, num_patches, emb_dim)
+                visual_pred: (b, num_hist, 3, img_size, img_size)
+                visual_reconstructed: (b, num_frames, 3, img_size, img_size)
+        """
+        loss = 0
+        loss_components = {}
+
+        z = self.encode(obs, act)
+
+        z_norm = torch.norm(z[:, :, :, : -(self.proprio_dim + self.action_dim)], dim=-1).mean()
+
+        z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
+        z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
+        visual_tgt = obs["visual"][
+            :, self.num_pred :, ...
+        ]  # (b, num_hist, 3, img_size, img_size)
+
+        # target flow is Enc(x_t) - Enc(x_{t-1})
+        target, z_t, t, dt = self.get_target_flow(z_src, z_tgt)
+
+        # flow matching loss
+        z_flow = self.predict(z_t, t, delta_tau=dt if self.use_delta_tau else None)
+        z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], target[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
+
+        # shortcut loss
+        if self.use_shortcut_loss and self.tgt_type == "delta":
+            shortcut_loss = self.shortcut_loss_delta(z_src, target, t, dt, data_norm=z_norm)
+            z_flow_loss = z_flow_loss + shortcut_loss
+            loss_components["shortcut_loss"] = shortcut_loss
+        elif self.use_shortcut_loss and self.tgt_type == "data":
+            shortcut_loss = self.shortcut_loss_data(z_src, target, t, dt, data_norm=z_norm)
+            z_flow_loss = z_flow_loss + shortcut_loss
+            loss_components["shortcut_loss"] = shortcut_loss
+
+        pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)
+        target_norm = torch.norm(target[:, :, :, : -(self.action_dim)].detach(), dim=-1)
+
+        l2_reg_loss = self.l2_reg_lambda * torch.nn.functional.l1_loss(pred_norm, target_norm.detach())
+        z_flow_loss = z_flow_loss + l2_reg_loss
+
+        loss_components["pred_norm"] = pred_norm.mean()
+        loss_components["target_norm"] = target_norm.mean()
+        loss_components["l2_reg_loss"] = l2_reg_loss
+
+        if self.integrate_in_loss:
+            z_pred = self.inference(z_src, data_norm=z_norm)
+        elif self.tgt_type == "delta":
+            z_pred = self.delta_step(z_src, z_flow, torch.ones_like(dt, device=z_src.device), data_norm=z_norm)
+        else:
+            z_pred = z_flow
+
+        z_visual_loss = self.emb_criterion(
+            z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
+            z_tgt[:, :, :, : -(self.proprio_dim + self.action_dim)].detach(),
+        )
+        z_proprio_loss = self.emb_criterion(
+                    z_pred[
+                        :,
+                        :,
+                        :,
+                        -(
+                            self.proprio_dim + self.action_dim
+                        ) : -self.action_dim,
+                    ],
+                    z_tgt[
+                        :,
+                        :,
+                        :,
+                        -(
+                            self.proprio_dim + self.action_dim
+                        ) : -self.action_dim,
+                    ].detach(),
+                )
+        z_loss = self.emb_criterion(
+            z_pred[:, :, :, : -self.action_dim],
+            z_tgt[:, :, :, : -self.action_dim].detach(),
         )
 
-        
+        loss = loss + z_flow_loss
+
+        if self.use_pred_loss:
+            loss = loss + z_visual_loss + z_proprio_loss + z_loss
+
+        if self.decoder is not None:
+            # decoding from z_pred (not connected to predictor loss)
+            obs_pred, diff_pred = self.decode(
+                z_pred.detach()
+            )  # recon loss should only affect decoder
+            visual_pred = obs_pred["visual"]
+            recon_loss_pred = self.decoder_criterion(
+                visual_pred, visual_tgt
+            )
+            decoder_loss_pred = (
+                recon_loss_pred
+                + self.decoder_latent_loss_weight * diff_pred
+            )
+            loss_components["decoder_recon_loss_pred"] = recon_loss_pred
+            loss_components["decoder_vq_loss_pred"] = diff_pred
+            loss_components["decoder_loss_pred"] = decoder_loss_pred
+
+            # reconstruction loss only affects decoder
+            obs_reconstructed, diff_reconstructed = self.decode(
+                z.detach()
+            )  # recon loss should only affect decoder
+            visual_reconstructed = obs_reconstructed["visual"]
+            recon_loss_reconstructed = self.decoder_criterion(
+                visual_reconstructed, obs["visual"]
+            )
+            decoder_loss_reconstructed = (
+                recon_loss_reconstructed
+                + self.decoder_latent_loss_weight * diff_reconstructed
+            )
+
+            loss_components["decoder_recon_loss_reconstructed"] = (
+                recon_loss_reconstructed
+            )
+            loss_components["decoder_vq_loss_reconstructed"] = (
+                diff_reconstructed
+            )
+            loss_components["decoder_loss_reconstructed"] = (
+                decoder_loss_reconstructed
+            )
+            loss = loss + decoder_loss_reconstructed
+        else:
+            visual_pred = None
+            visual_reconstructed = None
+
+        loss_components["z_visual_loss"] = z_visual_loss
+        loss_components["z_proprio_loss"] = z_proprio_loss
+        loss_components["z_loss"] = z_loss
+        loss_components["flow_loss"] = z_flow_loss
+        return z_pred, visual_pred, visual_reconstructed, loss, loss_components
+
+    
+
