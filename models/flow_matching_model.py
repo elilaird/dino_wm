@@ -39,6 +39,7 @@ class FlowMatchingModel(nn.Module):
         use_shortcut_loss=False,
         use_delta_tau=False,
         sigma_min=0.0,
+        integration_method="euler",
         **kwargs,
     ):
         super().__init__()
@@ -69,7 +70,8 @@ class FlowMatchingModel(nn.Module):
         self.use_shortcut_loss = use_shortcut_loss
         self.use_delta_tau = use_delta_tau
         self.sigma_min = sigma_min
-
+        self.integration_method = integration_method
+        
         assert tgt_type == "delta" or tgt_type == "data", f"Invalid tgt type: {tgt_type}"
         if self.use_shortcut_loss:
             assert self.use_delta_tau, "Shortcut loss requires delta tau"
@@ -115,6 +117,7 @@ class FlowMatchingModel(nn.Module):
         self.emb_criterion = nn.MSELoss()
 
         if self.integrator == "odeint" or self.integrator == "odeint_adjoint":
+            self.integrator_fn = odeint if self.integrator == "odeint" else odeint_adjoint
             self.ode_wrapper = ODE_Wrapper(self.predictor, tgt_type=self.tgt_type, action_dim=self.action_dim)
         else:
             self.ode_wrapper = None
@@ -577,7 +580,10 @@ class FlowMatchingModel(nn.Module):
 
     def odeint_forward(self, z, K=1, data_norm=1.0):
         t_span = torch.linspace(0, 1, K + 1, device=z.device)[:-1]
-        z_out = odeint(self.ode_wrapper, z, t_span, method="euler", options={"step_size": 1.0 / K})[-1]
+        if self.integration_method in ["euler", "rk4"]:
+            z_out = self.integrator_fn(self.ode_wrapper, z, t_span, method=self.integration_method, options={"step_size": 1.0 / K})[-1]
+        else:
+            z_out = self.integrator_fn(self.ode_wrapper, z, t_span, method=self.integration_method)[-1]
         return z_out
 
     def odeint_adjoint_forward(self, z, K=1, data_norm=1.0):
@@ -589,10 +595,8 @@ class FlowMatchingModel(nn.Module):
         z = z.clone()    
         if self.integrator == "euler":
             return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
-        elif self.integrator == "odeint":
+        elif self.integrator == "odeint" or self.integrator == "odeint_adjoint":
             return self.odeint_forward(z, K=self.K, data_norm=data_norm)
-        elif self.integrator == "odeint_adjoint":
-            return self.odeint_adjoint_forward(z, K=self.K, data_norm=data_norm)
         else:
             raise ValueError(f"Invalid integrator: {self.integrator}")
 
