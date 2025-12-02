@@ -4853,6 +4853,7 @@ class ViTConditionalPredictor(ViTPredictor):
         time_embed_n_freq=32,
         time_embed_sigma=1.0,
         use_delta_tau=False,
+        delta_tau_scale=1.0,
     ):
         dim = dim + time_embed_dim + (time_embed_dim if use_delta_tau else 0)
         self.dim = dim
@@ -4871,7 +4872,7 @@ class ViTConditionalPredictor(ViTPredictor):
         self.num_patches = num_patches
         self.time_embed = TimestepRFF(dim=time_embed_dim, m=time_embed_n_freq, sigma=time_embed_sigma)
         if use_delta_tau:
-            self.delta_tau_embed = TimestepRFF(dim=time_embed_dim, m=time_embed_n_freq, sigma=time_embed_sigma)
+            self.delta_tau_embed = TimestepRFF(dim=time_embed_dim, m=time_embed_n_freq, sigma=time_embed_sigma, t_scale=delta_tau_scale)
         else:
             self.delta_tau_embed = None
 

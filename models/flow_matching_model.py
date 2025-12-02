@@ -389,7 +389,7 @@ class FlowMatchingModel(nn.Module):
         loss_components["l2_reg_loss"] = l2_reg_loss
 
         if self.integrate_in_loss:
-            z_pred = self.inference(z_src, data_norm=z_norm)
+            z_pred = self.inference(z_src, k=self.K, data_norm=z_norm)
         elif self.tgt_type == "delta":
             z_pred = self.delta_step(z_src, z_flow, torch.ones_like(dt, device=z_src.device), data_norm=z_norm)
         else:
@@ -506,13 +506,13 @@ class FlowMatchingModel(nn.Module):
         t = 0
         inc = 1
         while t < action.shape[1]:
-            z_pred = self.inference(z[:, -self.num_hist :], data_norm=z_norm)
+            z_pred = self.inference(z[:, -self.num_hist :], k=self.K, data_norm=z_norm)
             z_t = z_pred[:, -inc:, ...]
             z_t = self.replace_actions_from_z(z_t, action[:, t : t + inc, :])
             z = torch.cat([z, z_t], dim=1)
             t += inc
 
-        z_pred = self.inference(z[:, -self.num_hist :], data_norm=z_norm)
+        z_pred = self.inference(z[:, -self.num_hist :], k=self.K, data_norm=z_norm)
         z_t = z_pred[:, -1:, ...]
         z = torch.cat([z, z_t], dim=1)
         z_obses, _ = self.separate_emb(z)
@@ -571,12 +571,12 @@ class FlowMatchingModel(nn.Module):
         z_out = odeint_adjoint(self.ode_wrapper, z, t_span, method="euler", options={"step_size": 1.0 / K})[-1]
         return z_out
 
-    def inference(self, z, data_norm=1.0):
+    def inference(self, z, k, data_norm=1.0):
         z = z.clone()    
         if self.integrator == "euler":
-            return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
+            return self.euler_forward_ckpt(z, K=k, data_norm=data_norm)
         elif self.integrator == "odeint" or self.integrator == "odeint_adjoint":
-            return self.odeint_forward(z, K=self.K, data_norm=data_norm)
+            return self.odeint_forward(z, K=k, data_norm=data_norm)
         else:
             raise ValueError(f"Invalid integrator: {self.integrator}")
 
@@ -697,6 +697,8 @@ class TimeFlowMatchingModel(FlowMatchingModel):
         sigma_min=0.0,
         integration_method="euler",
         horizon_length=None,
+        use_consistency_loss=False,
+        step_combination="single",
         **kwargs,
     ):
         super().__init__(
@@ -733,18 +735,22 @@ class TimeFlowMatchingModel(FlowMatchingModel):
         )
         assert horizon_length is not None, "horizon_length must be provided"
         self.horizon_length = horizon_length
+        self.use_consistency_loss = use_consistency_loss
+        self.step_combination = step_combination
+        assert step_combination in ['single', 'multiple', 'both'], f"Invalid step combination: {step_combination}"
+        if step_combination == 'single':
+            assert self.horizon_length == 1, "horizon_length must be 1 for single step combination"
+        elif step_combination == 'multiple' or step_combination == 'both':
+            assert self.horizon_length > 1, "horizon_length must be greater than 1 for multiple step combination"
 
     @torch.no_grad()
-    def get_target_flow(self, z_src, z_tgt):
+    def get_target_flow(self, z_src, z_tgt, horizon=1):
         z_src = z_src.clone()
 
         if self.tgt_type == "delta":
-            target = z_tgt - z_src
+            target = (z_tgt - z_src) / horizon
         elif self.tgt_type == "data":
             target = z_tgt
-
-        if self.normalize_target:
-            target = self.normalize(target)
 
         if self.use_delta_tau:
             dt, t = self.sample_tau(z_src.size(0), self.K)
@@ -752,7 +758,7 @@ class TimeFlowMatchingModel(FlowMatchingModel):
             t = t.view(-1, 1, 1, 1).to(z_src.device)
         else:
             t = torch.rand(z_src.size(0), 1, 1, 1, device=z_src.device)
-            dt = torch.full_like(t, 1.0 / self.K, device=z_src.device)
+            dt = torch.ones_like(t, device=z_src.device) * horizon
 
         noise = (
             self.sigma_min # if 0, then simplifies to rectified flows
@@ -780,130 +786,186 @@ class TimeFlowMatchingModel(FlowMatchingModel):
         loss_components = {}
 
         z = self.encode(obs, act)
+        num_frames = z.shape[1]
 
         z_norm = torch.norm(z[:, :, :, : -(self.proprio_dim + self.action_dim)], dim=-1).mean()
 
-        z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
-        z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
-        visual_tgt = obs["visual"][
-            :, self.num_pred :, ...
-        ]  # (b, num_hist, 3, img_size, img_size)
+        # single step flow
+        z_pred = None
+        if self.step_combination in ['single', 'both']:
+            z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
+            z_tgt = z[:, self.num_pred : , :, :]  # (b, num_hist, num_patches, dim)
+            visual_tgt = obs["visual"][
+                :, self.num_pred : , ...
+            ]  # (b, num_hist, 3, img_size, img_size)
 
-        # target flow is Enc(x_t) - Enc(x_{t-1})
-        target, z_t, t, dt = self.get_target_flow(z_src, z_tgt)
+            # target flow is Enc(x_t) - Enc(x_{t-1})
+            target, z_t, t, dt = self.get_target_flow(z_src, z_tgt, horizon=1)
 
-        # flow matching loss
-        z_flow = self.predict(z_t, t, delta_tau=dt if self.use_delta_tau else None)
-        z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], target[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
+            # flow matching loss (single step)
+            z_flow = self.predict(z_t, t, dt)
+            z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], target[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
-        # shortcut loss
-        if self.use_shortcut_loss and self.tgt_type == "delta":
-            shortcut_loss = self.shortcut_loss_delta(z_src, target, t, dt, data_norm=z_norm)
-            z_flow_loss = z_flow_loss + shortcut_loss
-            loss_components["shortcut_loss"] = shortcut_loss
-        elif self.use_shortcut_loss and self.tgt_type == "data":
-            shortcut_loss = self.shortcut_loss_data(z_src, target, t, dt, data_norm=z_norm)
-            z_flow_loss = z_flow_loss + shortcut_loss
-            loss_components["shortcut_loss"] = shortcut_loss
+            if self.tgt_type == "delta":
+                z_pred = self.inference(z_src, k=1, data_norm=z_norm)
+            else:
+                z_pred = z_flow
 
-        pred_norm = torch.norm(z_flow[:, :, :, : -(self.action_dim)], dim=-1)
-        target_norm = torch.norm(target[:, :, :, : -(self.action_dim)].detach(), dim=-1)
+            z_visual_loss = self.emb_criterion(
+                z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
+                z_tgt[:, :, :, : -(self.proprio_dim + self.action_dim)].detach(),
+            )
+            z_proprio_loss = self.emb_criterion(
+                        z_pred[
+                            :,
+                            :,
+                            :,
+                            -(
+                                self.proprio_dim + self.action_dim
+                            ) : -self.action_dim,
+                        ],
+                        z_tgt[
+                            :,
+                            :,
+                            :,
+                            -(
+                                self.proprio_dim + self.action_dim
+                            ) : -self.action_dim,
+                        ].detach(),
+                    )
+            z_loss = self.emb_criterion(
+                z_pred[:, :, :, : -self.action_dim],
+                z_tgt[:, :, :, : -self.action_dim].detach(),
+            )
 
-        l2_reg_loss = self.l2_reg_lambda * torch.nn.functional.l1_loss(pred_norm, target_norm.detach())
-        z_flow_loss = z_flow_loss + l2_reg_loss
+            loss = loss + z_flow_loss
+            if self.use_pred_loss:
+                loss = loss + z_loss
 
-        loss_components["pred_norm"] = pred_norm.mean()
-        loss_components["target_norm"] = target_norm.mean()
-        loss_components["l2_reg_loss"] = l2_reg_loss
+            if self.decoder is not None and self.step_combination in ['single', 'both']:
+                decoder_loss_reconstructed, loss_components, visual_components = self.decoder_loss(obs, z, z_pred, visual_tgt, loss_components)
+                loss = loss + decoder_loss_reconstructed
+                visual_pred = visual_components["visual_pred"]
+                visual_reconstructed = visual_components["visual_reconstructed"]
+            else:
+                visual_pred = None
+                visual_reconstructed = None
 
-        if self.integrate_in_loss:
-            z_pred = self.inference(z_src, data_norm=z_norm)
-        elif self.tgt_type == "delta":
-            z_pred = self.delta_step(z_src, z_flow, torch.ones_like(dt, device=z_src.device), data_norm=z_norm)
-        else:
-            z_pred = z_flow
+            loss_components["z_visual_loss"] = z_visual_loss
+            loss_components["z_proprio_loss"] = z_proprio_loss
+            loss_components["z_loss"] = z_loss
+            loss_components["flow_loss"] = z_flow_loss
 
-        z_visual_loss = self.emb_criterion(
-            z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
-            z_tgt[:, :, :, : -(self.proprio_dim + self.action_dim)].detach(),
-        )
-        z_proprio_loss = self.emb_criterion(
-                    z_pred[
-                        :,
-                        :,
-                        :,
-                        -(
-                            self.proprio_dim + self.action_dim
-                        ) : -self.action_dim,
-                    ],
-                    z_tgt[
-                        :,
-                        :,
-                        :,
-                        -(
-                            self.proprio_dim + self.action_dim
-                        ) : -self.action_dim,
-                    ].detach(),
+        # k - step flow
+        z_pred_k = None
+        if self.step_combination in ['multiple', 'both']:
+            z_src_k = z[:, : num_frames - self.horizon_length, :, :]
+            z_tgt_k = z[:, self.horizon_length :, :, :] 
+
+            target_k, z_t_k, t_k, dt_k = self.get_target_flow(z_src_k, z_tgt_k, horizon=self.horizon_length)
+
+            z_flow_k = self.predict(z_t_k, t_k, dt_k)
+            z_flow_loss_k = self.emb_criterion(z_flow_k[:, :, :, : -(self.action_dim)], target_k[:, :, :, : -(self.action_dim)].detach())
+
+            if self.tgt_type == "delta":
+                z_pred_k = self.inference(z_src_k, k=self.horizon_length, data_norm=z_norm)        
+            else:
+                z_pred_k = z_flow_k
+
+            # k - step loss
+            total_k_step_loss = z_flow_loss_k
+            z_visual_loss_k = self.emb_criterion(
+                z_pred_k[:, :, :, : -(self.proprio_dim + self.action_dim)],
+                z_tgt_k[:, :, :, : -(self.proprio_dim + self.action_dim)].detach(),
+            )
+            z_proprio_loss_k = self.emb_criterion(
+                z_pred_k[:, :, :, : -(self.proprio_dim + self.action_dim)],
+                z_tgt_k[:, :, :, : -(self.proprio_dim + self.action_dim)].detach(),
+            )
+            z_loss_k = self.emb_criterion(
+                z_pred_k[:, :, :, : -self.action_dim],
+                z_tgt_k[:, :, :, : -self.action_dim].detach(),
+            )
+
+            if self.use_consistency_loss:
+                # TODO: add consistency loss for tgt_type == "delta" and tgt_type == "data"
+                raise NotImplementedError(
+                    "Consistency loss not implemented for tgt_type == 'delta' and tgt_type == 'data'"
                 )
-        z_loss = self.emb_criterion(
-            z_pred[:, :, :, : -self.action_dim],
-            z_tgt[:, :, :, : -self.action_dim].detach(),
+            elif self.use_pred_loss:
+                total_k_step_loss = total_k_step_loss + z_loss_k
+
+            # potentially add scaling factor for k - step loss (could be scheduled)
+            loss = loss + total_k_step_loss
+
+            if self.decoder is not None and self.step_combination in ['multiple', 'both']:
+                visual_tgt_k = obs["visual"][:, self.horizon_length :, ...]
+                decoder_loss_reconstructed_k, loss_components, visual_components = self.decoder_loss(obs, z, z_pred_k, visual_tgt_k, loss_components, post_fix="_k")
+                loss = loss + decoder_loss_reconstructed_k
+                visual_pred_k = visual_components["visual_pred"]
+                visual_reconstructed_k = visual_components["visual_reconstructed"]
+            else:
+                visual_pred_k = None
+                visual_reconstructed_k = None
+
+            loss_components["z_visual_loss_k"] = z_visual_loss_k
+            loss_components["z_proprio_loss_k"] = z_proprio_loss_k
+            loss_components["z_loss_k"] = z_loss_k
+            loss_components["flow_loss_k"] = z_flow_loss_k
+            loss_components["total_k_step_loss"] = total_k_step_loss
+
+        z_components = {
+            "z_out": z_pred,
+            "visual_out": visual_pred,
+            "visual_reconstructed": visual_reconstructed,
+        }
+        z_k_components = {
+            "z_out": z_pred_k,
+            "visual_out": visual_pred_k,
+            "visual_reconstructed": visual_reconstructed_k,
+        }
+        return z_components, z_k_components, loss, loss_components
+
+    def decoder_loss(self, obs, z, z_pred, visual_tgt, loss_components, post_fix=""):
+        # decoding from z_pred (not connected to predictor loss)
+        obs_pred, diff_pred = self.decode(
+            z_pred.detach()
+        )  # recon loss should only affect decoder
+        visual_pred = obs_pred["visual"]
+        recon_loss_pred = self.decoder_criterion(visual_pred, visual_tgt)
+        decoder_loss_pred = (
+            recon_loss_pred + self.decoder_latent_loss_weight * diff_pred
+        )
+        loss_components["decoder_recon_loss_pred" + post_fix] = recon_loss_pred
+        loss_components["decoder_vq_loss_pred" + post_fix] = diff_pred
+        loss_components["decoder_loss_pred" + post_fix] = decoder_loss_pred
+
+        # reconstruction loss only affects decoder
+        obs_reconstructed, diff_reconstructed = self.decode(
+            z.detach()
+        )  # recon loss should only affect decoder
+        visual_reconstructed = obs_reconstructed["visual"]
+        recon_loss_reconstructed = self.decoder_criterion(
+            visual_reconstructed, obs["visual"]
+        )
+        decoder_loss_reconstructed = (
+            recon_loss_reconstructed
+            + self.decoder_latent_loss_weight * diff_reconstructed
         )
 
-        loss = loss + z_flow_loss
+        loss_components["decoder_recon_loss_reconstructed" + post_fix] = (
+            recon_loss_reconstructed
+        )
+        loss_components["decoder_vq_loss_reconstructed" + post_fix] = (
+            diff_reconstructed
+        )
+        loss_components["decoder_loss_reconstructed" + post_fix] = (
+            decoder_loss_reconstructed
+        )
 
-        if self.use_pred_loss:
-            loss = loss + z_visual_loss + z_proprio_loss + z_loss
+        visual_components = {
+            "visual_pred": visual_pred,
+            "visual_reconstructed": visual_reconstructed,
+        }
 
-        if self.decoder is not None:
-            # decoding from z_pred (not connected to predictor loss)
-            obs_pred, diff_pred = self.decode(
-                z_pred.detach()
-            )  # recon loss should only affect decoder
-            visual_pred = obs_pred["visual"]
-            recon_loss_pred = self.decoder_criterion(
-                visual_pred, visual_tgt
-            )
-            decoder_loss_pred = (
-                recon_loss_pred
-                + self.decoder_latent_loss_weight * diff_pred
-            )
-            loss_components["decoder_recon_loss_pred"] = recon_loss_pred
-            loss_components["decoder_vq_loss_pred"] = diff_pred
-            loss_components["decoder_loss_pred"] = decoder_loss_pred
-
-            # reconstruction loss only affects decoder
-            obs_reconstructed, diff_reconstructed = self.decode(
-                z.detach()
-            )  # recon loss should only affect decoder
-            visual_reconstructed = obs_reconstructed["visual"]
-            recon_loss_reconstructed = self.decoder_criterion(
-                visual_reconstructed, obs["visual"]
-            )
-            decoder_loss_reconstructed = (
-                recon_loss_reconstructed
-                + self.decoder_latent_loss_weight * diff_reconstructed
-            )
-
-            loss_components["decoder_recon_loss_reconstructed"] = (
-                recon_loss_reconstructed
-            )
-            loss_components["decoder_vq_loss_reconstructed"] = (
-                diff_reconstructed
-            )
-            loss_components["decoder_loss_reconstructed"] = (
-                decoder_loss_reconstructed
-            )
-            loss = loss + decoder_loss_reconstructed
-        else:
-            visual_pred = None
-            visual_reconstructed = None
-
-        loss_components["z_visual_loss"] = z_visual_loss
-        loss_components["z_proprio_loss"] = z_proprio_loss
-        loss_components["z_loss"] = z_loss
-        loss_components["flow_loss"] = z_flow_loss
-        return z_pred, visual_pred, visual_reconstructed, loss, loss_components
-
-    
-
+        return decoder_loss_reconstructed, loss_components, visual_components
