@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 from torchvision import transforms
+import torchdiffeq
 from torchdiffeq import odeint, odeint_adjoint
 from einops import rearrange, repeat
 
@@ -132,6 +133,8 @@ class FlowMatchingModel(nn.Module):
         self.action_encoder.train(mode)
         if self.decoder is not None and self.train_decoder:
             self.decoder.train(mode)
+        self.set_integrator(self.integrator)
+        
 
     def eval(self):
         super().eval()
@@ -142,6 +145,7 @@ class FlowMatchingModel(nn.Module):
         self.action_encoder.eval()
         if self.decoder is not None:
             self.decoder.eval()
+        self.set_integrator("odeint")
 
     def encode(self, obs, act): 
         """
@@ -646,6 +650,10 @@ class FlowMatchingModel(nn.Module):
         loss = torch.nn.functional.mse_loss(z_hat[..., :-(self.action_dim)], shortcut_tgt[..., :-(self.action_dim)], reduction="none")
         loss[~mask] = loss[~mask] * (1.0 - t[~mask][:, None, None])**2
         return loss.mean()
+
+    def set_integrator(self, integrator: str):
+        self.integrator_fn = getattr(torchdiffeq, integrator, None)
+        assert self.integrator_fn is not None, f"Invalid integrator: {integrator}"
 
 
 class ODE_Wrapper(nn.Module):
