@@ -791,7 +791,7 @@ class TimeFlowMatchingModel(FlowMatchingModel):
         z_norm = torch.norm(z[:, :, :, : -(self.proprio_dim + self.action_dim)], dim=-1).mean()
 
         # single step flow
-        z_pred = None
+        z_pred, visual_pred, visual_reconstructed, z_pred_k, visual_pred_k, visual_reconstructed_k = (None,) * 6
         if self.step_combination in ['single', 'both']:
             z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
             z_tgt = z[:, self.num_pred : , :, :]  # (b, num_hist, num_patches, dim)
@@ -806,11 +806,13 @@ class TimeFlowMatchingModel(FlowMatchingModel):
             z_flow = self.predict(z_t, t, dt)
             z_flow_loss = self.emb_criterion(z_flow[:, :, :, : -(self.action_dim)], target[:, :, :, : -(self.action_dim)].detach()) # delta doesnt include action delta
 
+            # integrate flow to data
             if self.tgt_type == "delta":
                 z_pred = self.inference(z_src, k=1, data_norm=z_norm)
             else:
                 z_pred = z_flow
 
+            # loss
             z_visual_loss = self.emb_criterion(
                 z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
                 z_tgt[:, :, :, : -(self.proprio_dim + self.action_dim)].detach(),
@@ -847,9 +849,6 @@ class TimeFlowMatchingModel(FlowMatchingModel):
                 loss = loss + decoder_loss_reconstructed
                 visual_pred = visual_components["visual_pred"]
                 visual_reconstructed = visual_components["visual_reconstructed"]
-            else:
-                visual_pred = None
-                visual_reconstructed = None
 
             loss_components["z_visual_loss"] = z_visual_loss
             loss_components["z_proprio_loss"] = z_proprio_loss
@@ -857,7 +856,6 @@ class TimeFlowMatchingModel(FlowMatchingModel):
             loss_components["flow_loss"] = z_flow_loss
 
         # k - step flow
-        z_pred_k = None
         if self.step_combination in ['multiple', 'both']:
             z_src_k = z[:, : num_frames - self.horizon_length, :, :]
             z_tgt_k = z[:, self.horizon_length :, :, :] 
@@ -904,9 +902,6 @@ class TimeFlowMatchingModel(FlowMatchingModel):
                 loss = loss + decoder_loss_reconstructed_k
                 visual_pred_k = visual_components["visual_pred"]
                 visual_reconstructed_k = visual_components["visual_reconstructed"]
-            else:
-                visual_pred_k = None
-                visual_reconstructed_k = None
 
             loss_components["z_visual_loss_k"] = z_visual_loss_k
             loss_components["z_proprio_loss_k"] = z_proprio_loss_k
