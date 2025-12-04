@@ -390,7 +390,7 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle):
     def _render_frame(self):
         # Use self.render() instead of self.sim.render()
         obs = self.render()
-        return obs
+        return np.flip(obs, axis=1)
 
     def seed(self, seed=None):
         if seed is None:
