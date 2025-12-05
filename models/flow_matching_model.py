@@ -654,6 +654,8 @@ class FlowMatchingModel(nn.Module):
         return loss.mean()
 
     def set_integrator(self, integrator: str):
+        if integrator == "none":
+            return
         self.integrator_fn = getattr(torchdiffeq, integrator, None)
         assert self.integrator_fn is not None, f"Invalid integrator: {integrator}"
 
