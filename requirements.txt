@@ -6,6 +6,7 @@ accelerate
 einops
 numpy
 scipy
+imageio[ffmpeg]
 
 # Configuration and Experiment Management
 hydra-core
@@ -17,12 +18,14 @@ submitit
 
 mujoco
 gymnasium
+gym
 
 # Development and Debugging
 ipython
 ipdb
 jupyter-core
 jupytext
+matplotlib
 
 # System and Environment
 setuptools

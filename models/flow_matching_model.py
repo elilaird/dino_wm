@@ -601,6 +601,8 @@ class FlowMatchingModel(nn.Module):
             return self.euler_forward_ckpt(z, K=self.K, data_norm=data_norm)
         elif self.integrator == "odeint" or self.integrator == "odeint_adjoint":
             return self.odeint_forward(z, K=self.K, data_norm=data_norm)
+        elif self.integrator == "none":
+            return self.predict(z, torch.zeros(z.size(0), 1, device=z.device), torch.ones(z.size(0), 1, device=z.device))
         else:
             raise ValueError(f"Invalid integrator: {self.integrator}")
 
