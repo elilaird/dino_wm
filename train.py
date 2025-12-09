@@ -933,11 +933,9 @@ class Trainer:
         if self.cfg.has_predictor:
             self.predictor_optimizer.zero_grad()
             self.action_encoder_optimizer.zero_grad()
-        if self.cfg.train_aux_predictor:
-            self.aux_predictor_optimizer.zero_grad()
 
         z_out, visual_out, visual_reconstructed, loss, loss_components = (
-            self.model(obs, act, aux_obs)
+            self.model(obs, act)
         )
         self.accelerator.backward(loss)
         assert not torch.isnan(loss), f"Loss is NaN at epoch {self.epoch}"
@@ -1826,11 +1824,11 @@ class Trainer:
                     for k in div_loss.keys():
                         logs[f"{k}_err_horizon_{postfix}_h{horizon}"].append(div_loss[k].cpu().numpy())
 
-                # estimate lipschitz bound
-                z_tgts = self.model.encode_obs({k: v.unsqueeze(0).to(self.device) for k, v in obs.items()})
-                lipschitz_metrics = self.model.estimate_lipschitz(z_obses['visual'], z_tgts['visual'])
-                for k in lipschitz_metrics.keys():
-                    logs[f"lipschitz_{k}_err_rollout{postfix}_h{horizon}"].append(lipschitz_metrics[k].cpu().numpy())
+                # # estimate lipschitz bound
+                # z_tgts = self.model.encode_obs({k: v.unsqueeze(0).to(self.device) for k, v in obs.items()})
+                # lipschitz_metrics = self.model.estimate_lipschitz(z_obses['visual'], z_tgts['visual'])
+                # for k in lipschitz_metrics.keys():
+                #     logs[f"lipschitz_{k}_err_rollout{postfix}_h{horizon}"].append(lipschitz_metrics[k].cpu().numpy())
 
     
         for k, v in logs.items():

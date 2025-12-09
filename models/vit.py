@@ -3,6 +3,7 @@ import torch
 from torch import nn
 from einops import rearrange, repeat
 from torch.nn import functional as F
+from torchdiffeq import odeint, odeint_adjoint
 
 from .model_utils import *
 from .memory_retrieval import (
@@ -5021,3 +5022,113 @@ class AdaLN(nn.Module):
         nn.init.zeros_(self.to_scale_shift.weight)
         nn.init.zeros_(self.to_scale_shift.bias)
         self.ln.reset_parameters()
+
+
+class SecondOrderViTPredictor(ViTPredictor):
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        pool="cls",
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+        dt=1.0,
+        damping=-0.1,
+        integration_method="rk4",
+        inner_dim=256,
+        action_dim=12,
+    ):
+        super().__init__(
+            num_patches=num_patches,
+            num_frames=num_frames,
+            dim=inner_dim,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            pool=pool,
+            dim_head=dim_head,
+            dropout=dropout,
+            emb_dropout=emb_dropout,
+        )
+        self.out_dim = dim
+        self.inner_dim = dim
+        self.action_dim = action_dim
+        self.dt = dt
+
+        self.integration_method = integration_method
+        if self.integration_method == "rk4":
+            self.integrator_options = {"step_size": self.dt}
+        else:
+            self.integrator_options = {}
+
+        # projectors
+        self.in_proj = nn.Linear(dim, inner_dim)
+        self.out_proj = nn.Linear(inner_dim, dim)
+        self.norm = nn.LayerNorm(inner_dim * 2)
+
+        # action encoder 
+        self.action_encoder = nn.Linear(action_dim, inner_dim, bias=False)
+        self.damping = nn.Parameter(torch.tensor(damping))
+    
+    def forward(self, x, actions):
+        x = self.in_proj(x)
+        actions = self.action_encoder(actions)
+
+        # initial force
+        init_acc = super().forward(x)[0]
+
+        # initial velocity
+        init_vel = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, 1:]], dim=1)
+
+        # integrate
+        state_0 = torch.cat([x, init_vel], dim=-1)
+        t_span = torch.tensor([0.0, self.dt], device=x.device)
+        
+        def dynamics(t, state):
+            z, v = state.chunk(2, dim=-1)
+
+            # physics prior (action bending)
+            force_prior = actions + (self.damping * v)
+
+            # total acceleration
+            acc = force_prior + init_acc
+
+            # derivatives [dz/dt, dv/dt]
+            return torch.cat([v, acc], dim=-1)
+
+        x_new = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
+        x_new = self.norm(x_new)
+
+        z_next, v_next = x_new.chunk(2, dim=-1)
+
+        # could regularize v_next or use v loss as well
+
+        return self.out_proj(z_next)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
