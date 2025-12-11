@@ -1064,11 +1064,11 @@ class Trainer:
             )
 
             if (
-                self.cfg.has_predictor and i % 100 == 0
+                self.cfg.has_predictor and i % 1 == 0
             ):  # Log every 100 batches
-                alpha_logs = self.get_alpha_values()
+                damping_logs = self.get_damping_values()
                 self.logs_update(
-                    {f"train_{k}": [v] for k, v in alpha_logs.items()}
+                    {f"train_{k}": [v] for k, v in damping_logs.items()}
                 )
 
             prev_time = time.perf_counter()
@@ -1279,9 +1279,9 @@ class Trainer:
                 and self.cfg.has_predictor
                 and i == 0
             ):  # Log on first validation batch
-                alpha_logs = self.get_alpha_values()
+                damping_logs = self.get_damping_values()
                 self.logs_update(
-                    {f"val_{k}": [v] for k, v in alpha_logs.items()}
+                    {f"val_{k}": [v] for k, v in damping_logs.items()}
                 )
 
             if self.cfg.dry_run:
@@ -1482,10 +1482,6 @@ class Trainer:
                         }
                         self.logs_update(img_reconstruction_scores)
 
-                        # Store image reconstruction scores for CSV
-                        # for k, v in img_reconstruction_scores.items():
-                        #     test_results[k].extend(self._safe_convert_to_numpy(v))
-
                 self.plot_samples(
                     obs_window["visual"],
                     visual_out,
@@ -1499,28 +1495,18 @@ class Trainer:
             # Store batch loss components for CSV
             batch_loss_logs = {f"test_{k}": [v] for k, v in batch_loss_components.items()}
             self.logs_update(batch_loss_logs)
-            # for k, v in batch_loss_logs.items():
-            #     test_results[k].extend(self._safe_convert_to_numpy(v))
-
+    
             if (
                 self.cfg.predictor == "additive_control_vit"
                 and self.cfg.has_predictor
                 and i == 0
             ):  # Log on first test batch
-                alpha_logs = self.get_alpha_values()
-                alpha_logs = {f"test_{k}": [v] for k, v in alpha_logs.items()}
-                self.logs_update(alpha_logs)
-
-                # # Store alpha logs for CSV
-                # for k, v in alpha_logs.items():
-                #     test_results[k].extend(self._safe_convert_to_numpy(v))
+                damping_logs = self.get_damping_values()
+                damping_logs = {f"test_{k}": [v] for k, v in damping_logs.items()}
+                self.logs_update(damping_logs)
 
             if self.cfg.dry_run:
                 break
-
-        # # Save test results to CSV
-        # if self.accelerator.is_main_process and test_results:
-        #     self.save_test_results_to_csv(test_results)
 
     def save_test_results_to_csv(self, test_results):
         """Save test results to CSV file."""
@@ -2353,29 +2339,24 @@ class Trainer:
             value_range=(-1, 1),
         )
 
-    def get_alpha_values(self):
+    def get_damping_values(self):
         """Get current alpha values from the additive control transformer"""
         unwrapped_predictor = self.accelerator.unwrap_model(self.predictor)
         
         if hasattr(unwrapped_predictor, "transformer") and hasattr(
-            unwrapped_predictor.transformer, "alphas"
+            unwrapped_predictor.transformer, "damping"
         ):
-            if unwrapped_predictor.transformer.alphas is not None:
+            if unwrapped_predictor.transformer.damping is not None:
                 module = unwrapped_predictor.transformer
             else:
                 return {}
         else:
             return {}
 
-        alphas = {}
-        if module.alphas is not None:
-            for i, alpha in enumerate(module.alphas):
-                alphas[f"alpha_layer_{i}"] = alpha.item()
-                if alpha.grad is not None:
-                    alphas[f"alpha_layer_{i}_grad_norm"] = alpha.grad.norm().item()
-                else:
-                    alphas[f"alpha_layer_{i}_grad_norm"] = 0.0
-        return alphas
+        damping = {}
+        if module.damping is not None:
+            damping[f"damping"] = module.damping.item()
+        return damping
 
 
 @hydra.main(config_path="conf", config_name="train")

@@ -5073,7 +5073,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.norm = nn.LayerNorm(inner_dim * 2)
 
         # action encoder 
-        self.action_encoder = nn.Linear(action_dim, inner_dim, bias=False)
+        self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
         self.damping = nn.Parameter(torch.tensor(damping))
     
     def forward(self, x, actions):
@@ -5091,7 +5091,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         t_span = torch.tensor([0.0, self.dt], device=x.device)
         
         def dynamics(t, state):
-            z, v = state.chunk(2, dim=-1)
+            _, v = state.chunk(2, dim=-1)
 
             # physics prior (action bending)
             force_prior = actions + (self.damping * v)

@@ -12,7 +12,7 @@ dry_run: False
 debug: False 
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
-ckpt_base_path: /projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/checkpoints # put absolute path here
+ckpt_base_path: /lustre/smuexa01/client/users/ejlaird/dino_wm/checkpoints # put absolute path here
 ckpt_name: "model_latest.pth"
 
 hydra:
