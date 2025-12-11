@@ -249,7 +249,7 @@ class SecondOrderModel(nn.Module):
             v_tgt_norm = torch.norm((z_tgt - z_src) / (self.predictor.dt + 1e-6), dim=-1) # secant velocity
             v_loss = self.velocity_loss_lambda * self.emb_criterion(v_pred_norm, v_tgt_norm.detach())
             loss = loss + v_loss
-            loss_components["vel_mag_reg_loss"] = v_loss
+            loss_components["vel_mag_loss"] = v_loss
 
 
         if self.decoder is not None:
