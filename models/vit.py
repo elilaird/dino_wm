@@ -5076,7 +5076,7 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # projectors
         self.in_proj = nn.Linear(dim, inner_dim)
-        self.out_proj = nn.Linear(inner_dim, dim)
+        self.out_proj = nn.Linear(inner_dim*2, dim*2)
         self.norm = nn.LayerNorm(inner_dim * 2)
 
         # action encoder 
@@ -5114,14 +5114,12 @@ class SecondOrderViTPredictor(ViTPredictor):
             # derivatives [dx/dt, dv/dt]
             return torch.cat([dxdt, acc], dim=-1)
 
-        x_new = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
-        x_new = self.norm(x_new)
+        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
 
-        x_next, v_next = x_new.chunk(2, dim=-1)
+        state_next = self.out_proj(self.norm(state_next))
+        x_next, v_next = state_next.chunk(2, dim=-1)
 
-        # could regularize v_next or use v loss as well
-
-        return self.out_proj(x_next)
+        return x_next, v_next
 
 
 

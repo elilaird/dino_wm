@@ -172,9 +172,10 @@ class SecondOrderModel(nn.Module):
         z = rearrange(z, "b t p d -> b (t p) d")
         actions = rearrange(actions, "b t p d -> b (t p) d")
 
-        z  = self.predictor(z, actions)
+        z, v  = self.predictor(z, actions)
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
-        return z
+        v = rearrange(v, "b (t p) d -> b t p d", t=T)
+        return z, v
 
     def decode(self, z):
         """
@@ -235,9 +236,11 @@ class SecondOrderModel(nn.Module):
             :, self.num_pred :, ...
         ]  # (b, num_hist, 3, img_size, img_size)
 
-        z_pred  = self.predict(z_src, act_src)
+        z_pred, v_pred  = self.predict(z_src, act_src)
 
-        # inner loss
+        # log log(v_pred_norm)
+        v_pred_norm = torch.norm(v_pred, dim=-1)
+        loss_components["v_pred_norm"] = torch.log(v_pred_norm + 1e-6).mean()
 
 
         if self.decoder is not None:
@@ -335,7 +338,7 @@ class SecondOrderModel(nn.Module):
         a_end = num_obs_init
         inc = 1
         while t < action.shape[1]:
-            z_pred = self.predict(z[:, -self.num_hist :], act_emb[:, a_start:a_end])
+            z_pred, _ = self.predict(z[:, -self.num_hist :], act_emb[:, a_start:a_end])
             z_new = z_pred[:, -inc:, ...]
             z = torch.cat([z, z_new], dim=1)
 
@@ -343,7 +346,7 @@ class SecondOrderModel(nn.Module):
             a_start += inc if z.shape[1] > self.num_hist else 0
             a_end = a_start + min(self.num_hist, z.shape[1])
 
-        z_pred = self.predict(z[:, -self.num_hist :], act_emb[:, -self.num_hist:])
+        z_pred, _ = self.predict(z[:, -self.num_hist :], act_emb[:, -self.num_hist:])
         z_new = z_pred[:, -1 :, ...] # take only the next pred
         z = torch.cat([z, z_new], dim=1)
         z_obses, _ = self.separate_emb(z)
