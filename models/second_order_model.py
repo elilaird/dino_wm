@@ -27,6 +27,7 @@ class SecondOrderModel(nn.Module):
         decoder_loss_type='mse',
         step_size=1,
         velocity_loss_lambda=0.0,
+        kinetic_energy_reg_lambda=0.0,
         **kwargs,
     ):
         super().__init__()
@@ -47,7 +48,8 @@ class SecondOrderModel(nn.Module):
         self.decoder_loss_type = decoder_loss_type 
         self.step_size = step_size
         self.velocity_loss_lambda = velocity_loss_lambda
-
+        self.kinetic_energy_reg_lambda = kinetic_energy_reg_lambda
+        
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
             encoder_patch_size = self.encoder.module.patch_size
@@ -243,6 +245,12 @@ class SecondOrderModel(nn.Module):
         # log log(v_pred_norm)
         v_pred_norm = torch.norm(v_pred, dim=-1)
         loss_components["v_pred_norm"] = torch.log(v_pred_norm + 1e-6).mean()
+
+        if self.kinetic_energy_reg_lambda > 0.0:
+            kinetic_energy = 0.5 * v_pred_norm
+            kinetic_energy_loss = self.kinetic_energy_reg_lambda * kinetic_energy.mean()
+            loss = loss + kinetic_energy_loss
+            loss_components["kinetic_energy_reg"] = kinetic_energy_loss
 
         # velocity magnitude regularization loss
         if self.velocity_loss_lambda > 0.0:
