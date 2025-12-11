@@ -26,6 +26,7 @@ class SecondOrderModel(nn.Module):
         train_decoder=True,
         decoder_loss_type='mse',
         step_size=1,
+        velocity_loss_lambda=0.0,
         **kwargs,
     ):
         super().__init__()
@@ -45,6 +46,7 @@ class SecondOrderModel(nn.Module):
         self.action_dim = action_dim * num_action_repeat
         self.decoder_loss_type = decoder_loss_type 
         self.step_size = step_size
+        self.velocity_loss_lambda = velocity_loss_lambda
 
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
@@ -241,6 +243,13 @@ class SecondOrderModel(nn.Module):
         # log log(v_pred_norm)
         v_pred_norm = torch.norm(v_pred, dim=-1)
         loss_components["v_pred_norm"] = torch.log(v_pred_norm + 1e-6).mean()
+
+        # velocity magnitude regularization loss
+        if self.velocity_loss_lambda > 0.0:
+            v_tgt_norm = torch.norm((z_tgt - z_src) / (self.predictor.dt + 1e-6), dim=-1) # secant velocity
+            v_loss = self.velocity_loss_lambda * self.emb_criterion(v_pred_norm, v_tgt_norm.detach())
+            loss = loss + v_loss
+            loss_components["vel_mag_reg_loss"] = v_loss
 
 
         if self.decoder is not None:
