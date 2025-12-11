@@ -2343,20 +2343,11 @@ class Trainer:
         """Get current alpha values from the additive control transformer"""
         unwrapped_predictor = self.accelerator.unwrap_model(self.predictor)
         
-        if hasattr(unwrapped_predictor, "transformer") and hasattr(
-            unwrapped_predictor.transformer, "damping"
+        if hasattr(
+            unwrapped_predictor, "damping"
         ):
-            if unwrapped_predictor.transformer.damping is not None:
-                module = unwrapped_predictor.transformer
-            else:
-                return {}
-        else:
-            return {}
-
-        damping = {}
-        if module.damping is not None:
-            damping[f"damping"] = module.damping.item()
-        return damping
+            return {"damping": unwrapped_predictor.damping.item()}
+        return {}
 
 
 @hydra.main(config_path="conf", config_name="train")

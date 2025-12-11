@@ -10,3 +10,4 @@ action_dim: ${action_emb_dim}
 dt: 0.1
 damping: -0.1
 integration_method: "rk4"
+integration_func: "odeint"

@@ -4,6 +4,7 @@ from torch import nn
 from einops import rearrange, repeat
 from torch.nn import functional as F
 from torchdiffeq import odeint, odeint_adjoint
+import torchdiffeq
 
 from .model_utils import *
 from .memory_retrieval import (
@@ -5043,6 +5044,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         integration_method="rk4",
         inner_dim=256,
         action_dim=12,
+        integration_func="odeint"
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5060,6 +5062,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.inner_dim = dim
         self.action_dim = action_dim
         self.dt = dt
+        self.integration_func = getattr(torchdiffeq, integration_func, None)
+        assert self.integration_func is not None, f"Invalid integration function: {integration_func}. Options: odeint, odeint_adjoint"
 
         self.integration_method = integration_method
         if self.integration_method == "rk4":
@@ -5070,7 +5074,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         # projectors
         self.in_proj = nn.Linear(dim, inner_dim)
         self.out_proj = nn.Linear(inner_dim, dim)
-        # self.norm = nn.LayerNorm(inner_dim * 2)
+        self.norm = nn.LayerNorm(inner_dim * 2)
 
         # action encoder 
         self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
@@ -5097,13 +5101,13 @@ class SecondOrderViTPredictor(ViTPredictor):
             force_prior = actions + (self.damping * v)
 
             # total acceleration
-            acc = force_prior + init_acc
+            acc = init_acc + force_prior
 
             # derivatives [dz/dt, dv/dt]
             return torch.cat([v, acc], dim=-1)
 
         x_new = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
-        # x_new = self.norm(x_new)
+        x_new = self.norm(x_new)
 
         z_next, v_next = x_new.chunk(2, dim=-1)
 
