@@ -7,7 +7,8 @@ emb_dropout: 0
 pool: 'mean'
 inner_dim: 256
 action_dim: ${action_emb_dim}
-dt: 0.1
+dt: 1.0
 damping: -0.1
 integration_method: "rk4"
 integration_func: "odeint"
+force_orthogonal: False

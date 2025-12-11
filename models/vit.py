@@ -5044,7 +5044,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         integration_method="rk4",
         inner_dim=256,
         action_dim=12,
-        integration_func="odeint"
+        integration_func="odeint",
+        force_orthogonal: bool = False,
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5064,6 +5065,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.dt = dt
         self.integration_func = getattr(torchdiffeq, integration_func, None)
         assert self.integration_func is not None, f"Invalid integration function: {integration_func}. Options: odeint, odeint_adjoint"
+        
+        self.force_orthogonal = force_orthogonal
 
         self.integration_method = integration_method
         if self.integration_method == "rk4":
@@ -5085,35 +5088,40 @@ class SecondOrderViTPredictor(ViTPredictor):
         actions = self.action_encoder(actions)
 
         # initial force
-        init_acc = super().forward(x)[0]
+        dvdt = super().forward(x)[0]
+
+        if self.force_orthogonal:
+            dvdt_norm = torch.norm(dvdt, dim=-1, keepdim=True)
+            dot = torch.einsum("b f d, b f d -> b f", actions, dvdt).unsqueeze(-1)
+            actions = actions - (dot / (dvdt_norm + 1e-6)) * dvdt
 
         # initial velocity
-        init_vel = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, 1:]], dim=1)
+        v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, 1:]], dim=1)
 
         # integrate
-        state_0 = torch.cat([x, init_vel], dim=-1)
+        state_0 = torch.cat([x, v_0], dim=-1)
         t_span = torch.tensor([0.0, self.dt], device=x.device)
         
         def dynamics(t, state):
-            _, v = state.chunk(2, dim=-1)
+            _, dxdt = state.chunk(2, dim=-1)
 
             # physics prior (action bending)
-            force_prior = actions + (self.damping * v)
+            force_prior = actions + (self.damping * dxdt)
 
             # total acceleration
-            acc = init_acc + force_prior
+            acc = dvdt + force_prior
 
-            # derivatives [dz/dt, dv/dt]
-            return torch.cat([v, acc], dim=-1)
+            # derivatives [dx/dt, dv/dt]
+            return torch.cat([dxdt, acc], dim=-1)
 
         x_new = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
         x_new = self.norm(x_new)
 
-        z_next, v_next = x_new.chunk(2, dim=-1)
+        x_next, v_next = x_new.chunk(2, dim=-1)
 
         # could regularize v_next or use v loss as well
 
-        return self.out_proj(z_next)
+        return self.out_proj(x_next)
 
 
 
