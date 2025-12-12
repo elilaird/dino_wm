@@ -5081,27 +5081,27 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.norm = nn.LayerNorm(inner_dim * 2)
 
         # action encoder 
-        self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
+        self.action_to_throttle = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, 1))
+        self.action_to_steering = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
+
         self.damping = nn.Parameter(torch.tensor(damping))
     
     def forward(self, x, actions):
         x = self.in_proj(x)
-        actions = self.action_encoder(actions)
+        
+        throttle_controls = self.action_to_throttle(actions)
+        steering_controls = self.action_to_steering(actions)
 
         # initial force
         dvdt = super().forward(x)[0]
 
-        # if self.force_orthogonal:
-        #     dvdt_norm = torch.norm(dvdt, dim=-1, keepdim=True)
-        #     dot = torch.einsum("b f d, b f d -> b f", actions, dvdt).unsqueeze(-1)
-        #     actions = actions - (dot / (dvdt_norm + 1e-6)) * dvdt
-
         # initial velocity
-        # v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, 1:]], dim=1)
         if self.start_from_rest:
             v_0 = x - torch.cat([x[:, :1], x[:, :-1]], dim=1) 
         else:
             v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
+        
+        v_0 = v_0 / (self.dt + 1e-6)
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
@@ -5109,22 +5109,22 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         def dynamics(t, state):
             _, dxdt = state.chunk(2, dim=-1)
-            actions_force = actions
+            
+            # speed
+            dxdt_norm = torch.sqrt(torch.sum(dxdt**2, dim=-1, keepdim=True) + 1e-6)
+            v_dir = dxdt / (dxdt_norm + 1e-6)
 
-            if self.force_orthogonal:
-                # dxdt_norm = torch.norm(dxdt, dim=-1, keepdim=True)
-                dxdt_norm = torch.sqrt(torch.sum(dxdt**2, dim=-1, keepdim=True) + 1e-6)
-                dot = torch.einsum("b f d, b f d -> b f", actions, dxdt).unsqueeze(-1)
-                actions_force = actions - (dot / (dxdt_norm + 1e-6)) * dxdt
+            # throttle force 
+            throttle_force = throttle_controls * v_dir
 
-            # physics prior (action bending)
-            force_prior = actions_force + (self.damping * dxdt)
+            # steering force
+            dot = torch.einsum("b f d, b f d -> b f", steering_controls, v_dir).unsqueeze(-1)
+            steering_force = steering_controls - (dot * v_dir) # orthogonal to velocity
 
-            # total acceleration
-            acc = dvdt + force_prior
+            total_force = dvdt + throttle_force + steering_force + (self.damping * dxdt)
 
             # derivatives [dx/dt, dv/dt]
-            return torch.cat([dxdt, acc], dim=-1)
+            return torch.cat([dxdt, total_force], dim=-1)
 
         state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
 
