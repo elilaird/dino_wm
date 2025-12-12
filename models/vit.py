@@ -5108,7 +5108,8 @@ class SecondOrderViTPredictor(ViTPredictor):
             actions_force = actions
 
             if self.force_orthogonal:
-                dxdt_norm = torch.norm(dxdt, dim=-1, keepdim=True)
+                # dxdt_norm = torch.norm(dxdt, dim=-1, keepdim=True)
+                dxdt_norm = torch.sqrt(torch.sum(dxdt**2, dim=-1, keepdim=True) + 1e-6)
                 dot = torch.einsum("b f d, b f d -> b f", actions, dxdt).unsqueeze(-1)
                 actions_force = actions - (dot / (dxdt_norm + 1e-6)) * dxdt
 
