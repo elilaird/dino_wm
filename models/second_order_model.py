@@ -50,6 +50,11 @@ class SecondOrderModel(nn.Module):
         self.velocity_loss_lambda = velocity_loss_lambda
         self.kinetic_energy_reg_lambda = kinetic_energy_reg_lambda
         
+        if hasattr(self.predictor, "module"):
+            self.dt = self.predictor.module.dt
+        else:
+            self.dt = self.predictor.dt
+        
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
             encoder_patch_size = self.encoder.module.patch_size
@@ -254,7 +259,7 @@ class SecondOrderModel(nn.Module):
 
         # velocity magnitude regularization loss
         if self.velocity_loss_lambda > 0.0:
-            v_tgt_norm = torch.norm((z_tgt - z_src) / (self.predictor.dt + 1e-6), dim=-1) # secant velocity
+            v_tgt_norm = torch.norm((z_tgt - z_src) / (self.predictor.module.dt + 1e-6), dim=-1) # secant velocity
             v_loss = self.velocity_loss_lambda * self.emb_criterion(v_pred_norm, v_tgt_norm.detach())
             loss = loss + v_loss
             loss_components["vel_mag_loss"] = v_loss
