@@ -12,3 +12,4 @@ damping: -0.1
 integration_method: "rk4"
 integration_func: "odeint"
 force_orthogonal: True
+start_from_rest: False
