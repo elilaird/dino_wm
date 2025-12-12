@@ -5096,7 +5096,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         #     actions = actions - (dot / (dvdt_norm + 1e-6)) * dvdt
 
         # initial velocity
-        v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, 1:]], dim=1)
+        # v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, 1:]], dim=1)
+        v_0 = x - torch.cat([x[:, :1], x[:, :-1]], dim=1) # assumes start from rest
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
