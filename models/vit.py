@@ -5098,10 +5098,6 @@ class SecondOrderViTPredictor(ViTPredictor):
         return x
     
     def forward(self, x):
-        # extract actions
-        actions = self.extract_actions(x)
-        actions = self.action_encoder(actions)
-        
         x = self.in_proj(x)
 
         # initial force
@@ -5116,18 +5112,22 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
-            actions_force = actions
+            # actions_force = actions
+
+            dvdt = self.inner_forward(z)
+
+            # extract actions
+            actions_force = self.action_encoder(self.extract_actions(dvdt))
 
             if self.force_orthogonal:
                 # dxdt_norm = torch.norm(dxdt, dim=-1, keepdim=True)
                 dxdt_norm = torch.sqrt(torch.sum(dxdt**2, dim=-1, keepdim=True) + 1e-6)
-                dot = torch.einsum("b f d, b f d -> b f", actions, dxdt).unsqueeze(-1)
-                actions_force = actions - (dot / (dxdt_norm + 1e-6)) * dxdt
+                dot = torch.einsum("b f d, b f d -> b f", actions_force, dxdt).unsqueeze(-1)
+                actions_force = actions_force - (dot / (dxdt_norm + 1e-6)) * dxdt
 
             # physics prior (action bending)
             force_prior = self.prior_scale * actions_force + (self.damping * dxdt)
 
-            dvdt = self.inner_forward(z)
 
             # total acceleration
             acc = dvdt + force_prior
