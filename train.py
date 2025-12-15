@@ -1066,7 +1066,7 @@ class Trainer:
             if (
                 self.cfg.has_predictor and i % 1 == 0
             ):  # Log every 100 batches
-                damping_logs = self.get_damping_values()
+                damping_logs = self.get_trainable_values()
                 self.logs_update(
                     {f"train_{k}": [v] for k, v in damping_logs.items()}
                 )
@@ -1279,7 +1279,7 @@ class Trainer:
                 and self.cfg.has_predictor
                 and i == 0
             ):  # Log on first validation batch
-                damping_logs = self.get_damping_values()
+                damping_logs = self.get_trainable_values()
                 self.logs_update(
                     {f"val_{k}": [v] for k, v in damping_logs.items()}
                 )
@@ -1501,7 +1501,7 @@ class Trainer:
                 and self.cfg.has_predictor
                 and i == 0
             ):  # Log on first test batch
-                damping_logs = self.get_damping_values()
+                damping_logs = self.get_trainable_values()
                 damping_logs = {f"test_{k}": [v] for k, v in damping_logs.items()}
                 self.logs_update(damping_logs)
 
@@ -2339,15 +2339,16 @@ class Trainer:
             value_range=(-1, 1),
         )
 
-    def get_damping_values(self):
-        """Get current alpha values from the additive control transformer"""
+    def get_trainable_values(self):
+        """Get all scalar nn.Parameter values that are direct attributes of the predictor module"""
         unwrapped_predictor = self.accelerator.unwrap_model(self.predictor)
         
-        if hasattr(
-            unwrapped_predictor, "damping"
-        ):
-            return {"damping": unwrapped_predictor.damping.item()}
-        return {}
+        param_dict = {}
+        for name, param in unwrapped_predictor.named_parameters():
+            if '.' not in name and param.numel() == 1:
+                param_dict[name] = param.item()
+        
+        return param_dict
 
 
 @hydra.main(config_path="conf", config_name="train")

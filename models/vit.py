@@ -5046,6 +5046,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         action_dim=12,
         integration_func="odeint",
         force_orthogonal: bool = False,
+        prior_scale: float = 1.0,
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5080,7 +5081,8 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # action encoder 
         self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
-        self.damping = nn.Parameter(torch.tensor(damping))
+        self.damping = nn.Parameter(torch.tensor(damping), requires_grad=False)
+        self.prior_scale = nn.Parameter(torch.tensor(prior_scale))
     
     def extract_actions(self, x):
         x = x.clone()
@@ -5116,7 +5118,7 @@ class SecondOrderViTPredictor(ViTPredictor):
                 actions_force = actions - (dot / (dxdt_norm + 1e-6)) * dxdt
 
             # physics prior (action bending)
-            force_prior = actions_force + (self.damping * dxdt)
+            force_prior = self.prior_scale * actions_force + (self.damping * dxdt)
 
             # total acceleration
             acc = dvdt + force_prior
