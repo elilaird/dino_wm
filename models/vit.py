@@ -5089,11 +5089,11 @@ class SecondOrderViTPredictor(ViTPredictor):
         return rearrange(actions, "b t p d -> b (t p) d")
     
     def forward(self, x):
-        x = self.in_proj(x)
-
         # extract actions
         actions = self.extract_actions(x)
         actions = self.action_encoder(actions)
+        
+        x = self.in_proj(x)
 
         # initial force
         dvdt = super().forward(x)[0]
