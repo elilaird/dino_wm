@@ -81,7 +81,7 @@ normalize_action: True
 
 # action encoder
 action_emb_dim: 12
-num_action_repeat: 0
+num_action_repeat: 1
 
 # proprio encoder
 proprio_emb_dim: 12 

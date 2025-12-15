@@ -5082,8 +5082,17 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
         self.damping = nn.Parameter(torch.tensor(damping))
     
-    def forward(self, x, actions):
+    def extract_actions(self, x):
+        x = x.clone()
+        x = rearrange(x, "b (t p) d -> b t p d", p=NUM_PATCHES)
+        actions = x[..., -self.action_dim:]
+        return rearrange(actions, "b t p d -> b (t p) d")
+    
+    def forward(self, x):
         x = self.in_proj(x)
+
+        # extract actions
+        actions = self.extract_actions(x)
         actions = self.action_encoder(actions)
 
         # initial force
