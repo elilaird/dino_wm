@@ -49,12 +49,12 @@ class SecondOrderModel(nn.Module):
         self.step_size = step_size
         self.velocity_loss_lambda = velocity_loss_lambda
         self.kinetic_energy_reg_lambda = kinetic_energy_reg_lambda
-        
+
         if hasattr(self.predictor, "module"):
             self.dt = self.predictor.module.dt
         else:
             self.dt = self.predictor.dt
-        
+
         if hasattr(self.encoder, "module"):
             self.emb_dim = self.encoder.module.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
             encoder_patch_size = self.encoder.module.patch_size
@@ -132,20 +132,21 @@ class SecondOrderModel(nn.Module):
         act_emb = self.encode_act(act)
         if self.concat_dim == 0:
             z = torch.cat(
-                    [z_dct['visual'], z_dct['proprio'].unsqueeze(2)], dim=2 # add as an extra token
+                    [z_dct['visual'], z_dct['proprio'].unsqueeze(2), act_emb.unsqueeze(2)], dim=2 # add as an extra token
                 )  # (b, num_frames, num_patches + 2, dim)
         if self.concat_dim == 1:
             proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
-            act_repeated = repeat(
+            act_tiled = repeat(
                 act_emb.unsqueeze(2),
                 "b t 1 a -> b t f a",
                 f=z_dct["visual"].shape[2],
             )
+            act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
             z = torch.cat(
-                [z_dct['visual'], proprio_repeated], dim=3
+                [z_dct['visual'], proprio_repeated, act_repeated], dim=3
             )  # (b, num_frames, num_patches, dim + proprio_dim)
-        return z, act_repeated
+        return z, act_tiled
 
     def encode_act(self, act):
         act = self.action_encoder(act) # (b, num_frames, action_emb_dim)
@@ -171,7 +172,7 @@ class SecondOrderModel(nn.Module):
         proprio_emb = self.encode_proprio(proprio)
         return {"visual": visual_embs, "proprio": proprio_emb}
 
-    def predict(self, z, actions):  # in embedding space
+    def predict(self, z):  # in embedding space
         """
         input : z: (b, num_hist, num_patches, emb_dim)
         output: z: (b, num_hist, num_patches, emb_dim)
@@ -179,9 +180,8 @@ class SecondOrderModel(nn.Module):
         T = z.shape[1]
         # reshape to a batch of windows of inputs
         z = rearrange(z, "b t p d -> b (t p) d")
-        actions = rearrange(actions, "b t p d -> b (t p) d")
 
-        z, v  = self.predictor(z, actions)
+        z, v  = self.predictor(z)
         z = rearrange(z, "b (t p) d -> b t p d", t=T)
         v = rearrange(v, "b (t p) d -> b t p d", t=T)
         return z, v
@@ -218,12 +218,14 @@ class SecondOrderModel(nn.Module):
         if self.concat_dim == 0:
             z_visual, z_proprio, z_act = z[:, :, :-2, :], z[:, :, -2, :], z[:, :, -1, :]
         elif self.concat_dim == 1:
-            z_visual, z_proprio = z[..., :-self.proprio_dim], \
-                                         z[..., -self.proprio_dim:]
+            z_visual, z_proprio, z_act = z[..., :-(self.proprio_dim + self.action_dim)], \
+                                         z[..., -(self.proprio_dim + self.action_dim):-self.action_dim], \
+                                         z[..., -self.action_dim:]
             # remove tiled dimensions
             z_proprio = z_proprio[:, :, 0, : self.proprio_dim // self.num_proprio_repeat]
+            z_act = z_act[:, :, 0, : self.action_dim // self.num_action_repeat]
         z_obs = {"visual": z_visual, "proprio": z_proprio}
-        return z_obs, None
+        return z_obs, z_act
 
     def forward(self, obs, act):
         """
@@ -239,16 +241,15 @@ class SecondOrderModel(nn.Module):
         z, act_emb = self.encode(obs, act)
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
-        act_src = act_emb[:, : self.num_hist, :]  # (b, num_hist, num_patches, action_dim)
 
         visual_tgt = obs["visual"][
             :, self.num_pred :, ...
         ]  # (b, num_hist, 3, img_size, img_size)
 
-        z_pred, v_pred  = self.predict(z_src, act_src)
+        z_pred, v_pred  = self.predict(z_src)
 
         # log log(v_pred_norm)
-        v_pred_norm = torch.norm(v_pred, dim=-1)
+        v_pred_norm = torch.norm(v_pred[..., :-(self.action_dim)], dim=-1)
         loss_components["v_pred_norm"] = torch.log(v_pred_norm + 1e-6).mean()
 
         if self.kinetic_energy_reg_lambda > 0.0:
@@ -259,11 +260,10 @@ class SecondOrderModel(nn.Module):
 
         # velocity magnitude regularization loss
         if self.velocity_loss_lambda > 0.0:
-            v_tgt_norm = torch.norm((z_tgt - z_src) / (self.predictor.module.dt + 1e-6), dim=-1) # secant velocity
+            v_tgt_norm = torch.norm((z_tgt[..., :-(self.action_dim)] - z_src[..., :-(self.action_dim)]) / (self.predictor.module.dt + 1e-6), dim=-1) # secant velocity
             v_loss = self.velocity_loss_lambda * self.emb_criterion(v_pred_norm, v_tgt_norm.detach())
             loss = loss + v_loss
             loss_components["vel_mag_loss"] = v_loss
-
 
         if self.decoder is not None:
             obs_pred, diff_pred = self.decode(
@@ -284,9 +284,9 @@ class SecondOrderModel(nn.Module):
             visual_pred = None
 
         z_visual_loss = self.emb_criterion(
-            z_pred[:, :, :, : -(self.proprio_dim)],
+            z_pred[:, :, :, : -(self.proprio_dim + self.action_dim)],
             z_tgt[
-                :, :, :, : -(self.proprio_dim)
+                :, :, :, : -(self.proprio_dim + self.action_dim)
             ].detach(),
         )
         z_proprio_loss = self.emb_criterion(
@@ -294,18 +294,18 @@ class SecondOrderModel(nn.Module):
                 :,
                 :,
                 :,
-                -self.proprio_dim :,
+                -(self.proprio_dim + self.action_dim) : -self.action_dim,
             ],
             z_tgt[
                 :,
                 :,
                 :,
-                -self.proprio_dim :,
+                -(self.proprio_dim + self.action_dim) : -self.action_dim,
             ].detach(),
         )
         z_loss = self.emb_criterion(
-            z_pred,
-            z_tgt.detach(),
+            z_pred[:, :, :, : -self.action_dim],
+            z_tgt[:, :, :, : -self.action_dim].detach(),
         )
 
         loss = loss + z_loss
@@ -341,6 +341,18 @@ class SecondOrderModel(nn.Module):
         loss_components["loss"] = loss
         return z_pred, visual_pred, visual_reconstructed, loss, loss_components
 
+    def replace_actions_from_z(self, z, act):
+        act_emb = self.encode_act(act)
+        if self.concat_dim == 0:
+            z[:, :, -1, :] = act_emb
+        elif self.concat_dim == 1:
+            act_tiled = repeat(
+                act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z.shape[2]
+            )
+            act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
+            z[..., -self.action_dim :] = act_repeated
+        return z
+
     def rollout(self, obs_0, act, bypass_memory_reset=False):
         """
         input:  obs_0 (dict): (b, n, 3, img_size, img_size)
@@ -353,22 +365,18 @@ class SecondOrderModel(nn.Module):
         num_obs_init = obs_0['visual'].shape[1]
         act_0 = act[:, :num_obs_init]
         action = act[:, num_obs_init:] 
-        z, act_emb = self.encode(obs_0, act)
+        z, act_emb = self.encode(obs_0, act_0)
 
         t = 0
-        a_start = 0
-        a_end = num_obs_init
         inc = 1
         while t < action.shape[1]:
-            z_pred, _ = self.predict(z[:, -self.num_hist :], act_emb[:, a_start:a_end])
+            z_pred, _ = self.predict(z[:, -self.num_hist :])
             z_new = z_pred[:, -inc:, ...]
+            z_new = self.replace_actions_from_z(z_new, action[:, t : t + inc, :])
             z = torch.cat([z, z_new], dim=1)
-
             t += inc
-            a_start += inc if z.shape[1] > self.num_hist else 0
-            a_end = a_start + min(self.num_hist, z.shape[1])
 
-        z_pred, _ = self.predict(z[:, -self.num_hist :], act_emb[:, -self.num_hist:])
+        z_pred, _ = self.predict(z[:, -self.num_hist :])
         z_new = z_pred[:, -1 :, ...] # take only the next pred
         z = torch.cat([z, z_new], dim=1)
         z_obses, _ = self.separate_emb(z)

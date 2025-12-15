@@ -5046,7 +5046,6 @@ class SecondOrderViTPredictor(ViTPredictor):
         action_dim=12,
         integration_func="odeint",
         force_orthogonal: bool = False,
-        start_from_rest: bool = False,
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5068,7 +5067,6 @@ class SecondOrderViTPredictor(ViTPredictor):
         assert self.integration_func is not None, f"Invalid integration function: {integration_func}. Options: odeint, odeint_adjoint"
         
         self.force_orthogonal = force_orthogonal
-        self.start_from_rest = start_from_rest
         self.integration_method = integration_method
         if self.integration_method == "rk4":
             self.integrator_options = {"step_size": self.dt}
@@ -5086,9 +5084,17 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         self.damping = nn.Parameter(torch.tensor(damping))
     
-    def forward(self, x, actions):
+    def extract_actions(self, x):
+        x = x.clone()
+        x = rearrange(x, "b (t p) d -> b t p d", p=NUM_PATCHES)
+        actions = x[..., -self.action_dim:]
+        return rearrange(actions, "b t p d -> b (t p) d")
+    
+    def forward(self, x):
+        actions = self.extract_actions(x)
         x = self.in_proj(x)
         
+        # extract actions
         throttle_controls = self.action_to_throttle(actions)
         steering_controls = self.action_to_steering(actions)
 
@@ -5096,11 +5102,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         dvdt = super().forward(x)[0]
 
         # initial velocity
-        if self.start_from_rest:
-            v_0 = x - torch.cat([x[:, :1], x[:, :-1]], dim=1) 
-        else:
-            v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
-        
+        v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)        
         v_0 = v_0 / (self.dt + 1e-6)
 
         # integrate
