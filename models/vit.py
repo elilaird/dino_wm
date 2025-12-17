@@ -5080,9 +5080,11 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.norm = nn.LayerNorm(inner_dim * 2)
 
         # action encoder 
-        self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
+        self.action_to_throttle = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, 1))
+        self.action_to_steering = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
+        
         self.damping = nn.Parameter(torch.tensor(damping), requires_grad=False)
-        self.prior_scale = nn.Parameter(torch.tensor(prior_scale))
+        self.throttle_scale = nn.Parameter(torch.tensor(prior_scale))
 
         self.potential_head = nn.Sequential(nn.Linear(inner_dim, inner_dim*2), nn.SiLU(), nn.Linear(inner_dim*2, 1))
     
@@ -5113,7 +5115,22 @@ class SecondOrderViTPredictor(ViTPredictor):
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
 
-            actions_force = self.action_encoder(self.extract_actions(z))
+            dxdt_norm = torch.sqrt(torch.sum(dxdt**2, dim=-1, keepdim=True) + 1e-6)
+            v_direction = dxdt / (dxdt_norm + 1e-6)
+
+
+            # action force full
+            actions = self.extract_actions(z)
+
+            # throttle force
+            action_force_throttle = self.action_to_throttle(actions) * v_direction
+
+            # steering force
+            action_force_steering_full = self.action_to_steering(actions)
+            dot = torch.einsum("b f d, b f d -> b f", action_force_steering_full, v_direction).unsqueeze(-1)
+            action_force_steering = action_force_steering_full - (dot * v_direction)
+
+            action_force_total = self.throttle_scale * action_force_throttle + action_force_steering + (self.damping * dxdt)
 
             with torch.enable_grad():
                 z_grad = z.detach().requires_grad_(True)
@@ -5126,8 +5143,7 @@ class SecondOrderViTPredictor(ViTPredictor):
                 # This force is strictly conservative. Work done in a closed loop is zero.
                 f_env = -torch.autograd.grad(u_potential, z_grad, create_graph=True)[0] 
 
-            force_prior = self.prior_scale * actions_force + (self.damping * dxdt)
-            acc = force_prior + f_env
+            acc = action_force_total + f_env
 
             # derivatives [dx/dt, dv/dt]
             return torch.cat([dxdt, acc], dim=-1)
