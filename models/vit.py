@@ -5080,9 +5080,9 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.norm = nn.LayerNorm(inner_dim * 2)
 
         # action encoder 
-        self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
-        self.damping = nn.Parameter(torch.tensor(damping), requires_grad=False)
-        self.prior_scale = nn.Parameter(torch.tensor(prior_scale))
+        # self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
+        # self.damping = nn.Parameter(torch.tensor(damping), requires_grad=False)
+        # self.prior_scale = nn.Parameter(torch.tensor(prior_scale))
     
     def extract_actions(self, x):
         x = x.clone()
@@ -5100,9 +5100,6 @@ class SecondOrderViTPredictor(ViTPredictor):
     def forward(self, x):
         x = self.in_proj(x)
 
-        # initial force
-        # dvdt = super().forward(x)[0]
-
         # initial velocity
         v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
 
@@ -5112,26 +5109,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
-            # actions_force = actions
-
-            dvdt = self.inner_forward(z)
-
-            # extract actions
-            actions_force = self.action_encoder(self.extract_actions(dvdt))
-
-            if self.force_orthogonal:
-                # dxdt_norm = torch.norm(dxdt, dim=-1, keepdim=True)
-                dxdt_norm = torch.sqrt(torch.sum(dxdt**2, dim=-1, keepdim=True) + 1e-6)
-                dot = torch.einsum("b f d, b f d -> b f", actions_force, dxdt).unsqueeze(-1)
-                actions_force = actions_force - (dot / (dxdt_norm + 1e-6)) * dxdt
-
-            # physics prior (action bending)
-            force_prior = self.prior_scale * actions_force + (self.damping * dxdt)
-
-
-            # total acceleration
-            acc = dvdt + force_prior
-
+            acc = self.inner_forward(z)            
             # derivatives [dx/dt, dv/dt]
             return torch.cat([dxdt, acc], dim=-1)
 
@@ -5140,7 +5118,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         state_next = self.out_proj(self.norm(state_next))
         x_next, v_next = state_next.chunk(2, dim=-1)
 
-        return x_next, v_next
+        return x_next.contiguous(), v_next.contiguous()
 
 
 
