@@ -5083,6 +5083,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         # self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
         # self.damping = nn.Parameter(torch.tensor(damping), requires_grad=False)
         # self.prior_scale = nn.Parameter(torch.tensor(prior_scale))
+
+        self.potential_head = nn.Sequential(nn.Linear(inner_dim, inner_dim*2), nn.SiLU(), nn.Linear(inner_dim*2, 1))
     
     def extract_actions(self, x):
         x = x.clone()
@@ -5101,7 +5103,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         x = self.in_proj(x)
 
         # initial velocity
-        v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
+        # v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
+        v_0 = self.inner_forward(x)
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
@@ -5109,9 +5112,21 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
-            acc = self.inner_forward(z)            
+
+            with torch.enable_grad():
+                z_grad = z.detach().requires_grad_(True)
+                
+                # 1. Predict Scalar Potential Energy (Output dim = 1)
+                # You might need a separate 'potential_head' on your transformer
+                u_potential = self.potential_head(z_grad).sum()
+                
+                # 2. Force = -Gradient(Potential)
+                # This force is strictly conservative. Work done in a closed loop is zero.
+                f_env = -torch.autograd.grad(u_potential, z_grad, create_graph=True)[0] 
+
+
             # derivatives [dx/dt, dv/dt]
-            return torch.cat([dxdt, acc], dim=-1)
+            return torch.cat([dxdt, f_env], dim=-1)
 
         state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
 
