@@ -123,7 +123,6 @@ class Trainer:
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
         model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
 
-
         predictor_name = OmegaConf.to_container(self.cfg.predictor, resolve=True)["_target_"]
         if self.cfg.model.train_encoder and self.cfg.encoder == "dino":
             ddp_kwargs = DistributedDataParallelKwargs(
@@ -139,7 +138,7 @@ class Trainer:
             )
         else:
             ddp_kwargs = DistributedDataParallelKwargs(
-                find_unused_parameters=False
+                find_unused_parameters=True #False
             )
 
         self.accelerator = Accelerator(
@@ -325,10 +324,10 @@ class Trainer:
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
         self._keys_to_save += ["aux_predictor", "aux_predictor_optimizer"] if self.cfg.train_aux_predictor else []
-        
+
         self.init_models()
         self.init_optimizers()
-        
+
         # Load checkpoint after all models are instantiated
         with self.accelerator.main_process_first():
             model_ckpt = (
@@ -506,7 +505,7 @@ class Trainer:
                     else:
                         self.encoder.load_state_dict(ckpt)
                     print(f"Loaded pretrained encoder from {self.cfg.pretrained_encoder_path}")
-                
+
         self.accelerator.wait_for_everyone()
 
         # Sanity: make sure everyone actually built it and it has params
@@ -530,12 +529,11 @@ class Trainer:
                 # unfreeze the layernorm
                 for param in self.encoder.base_model.norm.parameters():
                     param.requires_grad = True
-        
+
         else:
             print("Freezing the all blocks for encoder", flush=True)
             for param in self.encoder.parameters():
                 param.requires_grad = False
-            
 
         self.proprio_encoder = hydra.utils.instantiate(
             self.cfg.proprio_encoder,
@@ -583,7 +581,7 @@ class Trainer:
 
         if self.cfg.use_cls_token:
             num_patches += 1
-        
+
         print(f"Num patches: {num_patches}", flush=True)
 
         predictor_dim = None
@@ -636,7 +634,7 @@ class Trainer:
             if not self.train_decoder:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
-        
+
         self.aux_predictor = None
         if self.cfg.train_aux_predictor:
             print(f"Initializing aux predictor with dim: {predictor_dim}", flush=True)
@@ -671,7 +669,6 @@ class Trainer:
         if self.cfg.train_aux_predictor:
             self.aux_predictor = self.accelerator.prepare(self.aux_predictor)
 
-
         self.model = hydra.utils.instantiate(
             self.cfg.model,
             image_size=self.cfg.img_size,
@@ -697,8 +694,6 @@ class Trainer:
             print(f"Using aux predictor: {self.cfg.train_aux_predictor}")
             print(f"Model type: {type(self.model)}")
             print(self.model)
-
-        
 
     def init_optimizers(self):
         # Scale learning rates by number of processes for proper multi-GPU training
@@ -776,7 +771,7 @@ class Trainer:
                 log.info(
                     f"Decoder LR: {self.cfg.training.decoder_lr} -> {self.cfg.training.decoder_lr * lr_scale}"
                 )
-        
+
         if self.cfg.train_aux_predictor:
             self.aux_predictor_optimizer = torch.optim.AdamW(
                 self.aux_predictor.parameters(),
@@ -1159,7 +1154,7 @@ class Trainer:
                             f"val_{k}": [v] for k, v in context_recall_logs.items()
                         }
                         self.logs_update(context_recall_logs)
-                    
+
                     # recent memory recall
                     if OmegaConf.select(self.cfg, "eval_recent_memory_recall", default=False):
                         recent_memory_recall_logs = self.recent_memory_recall_rollout(self.val_traj_dset, num_rollouts=self.cfg.num_eval_samples)
@@ -1361,7 +1356,7 @@ class Trainer:
                         f"test_{k}": [v] for k, v in context_recall_logs.items()
                     }
                     self.logs_update(context_recall_logs)
-                
+
                 # recent memory recall
                 if OmegaConf.select(self.cfg, "eval_recent_memory_recall", default=False):
                     recent_memory_recall_logs = self.recent_memory_recall_rollout(
@@ -1495,7 +1490,7 @@ class Trainer:
             # Store batch loss components for CSV
             batch_loss_logs = {f"test_{k}": [v] for k, v in batch_loss_components.items()}
             self.logs_update(batch_loss_logs)
-    
+
             if (
                 self.cfg.predictor == "additive_control_vit"
                 and self.cfg.has_predictor
@@ -1816,7 +1811,6 @@ class Trainer:
                 # for k in lipschitz_metrics.keys():
                 #     logs[f"lipschitz_{k}_err_rollout{postfix}_h{horizon}"].append(lipschitz_metrics[k].cpu().numpy())
 
-    
         for k, v in logs.items():
             logs[k] = np.mean(v) if v else 0
 
@@ -1942,7 +1936,6 @@ class Trainer:
                         f"{plotting_dir}/e{self.epoch}_{idx}_long_imagination.png",
                     )     
 
-            
             z_cycle = self.model.encode_obs({"visual": visuals, "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
             div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": visuals, "proprio": obs_tgt["proprio"]}, z_cycle)
             for k in div_loss.keys():
@@ -2010,7 +2003,7 @@ class Trainer:
                 # evaluate on query phase
                 decoded = self.model.decode_obs(z_obses)[0]
                 decoded_tgt = self.model.decode_obs(z_tgts)[0]
-                
+
                 # eval only query phase
                 visuals = decoded["visual"][:, -(num_phase_steps + 1): -1] # offset by 1 to exclude the last predicted frame which has no gt
                 z_obses = {k: v[:, -(num_phase_steps + 1): -1] for k, v in z_obses.items()}
@@ -2036,7 +2029,7 @@ class Trainer:
                 div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": visuals, "proprio": obs_tgt["proprio"]}, z_cycle)
                 for k in div_loss.keys():
                     local_logs[f"{k}_err_context_recall_burn_in_{burn_in_step}"].append(div_loss[k].cpu().numpy())
-            
+
             # aggregate over rollouts
             for k, v in local_logs.items():
                 logs[k] = np.mean(v)
@@ -2054,11 +2047,11 @@ class Trainer:
 
         # for a given context length, burn in num_hist context frames
         # encode next window of frames as the memory latents
-        # prepend the memory latents to the context 
+        # prepend the memory latents to the context
         # rollout n context steps forward
         # evaluate the rollout error
         # report avg rollout error for a trajectory over all rollouts
-        
+
         for idx in range(num_rollouts):
             obs, actions, _, _ = dset[idx]
             obs = {k:v.unsqueeze(0).to(self.device) for k, v in obs.items()}
@@ -2103,7 +2096,6 @@ class Trainer:
                 )
                 if self.accelerator.is_main_process:
                     self.plot_imgs(imgs, half_hist, f"{plotting_dir}/e{self.epoch}_{idx}_oracle_{oracle_mode}.png")
-                
 
     def recent_memory_recall_rollout(self, dset, num_rollouts=10, plotting_dir=None, rand_start_end=True):
         if plotting_dir is None:
@@ -2114,7 +2106,7 @@ class Trainer:
         logs = {}
         self.model.eval()
         horizons = [5, 10, 20, 50]
-        
+
         for idx in range(num_rollouts):
             local_logs = defaultdict(list)
 
@@ -2145,10 +2137,10 @@ class Trainer:
                 else:
                     valid_traj = True
                     start = self.window_size
-           
+
             # loop through horizon lengths
             for horizon in horizons:
-                
+
                 obs_0 = {}
                 for k in obs.keys():
                     obs_0[k] = obs[k][(start-self.window_size):(start+horizon)].unsqueeze(0).to(self.device)
@@ -2194,18 +2186,17 @@ class Trainer:
                 for k in rec_loss.keys():
                     local_logs[f"{k}_img_err_recent_memory_recall_h{horizon}"].append(rec_loss[k].cpu().numpy())
 
-                # eval latents 
+                # eval latents
                 z_cycle = self.model.encode_obs({"visual": decoded_pred["visual"], "proprio": obs_tgt["proprio"]}) # re-encode the decoded visuals; use proprio from obs instead of decoded
                 div_loss = self.horizon_treatment_eval(z_obses, z_tgts, obs_tgt, {"visual": decoded_pred["visual"], "proprio": obs_tgt["proprio"]}, z_cycle)
                 for k in div_loss.keys():
                     local_logs[f"{k}_err_recent_memory_recall_h{horizon}"].append(div_loss[k].cpu().numpy())
-                
+
         # aggregate over rollouts
         for k, v in local_logs.items():
             logs[k] = np.mean(v)
 
         return logs
-                
 
     def save_horizon_results_to_file(self, horizon_logs, filepath):
         if not horizon_logs:
@@ -2342,12 +2333,12 @@ class Trainer:
     def get_trainable_values(self):
         """Get all scalar nn.Parameter values that are direct attributes of the predictor module"""
         unwrapped_predictor = self.accelerator.unwrap_model(self.predictor)
-        
+
         param_dict = {}
         for name, param in unwrapped_predictor.named_parameters():
             if '.' not in name and param.numel() == 1:
                 param_dict[name] = param.item()
-        
+
         return param_dict
 
 

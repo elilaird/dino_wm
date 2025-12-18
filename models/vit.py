@@ -5061,7 +5061,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             emb_dropout=emb_dropout,
         )
         self.out_dim = dim
-        self.inner_dim = dim
+        self.inner_dim = inner_dim
         self.action_dim = action_dim
         self.dt = dt
         self.integration_func = getattr(torchdiffeq, integration_func, None)
@@ -5069,7 +5069,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         self.force_orthogonal = force_orthogonal
         self.integration_method = integration_method
-        if self.integration_method == "rk4":
+        if self.integration_method == "rk4" or self.integration_method == "euler":
             self.integrator_options = {"step_size": self.dt}
         else:
             self.integrator_options = {}
@@ -5103,32 +5103,34 @@ class SecondOrderViTPredictor(ViTPredictor):
         x = self.in_proj(x)
 
         # initial velocity
-        # v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
-        v_0 = self.inner_forward(x)
-
+        v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
+        
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
         t_span = torch.tensor([0.0, self.dt], device=x.device)
-        
+
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
+            if not z.requires_grad:
+                z = z.requires_grad_(True)
+
+            acc = self.inner_forward(dxdt)
 
             with torch.enable_grad():
-                z_grad = z.detach().requires_grad_(True)
-                
                 # 1. Predict Scalar Potential Energy (Output dim = 1)
                 # You might need a separate 'potential_head' on your transformer
-                u_potential = self.potential_head(z_grad).sum()
+                u_potential = self.potential_head(z).sum()
                 
                 # 2. Force = -Gradient(Potential)
                 # This force is strictly conservative. Work done in a closed loop is zero.
-                f_env = -torch.autograd.grad(u_potential, z_grad, create_graph=True)[0] 
+                f_env = -torch.autograd.grad(u_potential, z, create_graph=True)[0] 
 
+            total_force = acc + f_env
 
             # derivatives [dx/dt, dv/dt]
-            return torch.cat([dxdt, f_env], dim=-1)
+            return torch.cat([dxdt, total_force], dim=-1)
 
-        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
+        state_next = self.integration_func(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
 
         state_next = self.out_proj(self.norm(state_next))
         x_next, v_next = state_next.chunk(2, dim=-1)
