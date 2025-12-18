@@ -5109,7 +5109,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
-            acc = self.inner_forward(z)            
+            acc = self.inner_forward(dxdt)            
             # derivatives [dx/dt, dv/dt]
             return torch.cat([dxdt, acc], dim=-1)
 
