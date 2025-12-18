@@ -165,7 +165,9 @@ class PlanWorkspace:
         from planning.mpc import MPCPlanner
         if isinstance(self.planner, MPCPlanner):
             self.planner.sub_planner.horizon = cfg_dict["goal_H"]
-            self.planner.n_taken_actions = cfg_dict["goal_H"]
+            # self.planner.n_taken_actions = cfg_dict["goal_H"]
+            self.planner.n_taken_actions = cfg_dict['planner']['n_taken_actions']
+
         else:
             self.planner.horizon = cfg_dict["goal_H"]
 
