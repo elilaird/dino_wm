@@ -5133,15 +5133,16 @@ class SecondOrderViTPredictor(ViTPredictor):
             action_force_total = self.throttle_scale * action_force_throttle + action_force_steering + (self.damping * dxdt)
 
             with torch.enable_grad():
-                z_grad = z.detach().requires_grad_(True)
+                if not z.requires_grad:
+                    z = z.requires_grad_(True)
                 
                 # 1. Predict Scalar Potential Energy (Output dim = 1)
                 # You might need a separate 'potential_head' on your transformer
-                u_potential = self.potential_head(z_grad).sum()
+                u_potential = self.potential_head(z).sum()
                 
                 # 2. Force = -Gradient(Potential)
                 # This force is strictly conservative. Work done in a closed loop is zero.
-                f_env = -torch.autograd.grad(u_potential, z_grad, create_graph=True)[0] 
+                f_env = -torch.autograd.grad(u_potential, z, create_graph=True)[0] 
 
             acc = action_force_total + f_env
 
