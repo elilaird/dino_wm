@@ -5048,6 +5048,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         integration_func="odeint",
         force_orthogonal: bool = False,
         prior_scale: float = 1.0,
+        integration_steps: int = 1.0,
+        grad_ckpt: bool = False,
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5061,24 +5063,26 @@ class SecondOrderViTPredictor(ViTPredictor):
             dropout=dropout,
             emb_dropout=emb_dropout,
         )
+        self.grad_ckpt = grad_ckpt
         self.out_dim = dim
         self.inner_dim = dim
         self.action_dim = action_dim
         self.dt = dt
         self.integration_func = getattr(torchdiffeq, integration_func, None)
         assert self.integration_func is not None, f"Invalid integration function: {integration_func}. Options: odeint, odeint_adjoint"
-        
+        self.integration_steps = integration_steps
         self.force_orthogonal = force_orthogonal
         self.integration_method = integration_method
         if self.integration_method == "rk4":
-            self.integrator_options = {"step_size": self.dt}
+            self.integrator_options = {"step_size": self.dt / self.integration_steps}
         else:
             self.integrator_options = {}
 
         # projectors
         self.in_proj = nn.Linear(dim, inner_dim)
         self.out_proj = nn.Linear(inner_dim*2, dim*2)
-        self.norm = nn.LayerNorm(inner_dim * 2)
+        self.norm_x = nn.LayerNorm(inner_dim)
+        self.norm_v = nn.LayerNorm(inner_dim)
 
         # action encoder 
         # self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
@@ -5106,19 +5110,22 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
-        t_span = torch.tensor([0.0, self.dt], device=x.device)
+        t_span = torch.linspace(0.0, self.dt, self.integration_steps + 1, device=x.device)
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
-            acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
-            # derivatives [dx/dt, dv/dt]
+            if self.grad_ckpt:
+                acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
+            else:
+                acc = self.inner_forward(z)
             return torch.cat([dxdt, acc], dim=-1)
 
         state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
 
-        state_next = self.out_proj(self.norm(state_next))
+        state_next = self.out_proj(state_next)
         x_next, v_next = state_next.chunk(2, dim=-1)
-
+        x_next = self.norm_x(x_next)
+        v_next = self.norm_v(v_next)
         return x_next.contiguous(), v_next.contiguous()
 
 
