@@ -13,3 +13,5 @@ integration_method: "rk4"
 integration_func: "odeint"
 force_orthogonal: False
 prior_scale: 1.0
+integration_steps: 1.0
+grad_ckpt: False

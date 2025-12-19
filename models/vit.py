@@ -5048,6 +5048,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         integration_func="odeint",
         force_orthogonal: bool = False,
         prior_scale: float = 1.0,
+        integration_steps: int = 1.0,
+        grad_ckpt: bool = False,
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5061,6 +5063,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             dropout=dropout,
             emb_dropout=emb_dropout,
         )
+        self.grad_ckpt = grad_ckpt
         self.out_dim = dim
         self.inner_dim = dim
         self.action_dim = action_dim
@@ -5070,8 +5073,9 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         self.force_orthogonal = force_orthogonal
         self.integration_method = integration_method
+        self.integration_steps = integration_steps
         if self.integration_method == "rk4":
-            self.integrator_options = {"step_size": self.dt}
+            self.integrator_options = {"step_size": self.dt / integration_steps}
         else:
             self.integrator_options = {}
 
@@ -5105,15 +5109,12 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         x = self.in_proj(x)
 
-        # initial force
-        # dvdt = super().forward(x)[0]
-
         # initial velocity
         v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
-        t_span = torch.tensor([0.0, self.dt], device=x.device)
+        t_span = torch.linspace(0.0, self.dt, self.integration_steps + 1, device=x.device)
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
@@ -5128,7 +5129,10 @@ class SecondOrderViTPredictor(ViTPredictor):
             # physics prior (action bending)
             force_prior = self.prior_scale * actions_force + (self.damping * dxdt)
 
-            dvdt = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
+            if self.grad_ckpt:
+                dvdt = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
+            else:
+                dvdt = self.inner_forward(z)
 
             # total acceleration
             acc = dvdt + force_prior
@@ -5142,8 +5146,6 @@ class SecondOrderViTPredictor(ViTPredictor):
         x_next, v_next = state_next.chunk(2, dim=-1)
 
         return x_next.contiguous(), v_next.contiguous()
-
-
 
 
 
