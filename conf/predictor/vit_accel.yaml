@@ -5,11 +5,11 @@ mlp_dim: 2048
 dropout: 0.1
 emb_dropout: 0
 pool: 'mean'
-inner_dim: 256
+inner_dim: 408
 action_dim: ${action_emb_dim}
 dt: 1.0
 damping: -0.1
 integration_method: "rk4"
 integration_func: "odeint"
-force_orthogonal: True
+force_orthogonal: False
 prior_scale: 1.0
