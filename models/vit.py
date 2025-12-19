@@ -5,6 +5,7 @@ from einops import rearrange, repeat
 from torch.nn import functional as F
 from torchdiffeq import odeint, odeint_adjoint
 import torchdiffeq
+import torch.utils.checkpoint as checkpoint
 
 from .model_utils import *
 from .memory_retrieval import (
@@ -5127,7 +5128,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             # physics prior (action bending)
             force_prior = self.prior_scale * actions_force + (self.damping * dxdt)
 
-            dvdt = self.inner_forward(z)
+            dvdt = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
 
             # total acceleration
             acc = dvdt + force_prior
