@@ -2,10 +2,11 @@
 
 # Usage: ./planning_eval.sh <branch> <time> <model_name> <epochs> [additional_args...]
 # Example: ./planning_eval.sh unconstrained-second-order 1:15:00 2025-12-17/17-30-10 "10 20 30 40 50" goal_H=6
+# Range syntax: "10-50:10" (start-end:step) or "10-50" (every integer from start to end)
 
 if [ $# -lt 4 ]; then
     echo "Usage: $0 <branch> <time> <model_name> <epochs> [additional_args...]"
-    echo "epochs should be space-separated list like '10 20 30' or '10-50:10' for range with step"
+    echo "epochs should be space-separated list like '10 20 30' or '10-50:10' for range with step, or '10-50' for every integer from start to end"
     exit 1
 fi
 
