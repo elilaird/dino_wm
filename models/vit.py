@@ -1,4 +1,5 @@
 import math
+import torch.utils.checkpoint as checkpoint
 import torch
 from torch import nn
 from einops import rearrange, repeat
@@ -5109,7 +5110,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
-            acc = self.inner_forward(z)            
+            acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
             # derivatives [dx/dt, dv/dt]
             return torch.cat([dxdt, acc], dim=-1)
 
