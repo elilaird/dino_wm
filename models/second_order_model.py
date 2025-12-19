@@ -388,3 +388,23 @@ class SecondOrderModel(nn.Module):
 
     def reset_predictor_memory(self):
         pass
+
+    def set_dt(self, new_dt):
+        if hasattr(self.predictor, "set_dt"):
+            self.predictor.set_dt(new_dt)
+            assert self.predictor.dt == new_dt, f"Predictor dt {self.predictor.dt} does not match new_dt {new_dt}"
+            print(f"Set predictor dt to {new_dt}")
+        elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "set_dt"):
+            self.predictor.module.set_dt(new_dt)
+            assert self.predictor.module.dt == new_dt, f"Predictor dt {self.predictor.module.dt} does not match new_dt {new_dt}"
+            print(f"Set predictor dt to {new_dt}")
+        else:
+            raise ValueError(f"Predictor {self.predictor} does not have a set_dt method")
+        
+    def get_dt(self):
+        if hasattr(self.predictor, "get_dt"):
+            return self.predictor.get_dt()
+        elif hasattr(self.predictor, "module") and hasattr(self.predictor.module, "get_dt"):
+            return self.predictor.module.get_dt()
+        else:
+            raise ValueError(f"Predictor {self.predictor} does not have a get_dt method")

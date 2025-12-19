@@ -1102,6 +1102,27 @@ class Trainer:
                 }
                 self.logs_update(val_rollout_logs)
 
+                # variable frameskip openloop rollout
+                train_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
+                    self.train_traj_dset,
+                    mode="train",
+                    rand_start_end=rand_start_end,
+                )
+                train_variable_frameskip_rollout_logs = {
+                    f"train_{k}": [v] for k, v in train_variable_frameskip_rollout_logs.items()
+                }
+                self.logs_update(train_variable_frameskip_rollout_logs)
+
+                val_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
+                    self.val_traj_dset,
+                    mode="val",
+                    rand_start_end=rand_start_end,
+                )
+                val_variable_frameskip_rollout_logs = {
+                    f"val_{k}": [v] for k, v in val_variable_frameskip_rollout_logs.items()
+                }
+                self.logs_update(val_variable_frameskip_rollout_logs)
+
                 if self.epoch % self.cfg.eval_every_x_epoch == 0:
                     # long horizon treatments
                     if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
@@ -1317,6 +1338,17 @@ class Trainer:
                 }
                 self.logs_update(test_rollout_logs)
 
+                # variable frameskip openloop rollout
+                test_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
+                    self.test_traj_dset,
+                    mode="test",
+                    rand_start_end=rand_start_end,
+                )
+                test_variable_frameskip_rollout_logs = {
+                    f"test_{k}": [v] for k, v in test_variable_frameskip_rollout_logs.items()
+                }
+                self.logs_update(test_variable_frameskip_rollout_logs)
+
                 # long horizon treatments
                 if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
                     test_long_horizon_logs = self.openloop_rollout(
@@ -1385,12 +1417,6 @@ class Trainer:
             B, N = obs["visual"].shape[:2]
             num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
 
-            # if hasattr(self.model.predictor, "reset_memory"):
-            #     self.model.predictor.reset_memory()
-            # elif hasattr(self.model.predictor, "module") and hasattr(
-            #     self.model.predictor.module, "reset_memory"
-            # ):
-            #     self.model.predictor.module.reset_memory()
             self.model.reset_predictor_memory()
 
             for window_idx in range(num_windows):
@@ -1810,15 +1836,123 @@ class Trainer:
                     for k in div_loss.keys():
                         logs[f"{k}_err_horizon_{postfix}_h{horizon}"].append(div_loss[k].cpu().numpy())
 
-                # # estimate lipschitz bound
-                # z_tgts = self.model.encode_obs({k: v.unsqueeze(0).to(self.device) for k, v in obs.items()})
-                # lipschitz_metrics = self.model.estimate_lipschitz(z_obses['visual'], z_tgts['visual'])
-                # for k in lipschitz_metrics.keys():
-                #     logs[f"lipschitz_{k}_err_rollout{postfix}_h{horizon}"].append(lipschitz_metrics[k].cpu().numpy())
-
-    
         for k, v in logs.items():
             logs[k] = np.mean(v) if v else 0
+
+        return logs
+
+    def variable_frameskip_openloop_rollout(
+        self,
+        dset,
+        num_rollout=10,
+        rand_start_end=True,
+        min_horizon=2,
+        mode="train",
+        frameskip_multipliers=[1, 0.2, 2]
+    ):
+
+        original_frameskip = self.cfg.frameskip
+
+        np.random.seed(self.cfg.training.seed)
+        min_horizon = min_horizon + self.cfg.num_hist
+        plotting_dir = f"rollout_plots/e{self.epoch}_rollout"
+        if self.accelerator.is_main_process:
+            os.makedirs(plotting_dir, exist_ok=True)
+        self.accelerator.wait_for_everyone()
+        logs = defaultdict(list)
+
+        # rollout with both num_hist and 1 frame as context
+        self.model.reset_predictor_memory()
+        original_dt = self.model.get_dt()
+
+        # sample traj
+        for mult in frameskip_multipliers:
+            frameskip = int(original_frameskip * mult)
+            self.model.set_dt(original_dt * mult)
+
+            for idx in range(num_rollout):
+                valid_traj = False
+                while not valid_traj:
+                    traj_idx = np.random.randint(0, len(dset))
+                    obs, act, state, _ = dset[traj_idx]
+                    act = act.to(self.device)
+                    if rand_start_end:
+                        if (
+                            obs["visual"].shape[0]
+                            > min_horizon * frameskip + 1
+                        ):
+                            start = np.random.randint(
+                                0,
+                                obs["visual"].shape[0]
+                                - min_horizon * frameskip
+                                - 1,
+                            )
+                        else:
+                            start = 0
+                        max_horizon = (
+                            obs["visual"].shape[0] - start - 1
+                        ) // frameskip
+                        if max_horizon > min_horizon:
+                            valid_traj = True
+                            horizon = np.random.randint(
+                                min_horizon, max_horizon + 1
+                            )
+                    else:
+                        valid_traj = True
+                        start = 0
+                        horizon = (
+                            obs["visual"].shape[0] - 1
+                        ) // frameskip
+
+                for k in obs.keys():
+                    obs[k] = obs[k][
+                        start : start
+                        + horizon * frameskip
+                        + 1 : frameskip
+                    ]
+                act = act[start : start + horizon * frameskip]
+                print(f"obs: {obs['visual'].shape}, act: {act.shape} pre-rearrange")
+                act = rearrange(act, "(h f) d -> h (f d)", f=frameskip)
+                print(f"obs: {obs['visual'].shape}, act: {act.shape} post-rearrange")
+                print(f"frameskip: {frameskip}, horizon: {horizon}")
+
+                obs_g = {}
+                for k in obs.keys():
+                    obs_g[k] = obs[k][-1].unsqueeze(0).unsqueeze(0).to(self.device)
+                z_g = self.model.encode_obs(obs_g)
+                actions = act.unsqueeze(0)
+
+
+                obs_0 = {}
+                for k in obs.keys():
+                    obs_0[k] = (
+                        obs[k][:self.cfg.num_hist].unsqueeze(0).to(self.device)
+                    )  # unsqueeze for batch, (b, t, c, h, w)
+                z_obses, z = self.model.rollout(obs_0, actions)
+                z_obs_last = slice_trajdict_with_t(
+                    z_obses, start_idx=-1, end_idx=None
+                )
+                div_loss = self.err_eval_single(z_obs_last, z_g)
+
+                for k in div_loss.keys():
+                    log_key = f"z_{k}_err_rollout_h{horizon}_fs{frameskip}"
+                    logs[log_key].append(div_loss[k].cpu().numpy())
+
+                if self.cfg.has_decoder:
+                    decoded = self.model.decode_obs(z_obses)[0]
+                    visuals = decoded["visual"]
+                    imgs = torch.cat([obs["visual"], visuals[0].cpu()], dim=0)
+                    if self.accelerator.is_main_process:
+                        self.plot_imgs(
+                            imgs,
+                            obs["visual"].shape[0],
+                            f"{plotting_dir}/e{self.epoch}_{mode}_{idx}_h{horizon}_fs{frameskip}.png",
+                        )                           
+
+        for k, v in logs.items():
+            logs[k] = np.mean(v) if v else 0
+        
+        self.model.set_dt(original_dt)
 
         return logs
 

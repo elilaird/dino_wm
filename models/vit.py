@@ -5124,12 +5124,18 @@ class SecondOrderViTPredictor(ViTPredictor):
             # derivatives [dx/dt, dv/dt]
             return torch.cat([dxdt, acc], dim=-1)
 
-        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
+        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method)[-1]
 
         state_next = self.out_proj(self.norm(state_next))
         x_next, v_next = state_next.chunk(2, dim=-1)
 
         return x_next.contiguous(), v_next.contiguous()
+    
+    def set_dt(self, new_dt):
+        self.dt = new_dt
+    
+    def get_dt(self):
+        return self.dt
 
 
 
