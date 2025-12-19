@@ -5140,7 +5140,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         state_next = self.out_proj(self.norm(state_next))
         x_next, v_next = state_next.chunk(2, dim=-1)
 
-        return x_next, v_next
+        return x_next.contiguous(), v_next.contiguous()
 
 
 
