@@ -1,5 +1,6 @@
 import math
 import torch
+import torch.utils.checkpoint as checkpoint
 from torch import nn
 from einops import rearrange, repeat
 from torch.nn import functional as F
@@ -5114,7 +5115,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             z, dxdt = state.chunk(2, dim=-1)
             # actions_force = actions
 
-            dvdt = self.inner_forward(z)
+            dvdt = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
 
             # extract actions
             actions_force = self.action_encoder(self.extract_actions(dvdt))

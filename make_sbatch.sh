@@ -19,7 +19,6 @@ PY_ARGS="${@}"
 
 if [ "${PARTITION}" = "short" ]; then
     TIME="0-04:00:00"
-    BRANCH=local
 fi
 
 HOME_DIR=${HOME_DIR:-"/users/ejlaird/Projects/dino_wm"}
