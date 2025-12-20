@@ -5048,7 +5048,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         integration_func="odeint",
         force_orthogonal: bool = False,
         prior_scale: float = 1.0,
-        integration_steps: int = 1.0,
+        integration_steps: int = 1,
         grad_ckpt: bool = False,
     ):
         super().__init__(
@@ -5084,9 +5084,12 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.norm_x = nn.LayerNorm(inner_dim)
         self.norm_v = nn.LayerNorm(inner_dim)
 
+        # velocity
+        self.vel_head = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
+
         # action encoder 
         # self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
-        # self.damping = nn.Parameter(torch.tensor(damping), requires_grad=False)
+        self.damping = nn.Parameter(torch.tensor(damping))
         # self.prior_scale = nn.Parameter(torch.tensor(prior_scale))
     
     def extract_actions(self, x):
@@ -5114,18 +5117,27 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
+            z = self.norm_x(z)
+            dxdt = self.norm_v(dxdt)
+
+            # velocity correction
+            dxdt = self.vel_head(torch.cat([z, dxdt], dim=-1))
+
             if self.grad_ckpt:
                 acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
             else:
                 acc = self.inner_forward(z)
+
+            acc = acc + self.damping * dxdt
+
             return torch.cat([dxdt, acc], dim=-1)
 
         state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
 
-        state_next = self.out_proj(state_next)
-        x_next, v_next = state_next.chunk(2, dim=-1)
+        x_next, v_next  = self.out_proj(state_next).chunk(2, dim=-1)
         x_next = self.norm_x(x_next)
         v_next = self.norm_v(v_next)
+
         return x_next.contiguous(), v_next.contiguous()
 
 
