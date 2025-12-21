@@ -553,7 +553,7 @@ class Trainer:
 
         self.action_encoder = hydra.utils.instantiate(
             self.cfg.action_encoder,
-            in_chans=self.datasets["train"].action_dim,
+            in_chans=self.datasets["train"].action_dim // self.cfg.frameskip,
             emb_dim=self.cfg.action_emb_dim,
         )
         action_emb_dim = self.action_encoder.emb_dim
@@ -563,7 +563,7 @@ class Trainer:
             self.cfg.action_encoder.emb_dim = self.action_encoder.emb_dim
             self.cfg.action_encoder.in_chans = self.datasets[
                 "train"
-            ].action_dim
+            ].action_dim // self.cfg.frameskip
 
         # initialize predictor
         if self.encoder.latent_ndim == 1:  # if feature is 1D
@@ -1911,10 +1911,7 @@ class Trainer:
                         + 1 : frameskip
                     ]
                 act = act[start : start + horizon * frameskip]
-                print(f"obs: {obs['visual'].shape}, act: {act.shape} pre-rearrange")
                 act = rearrange(act, "(h f) d -> h (f d)", f=frameskip)
-                print(f"obs: {obs['visual'].shape}, act: {act.shape} post-rearrange")
-                print(f"frameskip: {frameskip}, horizon: {horizon}")
 
                 obs_g = {}
                 for k in obs.keys():
