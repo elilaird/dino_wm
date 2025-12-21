@@ -1,4 +1,4 @@
-# Adapted from https://github.com/facebookresearch/ijepa/blob/main/src/models/vision_transformer.py 
+# Adapted from https://github.com/facebookresearch/ijepa/blob/main/src/models/vision_transformer.py
 import numpy as np
 import torch.nn as nn
 import torch
@@ -68,6 +68,50 @@ class ProprioceptiveEmbedding(nn.Module):
         x = self.patch_embed(x)
         x = x.permute(0, 2, 1)
         return x
+
+
+class VariableProprioceptiveEmbedding(nn.Module):
+    def __init__(
+        self,
+        num_frames=16,
+        tubelet_size=1,
+        in_chans=8,  # original action_dim (not multiplied by frameskip)
+        emb_dim=384,
+        use_3d_pos=False,
+    ):
+        super().__init__()
+        self.num_frames = num_frames
+        self.tubelet_size = tubelet_size
+        self.in_chans = in_chans
+        self.emb_dim = emb_dim
+
+        # Embed individual actions
+        self.action_embed = nn.Conv1d(
+            in_chans,
+            emb_dim,
+            kernel_size=1,  # Each action gets embedded independently
+            stride=1,
+        )
+
+    def forward(self, x):
+        # x: [B, T, D * F] where D=original_action_dim, F=frameskip
+        B, T, action_dim = x.shape
+        F = action_dim // self.in_chans  # Infer frameskip from input
+
+        # Reshape to process individual actions: [B, T*F, D]
+        x = x.view(B, T * F, self.in_chans)
+
+        # Embed each individual action
+        x = x.permute(0, 2, 1)  # [B, D, T*F]
+        x = self.action_embed(x)  # [B, emb_dim, T*F]
+
+        # Reshape back to temporal sequence: [B, T, F, emb_dim]
+        x = x.permute(0, 2, 1).view(B, T, F, self.emb_dim)
+
+        x = x.mean(dim=2)  # [B, T, emb_dim] - simple averaging
+        
+        return x
+
 
 class MiniGridProprioceptiveEmbedding(nn.Module):
     def __init__(self, in_chans=None, world_size=17, emb_dim=16):

@@ -1,4 +1,5 @@
 import math
+import torch.utils.checkpoint as checkpoint
 import torch
 from torch import nn
 from einops import rearrange, repeat
@@ -5046,6 +5047,9 @@ class SecondOrderViTPredictor(ViTPredictor):
         action_dim=12,
         integration_func="odeint",
         force_orthogonal: bool = False,
+        prior_scale: float = 1.0,
+        integration_steps: int = 1,
+        grad_ckpt: bool = False,
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5059,85 +5063,88 @@ class SecondOrderViTPredictor(ViTPredictor):
             dropout=dropout,
             emb_dropout=emb_dropout,
         )
+        self.grad_ckpt = grad_ckpt
         self.out_dim = dim
         self.inner_dim = dim
         self.action_dim = action_dim
         self.dt = dt
         self.integration_func = getattr(torchdiffeq, integration_func, None)
         assert self.integration_func is not None, f"Invalid integration function: {integration_func}. Options: odeint, odeint_adjoint"
-        
+        self.integration_steps = integration_steps
         self.force_orthogonal = force_orthogonal
         self.integration_method = integration_method
         if self.integration_method == "rk4":
-            self.integrator_options = {"step_size": self.dt}
+            self.integrator_options = {"step_size": self.dt / self.integration_steps}
         else:
             self.integrator_options = {}
 
         # projectors
         self.in_proj = nn.Linear(dim, inner_dim)
         self.out_proj = nn.Linear(inner_dim*2, dim*2)
-        self.norm = nn.LayerNorm(inner_dim * 2)
+        self.norm_x = nn.LayerNorm(inner_dim)
+        self.norm_v = nn.LayerNorm(inner_dim)
+
+        # velocity
+        self.vel_head = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
 
         # action encoder 
-        self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
+        # self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
         self.damping = nn.Parameter(torch.tensor(damping))
+        # self.prior_scale = nn.Parameter(torch.tensor(prior_scale))
     
     def extract_actions(self, x):
         x = x.clone()
         x = rearrange(x, "b (t p) d -> b t p d", p=NUM_PATCHES)
         actions = x[..., -self.action_dim:]
         return rearrange(actions, "b t p d -> b (t p) d")
+
+    def inner_forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        x = self.transformer(x)
+        return x
     
     def forward(self, x):
-        # extract actions
-        actions = self.extract_actions(x)
-        actions = self.action_encoder(actions)
-        
         x = self.in_proj(x)
-
-        # initial force
-        dvdt = super().forward(x)[0]
 
         # initial velocity
         v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
-        t_span = torch.tensor([0.0, self.dt], device=x.device)
+        t_span = torch.linspace(torch.tensor(0.0, device=x.device), torch.tensor(self.dt, device=x.device), int(self.integration_steps + 1), device=x.device)
         
         def dynamics(t, state):
-            _, dxdt = state.chunk(2, dim=-1)
-            actions_force = actions
+            z, dxdt = state.chunk(2, dim=-1)
+            z = self.norm_x(z)
+            dxdt = self.norm_v(dxdt)
 
-            if self.force_orthogonal:
-                # dxdt_norm = torch.norm(dxdt, dim=-1, keepdim=True)
-                dxdt_norm = torch.sqrt(torch.sum(dxdt**2, dim=-1, keepdim=True) + 1e-6)
-                dot = torch.einsum("b f d, b f d -> b f", actions, dxdt).unsqueeze(-1)
-                actions_force = actions - (dot / (dxdt_norm + 1e-6)) * dxdt
+            # velocity correction
+            dxdt = self.vel_head(torch.cat([z, dxdt], dim=-1))
 
-            # physics prior (action bending)
-            force_prior = actions_force + (self.damping * dxdt)
+            if self.grad_ckpt:
+                acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
+            else:
+                acc = self.inner_forward(z)
 
-            # total acceleration
-            acc = dvdt + force_prior
+            acc = acc + self.damping * dxdt
 
-            # derivatives [dx/dt, dv/dt]
             return torch.cat([dxdt, acc], dim=-1)
 
         state_next = odeint(dynamics, state_0, t_span, method=self.integration_method)[-1]
 
-        state_next = self.out_proj(self.norm(state_next))
-        x_next, v_next = state_next.chunk(2, dim=-1)
+        x_next, v_next  = self.out_proj(state_next).chunk(2, dim=-1)
+        x_next = self.norm_x(x_next)
+        v_next = self.norm_v(v_next)
 
         return x_next.contiguous(), v_next.contiguous()
-    
+
     def set_dt(self, new_dt):
         self.dt = new_dt
     
     def get_dt(self):
         return self.dt
-
-
 
 
 

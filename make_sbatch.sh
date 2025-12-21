@@ -5,7 +5,7 @@
 
 DATETIME=$(date +"%Y%m%d_%H%M%S")
 
-TIME=${TIME:-2-00:00:00}
+TIME=${TIME:-1-23:45:00}
 PARTITION=${PARTITION:-batch}
 TYPE=${TYPE:-train} # jupyter, eval, test
 CONDA_ENV=${CONDA_ENV:-world_models}
@@ -19,7 +19,6 @@ PY_ARGS="${@}"
 
 if [ "${PARTITION}" = "short" ]; then
     TIME="0-04:00:00"
-    BRANCH=local
 fi
 
 HOME_DIR=${HOME_DIR:-"/users/ejlaird/Projects/dino_wm"}
