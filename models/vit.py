@@ -1,6 +1,7 @@
 import math
 import torch
 from torch import nn
+import torch.utils.checkpoint as checkpoint
 from einops import rearrange, repeat
 from torch.nn import functional as F
 from torchdiffeq import odeint, odeint_adjoint
@@ -5114,7 +5115,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             if not z.requires_grad:
                 z = z.requires_grad_(True)
 
-            acc = self.inner_forward(dxdt)
+            acc = checkpoint.checkpoint(self.inner_forward, dxdt, use_reentrant=False)
 
             with torch.enable_grad():
                 # 1. Predict Scalar Potential Energy (Output dim = 1)
