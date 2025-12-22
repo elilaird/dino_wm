@@ -2,7 +2,7 @@ defaults:
   - _self_
   - env: point_maze
   - encoder: dino 
-  - action_encoder: proprio
+  - action_encoder: variable_proprio
   - proprio_encoder: proprio
   - decoder: vqvae
   - predictor: vit_accel
