@@ -3,6 +3,7 @@ import torch
 from torch import nn
 from einops import rearrange, repeat
 from torch.nn import functional as F
+import torch.utils.checkpoint as checkpoint
 from torchdiffeq import odeint, odeint_adjoint
 import torchdiffeq
 
