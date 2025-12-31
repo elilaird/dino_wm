@@ -5085,7 +5085,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.norm_v = nn.LayerNorm(inner_dim)
 
         # velocity
-        self.vel_head = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
+        self.accel_head = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
 
         # action encoder 
         # self.action_encoder = nn.Sequential(nn.Linear(action_dim, inner_dim * 2), nn.SiLU(), nn.Linear(inner_dim * 2, inner_dim))
@@ -5109,7 +5109,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         x = self.in_proj(x)
 
         # initial velocity
-        v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
+        v_0 = checkpoint.checkpoint(self.inner_forward, x, use_reentrant=False)
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
@@ -5120,10 +5120,8 @@ class SecondOrderViTPredictor(ViTPredictor):
             z = self.norm_x(z)
             dxdt = self.norm_v(dxdt)
 
-            # velocity correction
-            dxdt = self.vel_head(torch.cat([z, dxdt], dim=-1))
-            acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
-
+            # acceleration head 
+            acc = self.accel_head(torch.cat([z, dxdt], dim=-1))
             acc = acc + self.damping * dxdt
 
             return torch.cat([dxdt, acc], dim=-1)
