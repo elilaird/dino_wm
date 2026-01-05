@@ -498,6 +498,12 @@ class ViTPredictor(nn.Module):
         x = self.dropout(x)
         x = self.transformer(x)
         return x, None
+    
+    def set_dt(self, new_dt):
+        return
+    
+    def get_dt(self):
+        return 1.0
 
 
 class ViTPredictorWithPersistentTokens(nn.Module):

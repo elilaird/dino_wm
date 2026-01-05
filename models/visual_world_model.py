@@ -478,3 +478,9 @@ class VWorldModel(nn.Module):
             "mean_bound": torch.mean(lipschitz_bound, dim=1),
             "max_bound": torch.amax(lipschitz_bound, dim=1),
         }
+
+    def set_dt(self, new_dt):
+        return
+
+    def get_dt(self):
+        return 1.0
