@@ -498,6 +498,12 @@ class ViTPredictor(nn.Module):
         x = self.dropout(x)
         x = self.transformer(x)
         return x, None
+    
+    def set_dt(self, new_dt):
+        return
+    
+    def get_dt(self):
+        return 1.0
 
 
 class ViTPredictorWithPersistentTokens(nn.Module):
@@ -5129,10 +5135,16 @@ class SecondOrderViTPredictor(ViTPredictor):
 
             return torch.cat([dxdt, acc], dim=-1)
 
-        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options=self.integrator_options)[-1]
+        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method)[-1]
 
         x_next, v_next  = self.out_proj(state_next).chunk(2, dim=-1)
         x_next = self.norm_x(x_next)
         v_next = self.norm_v(v_next)
 
         return x_next.contiguous(), v_next.contiguous()
+
+    def set_dt(self, new_dt):
+        self.dt = new_dt
+    
+    def get_dt(self):
+        return self.dt
