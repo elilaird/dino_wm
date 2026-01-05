@@ -5122,11 +5122,7 @@ class SecondOrderViTPredictor(ViTPredictor):
 
             # velocity correction
             dxdt = self.vel_head(torch.cat([z, dxdt], dim=-1))
-
-            if self.grad_ckpt:
-                acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
-            else:
-                acc = self.inner_forward(z)
+            acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
 
             acc = acc + self.damping * dxdt
 
