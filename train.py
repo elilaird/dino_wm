@@ -559,7 +559,7 @@ class Trainer:
         )
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
-        
+
         # update cfg for saving
         with open_dict(self.cfg):
             self.cfg.action_encoder.emb_dim = self.action_encoder.emb_dim
@@ -1932,7 +1932,7 @@ class Trainer:
                 div_loss = self.err_eval_single(z_obs_last, z_g)
 
                 for k in div_loss.keys():
-                    log_key = f"z_{k}_err_rollout_h{horizon}_fs{frameskip}"
+                    log_key = f"z_{k}_err_rollout_fs{frameskip}"
                     logs[log_key].append(div_loss[k].cpu().numpy())
 
                 if self.cfg.has_decoder:
