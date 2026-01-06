@@ -553,17 +553,17 @@ class Trainer:
 
         self.action_encoder = hydra.utils.instantiate(
             self.cfg.action_encoder,
-            in_chans=self.datasets["train"].action_dim // self.cfg.frameskip,
+            in_chans=self.datasets["train"].action_dim,
             emb_dim=self.cfg.action_emb_dim,
+            frameskip=self.cfg.frameskip,
         )
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
+        
         # update cfg for saving
         with open_dict(self.cfg):
             self.cfg.action_encoder.emb_dim = self.action_encoder.emb_dim
-            self.cfg.action_encoder.in_chans = self.datasets[
-                "train"
-            ].action_dim // self.cfg.frameskip
+            self.cfg.action_encoder.in_chans = self.action_encoder.in_chans
 
         # initialize predictor
         if self.encoder.latent_ndim == 1:  # if feature is 1D
