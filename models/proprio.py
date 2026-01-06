@@ -45,7 +45,8 @@ class ProprioceptiveEmbedding(nn.Module):
         tubelet_size=1,
         in_chans=8, # action_dim
         emb_dim=384, # output_dim
-        use_3d_pos=False # always False for now
+        use_3d_pos=False, # always False for now
+        frameskip=1,
     ):
         super().__init__()
         print(f'using 3d prop position {use_3d_pos=}')
@@ -78,12 +79,15 @@ class VariableProprioceptiveEmbedding(nn.Module):
         in_chans=8,  # original action_dim (not multiplied by frameskip)
         emb_dim=384,
         use_3d_pos=False,
+        frameskip=1,
     ):
         super().__init__()
         self.num_frames = num_frames
         self.tubelet_size = tubelet_size
-        self.in_chans = in_chans
+        self.in_chans = in_chans // frameskip
         self.emb_dim = emb_dim
+        self.frameskip = frameskip 
+        
 
         # Embed individual actions
         self.action_embed = nn.Conv1d(

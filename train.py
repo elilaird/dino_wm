@@ -553,17 +553,17 @@ class Trainer:
 
         self.action_encoder = hydra.utils.instantiate(
             self.cfg.action_encoder,
-            in_chans=self.datasets["train"].action_dim // self.cfg.frameskip,
+            in_chans=self.datasets["train"].action_dim,
             emb_dim=self.cfg.action_emb_dim,
+            frameskip=self.cfg.frameskip,
         )
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
+
         # update cfg for saving
         with open_dict(self.cfg):
             self.cfg.action_encoder.emb_dim = self.action_encoder.emb_dim
-            self.cfg.action_encoder.in_chans = self.datasets[
-                "train"
-            ].action_dim // self.cfg.frameskip
+            self.cfg.action_encoder.in_chans = self.action_encoder.in_chans
 
         # initialize predictor
         if self.encoder.latent_ndim == 1:  # if feature is 1D
@@ -1103,25 +1103,26 @@ class Trainer:
                 self.logs_update(val_rollout_logs)
 
                 # variable frameskip openloop rollout
-                train_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
-                    self.train_traj_dset,
-                    mode="train",
-                    rand_start_end=rand_start_end,
-                )
-                train_variable_frameskip_rollout_logs = {
-                    f"train_{k}": [v] for k, v in train_variable_frameskip_rollout_logs.items()
-                }
-                self.logs_update(train_variable_frameskip_rollout_logs)
+                if self.cfg.variable_frameskip_test:
+                    train_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
+                        self.train_traj_dset,
+                        mode="train",
+                        rand_start_end=rand_start_end,
+                    )
+                    train_variable_frameskip_rollout_logs = {
+                        f"train_{k}": [v] for k, v in train_variable_frameskip_rollout_logs.items()
+                    }
+                    self.logs_update(train_variable_frameskip_rollout_logs)
 
-                val_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
-                    self.val_traj_dset,
-                    mode="val",
-                    rand_start_end=rand_start_end,
-                )
-                val_variable_frameskip_rollout_logs = {
-                    f"val_{k}": [v] for k, v in val_variable_frameskip_rollout_logs.items()
-                }
-                self.logs_update(val_variable_frameskip_rollout_logs)
+                    val_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
+                        self.val_traj_dset,
+                        mode="val",
+                        rand_start_end=rand_start_end,
+                    )
+                    val_variable_frameskip_rollout_logs = {
+                        f"val_{k}": [v] for k, v in val_variable_frameskip_rollout_logs.items()
+                    }
+                    self.logs_update(val_variable_frameskip_rollout_logs)
 
                 if self.epoch % self.cfg.eval_every_x_epoch == 0:
                     # long horizon treatments
@@ -1339,15 +1340,16 @@ class Trainer:
                 self.logs_update(test_rollout_logs)
 
                 # variable frameskip openloop rollout
-                test_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
-                    self.test_traj_dset,
-                    mode="test",
-                    rand_start_end=rand_start_end,
-                )
-                test_variable_frameskip_rollout_logs = {
-                    f"test_{k}": [v] for k, v in test_variable_frameskip_rollout_logs.items()
-                }
-                self.logs_update(test_variable_frameskip_rollout_logs)
+                if self.cfg.variable_frameskip_test:
+                    test_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
+                        self.test_traj_dset,
+                        mode="test",
+                        rand_start_end=rand_start_end,
+                    )
+                    test_variable_frameskip_rollout_logs = {
+                        f"test_{k}": [v] for k, v in test_variable_frameskip_rollout_logs.items()
+                    }
+                    self.logs_update(test_variable_frameskip_rollout_logs)
 
                 # long horizon treatments
                 if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
@@ -1910,9 +1912,23 @@ class Trainer:
                         + horizon * frameskip
                         + 1 : frameskip
                     ]
-                act = act[start : start + horizon * frameskip]
-                act = rearrange(act, "(h f) d -> h (f d)", f=frameskip)
 
+
+                act = act[start : start + horizon * frameskip]
+
+                if frameskip == original_frameskip:
+                    act = rearrange(act, "(h f) d -> h (f d)", f=frameskip)
+                elif frameskip < original_frameskip:
+                    repeat_factor = original_frameskip // frameskip
+                    act = rearrange(act, "(h f) d -> h f d", f=frameskip)
+                    act = act.repeat_interleave(repeat_factor, dim=1)
+                    act = rearrange(act, "h f d -> h (f d)", f=original_frameskip)
+                else:
+                    downsample_factor = frameskip // original_frameskip
+                    act = rearrange(act, "(h f) d -> h f d", f=frameskip)
+                    act = act.view(act.shape[0], downsample_factor, -1, act.shape[-1]).mean(dim=1)
+                    act = rearrange(act, "h f d -> h (f d)", f=original_frameskip)
+                
                 obs_g = {}
                 for k in obs.keys():
                     obs_g[k] = obs[k][-1].unsqueeze(0).unsqueeze(0).to(self.device)
@@ -1932,7 +1948,7 @@ class Trainer:
                 div_loss = self.err_eval_single(z_obs_last, z_g)
 
                 for k in div_loss.keys():
-                    log_key = f"z_{k}_err_rollout_h{horizon}_fs{frameskip}"
+                    log_key = f"z_{k}_err_rollout_fs{frameskip}"
                     logs[log_key].append(div_loss[k].cpu().numpy())
 
                 if self.cfg.has_decoder:
