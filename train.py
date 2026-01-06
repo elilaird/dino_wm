@@ -1103,25 +1103,26 @@ class Trainer:
                 self.logs_update(val_rollout_logs)
 
                 # variable frameskip openloop rollout
-                train_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
-                    self.train_traj_dset,
-                    mode="train",
-                    rand_start_end=rand_start_end,
-                )
-                train_variable_frameskip_rollout_logs = {
-                    f"train_{k}": [v] for k, v in train_variable_frameskip_rollout_logs.items()
-                }
-                self.logs_update(train_variable_frameskip_rollout_logs)
+                if self.cfg.variable_frameskip_test:
+                    train_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
+                        self.train_traj_dset,
+                        mode="train",
+                        rand_start_end=rand_start_end,
+                    )
+                    train_variable_frameskip_rollout_logs = {
+                        f"train_{k}": [v] for k, v in train_variable_frameskip_rollout_logs.items()
+                    }
+                    self.logs_update(train_variable_frameskip_rollout_logs)
 
-                val_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
-                    self.val_traj_dset,
-                    mode="val",
-                    rand_start_end=rand_start_end,
-                )
-                val_variable_frameskip_rollout_logs = {
-                    f"val_{k}": [v] for k, v in val_variable_frameskip_rollout_logs.items()
-                }
-                self.logs_update(val_variable_frameskip_rollout_logs)
+                    val_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
+                        self.val_traj_dset,
+                        mode="val",
+                        rand_start_end=rand_start_end,
+                    )
+                    val_variable_frameskip_rollout_logs = {
+                        f"val_{k}": [v] for k, v in val_variable_frameskip_rollout_logs.items()
+                    }
+                    self.logs_update(val_variable_frameskip_rollout_logs)
 
                 if self.epoch % self.cfg.eval_every_x_epoch == 0:
                     # long horizon treatments
@@ -1339,15 +1340,16 @@ class Trainer:
                 self.logs_update(test_rollout_logs)
 
                 # variable frameskip openloop rollout
-                test_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
-                    self.test_traj_dset,
-                    mode="test",
-                    rand_start_end=rand_start_end,
-                )
-                test_variable_frameskip_rollout_logs = {
-                    f"test_{k}": [v] for k, v in test_variable_frameskip_rollout_logs.items()
-                }
-                self.logs_update(test_variable_frameskip_rollout_logs)
+                if self.cfg.variable_frameskip_test:
+                    test_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
+                        self.test_traj_dset,
+                        mode="test",
+                        rand_start_end=rand_start_end,
+                    )
+                    test_variable_frameskip_rollout_logs = {
+                        f"test_{k}": [v] for k, v in test_variable_frameskip_rollout_logs.items()
+                    }
+                    self.logs_update(test_variable_frameskip_rollout_logs)
 
                 # long horizon treatments
                 if OmegaConf.select(self.cfg, "horizon_treatment", default=None) is not None:
