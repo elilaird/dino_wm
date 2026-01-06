@@ -5119,7 +5119,6 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
-        # t_span = torch.linspace(torch.tensor(0.0, device=x.device), torch.tensor(self.dt, device=x.device), 1, device=x.device)
         t_span = torch.tensor([0.0, self.dt], device=x.device)
         
         def dynamics(t, state):
@@ -5136,7 +5135,7 @@ class SecondOrderViTPredictor(ViTPredictor):
 
             return torch.cat([dxdt, acc], dim=-1)
 
-        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method)[-1]
+        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options={"step_size": self.dt / self.integration_steps})[-1]
 
         x_next, v_next  = self.out_proj(state_next).chunk(2, dim=-1)
         x_next = self.norm_x(x_next)
