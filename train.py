@@ -339,6 +339,12 @@ class Trainer:
             if model_ckpt.exists():
                 self.load_ckpt(model_ckpt)
                 log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+
+                # step scheduler to match loaded epoch
+                for i in range(self.epoch):
+                    for scheduler in self.schedulers.values():
+                        scheduler.step(self.epoch)
+                print(f"Lr schedulers stepped to epoch {self.epoch} with LR: {self.predictor_optimizer.param_groups[0]['lr']}", flush=True)
         self.accelerator.wait_for_everyone()
 
         self.epoch_log = OrderedDict()
