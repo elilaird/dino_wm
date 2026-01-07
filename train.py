@@ -339,6 +339,12 @@ class Trainer:
             if model_ckpt.exists():
                 self.load_ckpt(model_ckpt)
                 log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+
+                # step scheduler to match loaded epoch
+                for i in range(self.epoch):
+                    for scheduler in self.schedulers.values():
+                        scheduler.step(self.epoch)
+                print(f"Lr schedulers stepped to epoch {self.epoch} with LR: {self.predictor_optimizer.param_groups[0]['lr']}", flush=True)
         self.accelerator.wait_for_everyone()
 
         self.epoch_log = OrderedDict()
@@ -1018,7 +1024,7 @@ class Trainer:
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
             num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
-
+  
             plot = i == 0
             self.model.train()
             compute_start.record()
@@ -1870,6 +1876,9 @@ class Trainer:
         # sample traj
         for mult in frameskip_multipliers:
             frameskip = int(original_frameskip * mult)
+            if original_frameskip == 1 and frameskip < 1:
+                continue
+
             self.model.set_dt(original_dt * mult)
 
             for idx in range(num_rollout):
