@@ -1018,7 +1018,7 @@ class Trainer:
             obs, act, _ = data
             B, N = obs["visual"].shape[:2]
             num_windows = max(1, 1 + (N - self.window_size) // self.step_size)
-
+  
             plot = i == 0
             self.model.train()
             compute_start.record()
@@ -1870,6 +1870,9 @@ class Trainer:
         # sample traj
         for mult in frameskip_multipliers:
             frameskip = int(original_frameskip * mult)
+            if original_frameskip == 1 and frameskip < 1:
+                continue
+
             self.model.set_dt(original_dt * mult)
 
             for idx in range(num_rollout):
