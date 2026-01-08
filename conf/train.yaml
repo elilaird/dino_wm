@@ -47,7 +47,7 @@ training:
   decay_factor: 0.9  # Factor to decay peak LR at each restart
   warmup_percent: 0.05 # warmup percentage of total steps
 
-variable_frameskip_test: False
+variable_frameskip_test: True
 use_cls_token: False
 n_mem_blocks: null
 decoder_loss_type: mse
