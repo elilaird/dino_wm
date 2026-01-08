@@ -5119,7 +5119,6 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
-        # t_span = torch.linspace(torch.tensor(0.0, device=x.device), torch.tensor(self.dt, device=x.device), int(self.integration_steps + 1), device=x.device)
         t_span = torch.tensor([0.0, self.dt], device=x.device)
         
         def dynamics(t, state):
@@ -5128,7 +5127,9 @@ class SecondOrderViTPredictor(ViTPredictor):
             dxdt = self.norm_v(dxdt)
 
             # velocity correction
-            dxdt = self.vel_head(torch.cat([z, dxdt], dim=-1))
+            dxdt = dxdt + self.vel_head(torch.cat([z, dxdt], dim=-1))
+
+            # acceleration
             acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
 
             acc = acc + self.damping * dxdt
@@ -5148,23 +5149,3 @@ class SecondOrderViTPredictor(ViTPredictor):
     
     def get_dt(self):
         return self.dt
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
