@@ -568,10 +568,6 @@ def planning_main(cfg_dict):
     )
     model = load_model_state_dict(model_ckpt, model_cfg, num_action_repeat, device=device)
 
-    if cfg_dict["K"] is not None:
-        print(f"Setting K to {cfg_dict['K']}")
-        model.K = cfg_dict["K"]
-
     # use dummy vector env for wall and deformable envs
     if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
         from env.serial_vector_env import SerialVectorEnv
