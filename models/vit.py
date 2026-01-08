@@ -5096,6 +5096,9 @@ class SecondOrderViTPredictor(ViTPredictor):
         # acceleration
         self.acc_fusion = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(dropout), nn.Linear(inner_dim, inner_dim))
         self.damping = nn.Parameter(torch.tensor(damping))
+
+        # action forces
+        self.action_forces = nn.Sequential(nn.Linear(action_dim, inner_dim), nn.SiLU(), nn.Linear(inner_dim, inner_dim))
        
     
     def extract_actions(self, x):
@@ -5113,6 +5116,10 @@ class SecondOrderViTPredictor(ViTPredictor):
     
     def forward(self, x):
         x = self.in_proj(x) 
+        
+        # action forces
+        actions = self.extract_actions(x)
+        action_forces = self.action_forces(actions)
 
         # initial velocity
         v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
@@ -5133,7 +5140,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             acc_in = self.acc_fusion(torch.cat([z, dxdt], dim=-1))
             acc = checkpoint.checkpoint(self.inner_forward, acc_in, use_reentrant=False)
 
-            acc = acc + self.damping * dxdt
+            acc = acc + action_forces + self.damping * dxdt 
 
             return torch.cat([dxdt, acc], dim=-1)
 
