@@ -5089,15 +5089,15 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.norm_v = nn.LayerNorm(inner_dim)
 
         # velocity
-        self.vel_head = nn.Sequential(
-            nn.Linear(inner_dim * 2, inner_dim * 4), 
-            nn.SiLU(), 
-            nn.Dropout(0.1), 
-            nn.Linear(inner_dim * 4, inner_dim * 2),
-            nn.SiLU(),
-            nn.Dropout(0.1),
-            nn.Linear(inner_dim * 2, inner_dim)
-        )
+        # self.vel_head = nn.Sequential(
+        #     nn.Linear(inner_dim * 2, inner_dim * 4), 
+        #     nn.SiLU(), 
+        #     nn.Dropout(0.1), 
+        #     nn.Linear(inner_dim * 4, inner_dim * 2),
+        #     nn.SiLU(),
+        #     nn.Dropout(0.1),
+        #     nn.Linear(inner_dim * 2, inner_dim)
+        # )
 
         # acceleration
         # self.acc_fusion = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(0.1), nn.Linear(inner_dim, inner_dim))
@@ -5140,7 +5140,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             dxdt = self.norm_v(dxdt)
 
             # velocity correction
-            dxdt = dxdt + self.vel_head(torch.cat([z, dxdt], dim=-1))
+            # dxdt = dxdt + self.vel_head(torch.cat([z, dxdt], dim=-1))
 
             # acceleration
             acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
