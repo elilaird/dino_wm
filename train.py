@@ -341,9 +341,20 @@ class Trainer:
                 log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
 
                 # step scheduler to match loaded epoch
-                for i in range(self.epoch):
-                    for scheduler in self.schedulers.values():
-                        scheduler.step(self.epoch)
+                # Calculate total steps that should have occurred by this epoch
+                steps_per_window = 1 + (self.cfg.num_frames - self.window_size) // self.step_size
+                steps_per_epoch = len(self.dataloaders["train"]) * steps_per_window
+                total_steps = self.epoch * steps_per_epoch
+
+                # Step scheduler to match loaded total steps
+                for scheduler in self.schedulers.values():
+                    # Reset scheduler to beginning
+                    scheduler.last_epoch = -1
+                    scheduler.T_cur = 0
+                    scheduler.restart_count = 0
+                    # Step forward to correct position
+                    for _ in range(total_steps):
+                        scheduler.step()
                 print(f"Lr schedulers stepped to epoch {self.epoch} with LR: {self.predictor_optimizer.param_groups[0]['lr']}", flush=True)
         self.accelerator.wait_for_everyone()
 

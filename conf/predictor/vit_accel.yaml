@@ -15,3 +15,4 @@ prior_scale: 1.0
 integration_steps: 1
 grad_ckpt: False
 force_orthogonal: True
+random_steps: False
