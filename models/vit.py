@@ -5089,10 +5089,10 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.norm_v = nn.LayerNorm(inner_dim)
 
         # velocity
-        self.vel_head = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(dropout), nn.Linear(inner_dim, inner_dim))
+        self.vel_head = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(0.1), nn.Linear(inner_dim, inner_dim))
 
         # acceleration
-        self.acc_fusion = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(dropout), nn.Linear(inner_dim, inner_dim))
+        self.acc_fusion = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(0.1), nn.Linear(inner_dim, inner_dim))
         self.damping = nn.Parameter(torch.tensor(damping))
        
     
