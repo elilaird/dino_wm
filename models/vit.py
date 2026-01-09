@@ -5089,10 +5089,18 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.norm_v = nn.LayerNorm(inner_dim)
 
         # velocity
-        self.vel_head = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(0.1), nn.Linear(inner_dim, inner_dim))
+        self.vel_head = nn.Sequential(
+            nn.Linear(inner_dim * 2, inner_dim * 4), 
+            nn.SiLU(), 
+            nn.Dropout(0.1), 
+            nn.Linear(inner_dim * 4, inner_dim * 2),
+            nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Linear(inner_dim * 2, inner_dim)
+        )
 
         # acceleration
-        self.acc_fusion = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(0.1), nn.Linear(inner_dim, inner_dim))
+        # self.acc_fusion = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(0.1), nn.Linear(inner_dim, inner_dim))
         self.damping = nn.Parameter(torch.tensor(damping))
        
     
@@ -5135,8 +5143,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             dxdt = dxdt + self.vel_head(torch.cat([z, dxdt], dim=-1))
 
             # acceleration
-            acc_in = self.acc_fusion(torch.cat([z, dxdt], dim=-1))
-            acc = checkpoint.checkpoint(self.inner_forward, acc_in, use_reentrant=False)
+            acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
 
             acc = acc + self.damping * dxdt
 
