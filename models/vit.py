@@ -5056,6 +5056,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         prior_scale: float = 1.0,
         integration_steps: int = 1,
         grad_ckpt: bool = False,
+        random_steps: bool = False,
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5079,10 +5080,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.integration_steps = integration_steps
         self.force_orthogonal = force_orthogonal
         self.integration_method = integration_method
-        if self.integration_method == "rk4":
-            self.integrator_options = {"step_size": self.dt / self.integration_steps}
-        else:
-            self.integrator_options = {}
+        self.random_steps = random_steps
 
         # projectors
         self.in_proj = nn.Linear(dim, inner_dim)
@@ -5120,6 +5118,13 @@ class SecondOrderViTPredictor(ViTPredictor):
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
         t_span = torch.tensor([0.0, self.dt], device=x.device)
+
+        if self.training and self.random_steps:
+            step_options = [1, 2, 4]
+            integration_steps = step_options[torch.randint(0, len(step_options), (1,))]
+        else:
+            integration_steps = self.integration_steps
+
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
@@ -5137,7 +5142,7 @@ class SecondOrderViTPredictor(ViTPredictor):
 
             return torch.cat([dxdt, acc], dim=-1)
 
-        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options={"step_size": self.dt / self.integration_steps})[-1]
+        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options={"step_size": self.dt / integration_steps})[-1]
 
         x_next, v_next  = self.out_proj(state_next).chunk(2, dim=-1)
         x_next = self.norm_x(x_next)
