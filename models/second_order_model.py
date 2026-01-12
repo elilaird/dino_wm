@@ -28,6 +28,8 @@ class SecondOrderModel(nn.Module):
         step_size=1,
         velocity_loss_lambda=0.0,
         kinetic_energy_reg_lambda=0.0,
+        rollout_loss_lambda=0.0,
+        rollout_k=0,
         **kwargs,
     ):
         super().__init__()
@@ -49,7 +51,9 @@ class SecondOrderModel(nn.Module):
         self.step_size = step_size
         self.velocity_loss_lambda = velocity_loss_lambda
         self.kinetic_energy_reg_lambda = kinetic_energy_reg_lambda
-
+        self.rollout_loss_lambda = rollout_loss_lambda
+        self.rollout_k = rollout_k
+        
         if hasattr(self.predictor, "module"):
             self.dt = self.predictor.module.dt
         else:
