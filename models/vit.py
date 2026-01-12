@@ -5084,7 +5084,13 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # projectors
         self.in_proj = nn.Linear(dim, inner_dim)
-        self.out_proj = nn.Linear(inner_dim*2, dim*2)
+        # self.out_proj = nn.Linear(inner_dim*2, dim*2)
+        self.out_proj = nn.Sequential(
+            nn.Linear(inner_dim*2, inner_dim*4),
+            nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Linear(inner_dim*4, dim*2),
+        )
         self.norm_x = nn.LayerNorm(inner_dim)
         self.norm_v = nn.LayerNorm(inner_dim)
 
