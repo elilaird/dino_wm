@@ -28,6 +28,8 @@ class SecondOrderModel(nn.Module):
         step_size=1,
         velocity_loss_lambda=0.0,
         kinetic_energy_reg_lambda=0.0,
+        rollout_loss_lambda=0.0,
+        rollout_k=0,
         **kwargs,
     ):
         super().__init__()
@@ -49,7 +51,9 @@ class SecondOrderModel(nn.Module):
         self.step_size = step_size
         self.velocity_loss_lambda = velocity_loss_lambda
         self.kinetic_energy_reg_lambda = kinetic_energy_reg_lambda
-
+        self.rollout_loss_lambda = rollout_loss_lambda
+        self.rollout_k = rollout_k
+        
         if hasattr(self.predictor, "module"):
             self.dt = self.predictor.module.dt
         else:
@@ -247,6 +251,13 @@ class SecondOrderModel(nn.Module):
         ]  # (b, num_hist, 3, img_size, img_size)
 
         z_pred, v_pred  = self.predict(z_src)
+
+        if self.rollout_loss_lambda > 0.0 and self.rollout_k > 0:
+            rollout_obs = {k: v[:, :1, ...].detach() for k, v in obs.items()}
+            _, z_rollout = self.rollout(rollout_obs, act[:, :self.rollout_k, ...].detach())
+            rollout_k_loss = self.rollout_loss_lambda * self.emb_criterion(z_rollout[:, -self.rollout_k:, :, : -self.action_dim], z_tgt[:, :self.rollout_k, :, : -self.action_dim].detach())
+            loss = loss + rollout_k_loss
+            loss_components["rollout_k_loss"] = rollout_k_loss
 
         # log log(v_pred_norm)
         v_pred_norm = torch.norm(v_pred[..., :-(self.action_dim)], dim=-1)
