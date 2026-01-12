@@ -248,6 +248,15 @@ class SecondOrderModel(nn.Module):
 
         z_pred, v_pred  = self.predict(z_src)
 
+        if self.rollout_loss_lambda > 0.0:
+            rollout_k_loss = torch.tensor(0.0, device=z.device)
+            for r_k in range(self.num_frames - self.rollout_k):
+                rollout_obs = {k: v[:, :r_k+1, ...].detach() for k, v in obs.items()}
+                _, z_rollout = self.rollout(rollout_obs, act[:, :(r_k + self.rollout_k+1), ...].detach())
+                rollout_k_loss += self.rollout_loss_lambda * self.emb_criterion(z_rollout[:, -1, :, : -self.action_dim], z_tgt[:, (r_k+self.rollout_k), :, : -self.action_dim].detach())
+            loss = loss + rollout_k_loss
+            loss_components["rollout_k_loss"] = rollout_k_loss
+
         # log log(v_pred_norm)
         v_pred_norm = torch.norm(v_pred[..., :-(self.action_dim)], dim=-1)
         loss_components["v_pred_norm"] = torch.log(v_pred_norm + 1e-6).mean()
