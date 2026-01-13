@@ -558,7 +558,8 @@ def planning_main(cfg_dict):
         model_cfg.env.dataset,
         num_hist=model_cfg.num_hist,
         num_pred=model_cfg.num_pred,
-        frameskip=model_cfg.frameskip,
+        # frameskip=model_cfg.frameskip,
+        frameskip=cfg_dict["test_frameskip"],
     )
     dset = dset["valid"]
 
@@ -590,13 +591,15 @@ def planning_main(cfg_dict):
         )
 
     print("Build workspace")
+    print(f"Using frameskip: {cfg_dict['test_frameskip']}")
     plan_workspace = PlanWorkspace(
         cfg_dict=cfg_dict,
         wm=model,
         dset=dset,
         env=env,
         env_name=model_cfg.env.name,
-        frameskip=model_cfg.frameskip,
+        frameskip=cfg_dict["test_frameskip"],
+        # frameskip=model_cfg.frameskip,
         wandb_run=wandb_run,
     )
 

@@ -23,6 +23,7 @@ goal_source: 'random_state'
 goal_H: 6
 n_plot_samples: 10
 K: null
+test_frameskip: 5
 
 debug_dset_init: False
 
