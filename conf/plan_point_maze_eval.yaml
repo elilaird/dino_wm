@@ -29,8 +29,8 @@ debug_dset_init: False
 objective:
   _target_: planning.objectives.create_objective_fn
   alpha: 0
-  base: 0.5
-  mode: all
+  base: 2
+  mode: last
 
 planner:
   _target_: planning.mpc.MPCPlanner
