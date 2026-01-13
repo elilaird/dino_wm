@@ -5083,30 +5083,14 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.random_steps = random_steps
 
         # projectors
-        self.in_proj = nn.Linear(dim, inner_dim)
-        # self.out_proj = nn.Linear(inner_dim*2, dim*2)
-        self.out_proj = nn.Sequential(
-            nn.Linear(inner_dim, inner_dim*2),
-            nn.SiLU(),
-            nn.Dropout(0.1),
-            nn.Linear(inner_dim*2, dim),
-        )
-        # self.norm_x = nn.LayerNorm(inner_dim)
-        # self.norm_v = nn.LayerNorm(inner_dim)
+        self.vel_correction = nn.Linear(dim, dim)
+        self.vel_correction.weight.data.zero_()
+        self.vel_correction.bias.data.zero_()
 
-        # velocity
-        # self.vel_head = nn.Sequential(
-        #     nn.Linear(inner_dim * 2, inner_dim * 4), 
-        #     nn.SiLU(), 
-        #     nn.Dropout(0.1), 
-        #     nn.Linear(inner_dim * 4, inner_dim * 2),
-        #     nn.SiLU(),
-        #     nn.Dropout(0.1),
-        #     nn.Linear(inner_dim * 2, inner_dim)
-        # )
+        self.acc_correction = nn.Linear(dim, dim)
+        self.acc_correction.weight.data.zero_()
+        self.acc_correction.bias.data.zero_()
 
-        # acceleration
-        # self.acc_fusion = nn.Sequential(nn.Linear(inner_dim * 2, inner_dim), nn.SiLU(), nn.Dropout(0.1), nn.Linear(inner_dim, inner_dim))
         self.damping = nn.Parameter(torch.tensor(damping))
        
     
@@ -5124,47 +5108,20 @@ class SecondOrderViTPredictor(ViTPredictor):
         return x
     
     def forward(self, x):
-        x = self.in_proj(x) 
 
-        # initial velocity
-        v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
+        # initial velocity (zero velocity at t=0)
+        v_0 = self.vel_correction(x - torch.cat([x[:,:1], x[:, :-1]], dim=1)) / self.dt
 
-        # integrate
-        state_0 = torch.cat([x, v_0], dim=-1)
-        t_span = torch.tensor([0.0, self.dt], device=x.device)
+        # predict acceleration
+        # inferring acceleration from context of size H frames with proprio and actions concat
+        acc = self.inner_forward(x) 
+        acc = self.acc_correction(acc)
 
-        if self.training and self.random_steps:
-            step_options = [1, 2, 4]
-            integration_steps = step_options[torch.randint(0, len(step_options), (1,))]
-        else:
-            integration_steps = self.integration_steps
+        # semi-implicit euler integration
+        v_next = v_0 + (acc + self.damping * v_0) * self.dt
+        x_next = x + (v_next * self.dt)
 
-        
-        def dynamics(t, state):
-            z, dxdt = state.chunk(2, dim=-1)
-            # z = self.norm_x(z)
-            # dxdt = self.norm_v(dxdt)
-
-            # velocity correction
-            # dxdt = dxdt + self.vel_head(torch.cat([z, dxdt], dim=-1))
-
-            # acceleration
-            acc = checkpoint.checkpoint(self.inner_forward, z, use_reentrant=False)
-
-            acc = acc + self.damping * dxdt
-
-            return torch.cat([dxdt, acc], dim=-1)
-
-        state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options={"step_size": self.dt / integration_steps})[-1]
-
-        x_next, v_next = state_next.chunk(2, dim=-1)
-        x_next = self.out_proj(x_next)
-
-        # x_next, v_next  = self.out_proj(state_next).chunk(2, dim=-1)
-        # x_next = self.norm_x(x_next)
-        # v_next = self.norm_v(v_next)
-
-        return x_next.contiguous(), v_next.contiguous()
+        return x_next, v_next
 
     def set_dt(self, new_dt):
         self.dt = new_dt
