@@ -5086,13 +5086,13 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.in_proj = nn.Linear(dim, inner_dim)
         # self.out_proj = nn.Linear(inner_dim*2, dim*2)
         self.out_proj = nn.Sequential(
-            nn.Linear(inner_dim*2, inner_dim*4),
+            nn.Linear(inner_dim, inner_dim*2),
             nn.SiLU(),
             nn.Dropout(0.1),
-            nn.Linear(inner_dim*4, dim*2),
+            nn.Linear(inner_dim*2, dim),
         )
-        self.norm_x = nn.LayerNorm(inner_dim)
-        self.norm_v = nn.LayerNorm(inner_dim)
+        # self.norm_x = nn.LayerNorm(inner_dim)
+        # self.norm_v = nn.LayerNorm(inner_dim)
 
         # velocity
         # self.vel_head = nn.Sequential(
@@ -5142,8 +5142,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
-            z = self.norm_x(z)
-            dxdt = self.norm_v(dxdt)
+            # z = self.norm_x(z)
+            # dxdt = self.norm_v(dxdt)
 
             # velocity correction
             # dxdt = dxdt + self.vel_head(torch.cat([z, dxdt], dim=-1))
@@ -5157,9 +5157,12 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         state_next = odeint(dynamics, state_0, t_span, method=self.integration_method, options={"step_size": self.dt / integration_steps})[-1]
 
-        x_next, v_next  = self.out_proj(state_next).chunk(2, dim=-1)
-        x_next = self.norm_x(x_next)
-        v_next = self.norm_v(v_next)
+        x_next, v_next = state_next.chunk(2, dim=-1)
+        x_next = self.out_proj(x_next)
+
+        # x_next, v_next  = self.out_proj(state_next).chunk(2, dim=-1)
+        # x_next = self.norm_x(x_next)
+        # v_next = self.norm_v(v_next)
 
         return x_next.contiguous(), v_next.contiguous()
 
