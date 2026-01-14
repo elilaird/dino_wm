@@ -5113,7 +5113,9 @@ class SecondOrderViTPredictor(ViTPredictor):
         x = self.in_proj(x)
 
         # initial velocity
-        v_0 = x - torch.cat([torch.zeros_like(x[:,:1], device=x.device), x[:, :-1]], dim=1)
+        x_0 = rearrange(x, "b (t p) d -> b t p d", p=self.num_patches)
+        v_0 = x_0 - torch.cat([torch.zeros_like(x_0[:,:1], device=x.device), x_0[:, :-1]], dim=1)
+        v_0 = rearrange(v_0, "b t p d -> b (t p) d")
 
         # integrate
         state_0 = torch.cat([x, v_0], dim=-1)
