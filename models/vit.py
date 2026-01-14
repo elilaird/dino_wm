@@ -5087,9 +5087,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.vel_correction.weight.data.fill_(1.0)
         self.vel_correction.bias.data.fill_(0.0)
         self.norm_x = nn.LayerNorm(dim)
-        
-        self.damping = nn.Parameter(torch.tensor(damping))
-       
+               
     
     def extract_actions(self, x):
         x = x.clone()
@@ -5114,7 +5112,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         acc = self.inner_forward(self.norm_x(x)) 
 
         # semi-implicit euler integration
-        v_next = v_0 + (acc + self.damping * v_0) * self.dt
+        v_next = v_0 + acc * self.dt
         x_next = x + (v_next * self.dt)
 
         return x_next, v_next
