@@ -5070,6 +5070,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             dropout=dropout,
             emb_dropout=emb_dropout,
         )
+        self.num_patches = num_patches
         self.grad_ckpt = grad_ckpt
         self.out_dim = dim
         self.inner_dim = dim
@@ -5109,7 +5110,9 @@ class SecondOrderViTPredictor(ViTPredictor):
     def forward(self, x):
 
         # initial velocity (zero velocity at t=0)
-        v_0 = self.vel_correction(x - torch.cat([x[:,:1], x[:, :-1]], dim=1)) #/ self.dt
+        x_0 = rearrange(x, "b (t p) d -> b t p d", p=self.num_patches)
+        v_0 = self.vel_correction(x_0 - torch.cat([x_0[:,:1], x_0[:, :-1]], dim=1)) #/ self.dt
+        v_0 = rearrange(v_0, "b t p d -> b (t p) d")
         v_0 = self.norm_v(v_0)
 
         # predict acceleration
