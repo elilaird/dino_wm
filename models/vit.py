@@ -5091,8 +5091,8 @@ class SecondOrderViTPredictor(ViTPredictor):
             nn.Dropout(0.1),
             nn.Linear(inner_dim*2, dim),
         )
-        # self.norm_x = nn.LayerNorm(inner_dim)
-        # self.norm_v = nn.LayerNorm(inner_dim)
+        self.norm_x = nn.LayerNorm(inner_dim)
+        self.norm_v = nn.LayerNorm(inner_dim)
 
         # velocity
         # self.vel_head = nn.Sequential(
@@ -5142,8 +5142,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         
         def dynamics(t, state):
             z, dxdt = state.chunk(2, dim=-1)
-            # z = self.norm_x(z)
-            # dxdt = self.norm_v(dxdt)
+            z = self.norm_x(z)
+            dxdt = self.norm_v(dxdt)
 
             # velocity correction
             # dxdt = dxdt + self.vel_head(torch.cat([z, dxdt], dim=-1))
