@@ -5070,6 +5070,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             dropout=dropout,
             emb_dropout=emb_dropout,
         )
+        self.num_patches = num_patches
         self.grad_ckpt = grad_ckpt
         self.out_dim = dim
         self.inner_dim = dim
