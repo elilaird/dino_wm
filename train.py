@@ -1935,19 +1935,7 @@ class Trainer:
 
 
                 act = act[start : start + horizon * frameskip]
-
-                if frameskip == original_frameskip:
-                    act = rearrange(act, "(h f) d -> h (f d)", f=frameskip)
-                elif frameskip < original_frameskip:
-                    repeat_factor = original_frameskip // frameskip
-                    act = rearrange(act, "(h f) d -> h f d", f=frameskip)
-                    act = act.repeat_interleave(repeat_factor, dim=1)
-                    act = rearrange(act, "h f d -> h (f d)", f=original_frameskip)
-                else:
-                    downsample_factor = frameskip // original_frameskip
-                    act = rearrange(act, "(h f) d -> h f d", f=frameskip)
-                    act = act.view(act.shape[0], downsample_factor, -1, act.shape[-1]).mean(dim=1)
-                    act = rearrange(act, "h f d -> h (f d)", f=original_frameskip)
+                act = rearrange(act, "(h f) d -> h (f d)", f=frameskip)
                 
                 obs_g = {}
                 for k in obs.keys():

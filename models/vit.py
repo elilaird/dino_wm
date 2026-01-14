@@ -5057,11 +5057,12 @@ class SecondOrderViTPredictor(ViTPredictor):
         integration_steps: int = 1,
         grad_ckpt: bool = False,
         random_steps: bool = False,
+        base_frameskip: float = 5.0,
     ):
         super().__init__(
             num_patches=num_patches,
             num_frames=num_frames,
-            dim=inner_dim,
+            dim=dim,
             depth=depth,
             heads=heads,
             mlp_dim=mlp_dim,
@@ -5069,7 +5070,9 @@ class SecondOrderViTPredictor(ViTPredictor):
             dim_head=dim_head,
             dropout=dropout,
             emb_dropout=emb_dropout,
+
         )
+        self.num_patches = num_patches
         self.grad_ckpt = grad_ckpt
         self.out_dim = dim
         self.inner_dim = dim
@@ -5081,6 +5084,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.force_orthogonal = force_orthogonal
         self.integration_method = integration_method
         self.random_steps = random_steps
+        self.base_frameskip = float(base_frameskip)
 
         # projectors
         self.vel_correction = nn.Linear(dim, dim)
@@ -5093,11 +5097,14 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         self.damping = nn.Parameter(torch.tensor(damping))
 
-    def extract_actions(self, x):
-        x = x.clone()
-        x = rearrange(x, "b (t p) d -> b t p d", p=NUM_PATCHES)
-        actions = x[..., -self.action_dim:]
-        return rearrange(actions, "b t p d -> b (t p) d")
+        # action encoder
+        self.action_encoder = nn.Sequential(
+            nn.Linear(action_dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+        )
 
     def inner_forward(self, x):
         b, n, _ = x.shape
@@ -5106,21 +5113,39 @@ class SecondOrderViTPredictor(ViTPredictor):
         x = self.transformer(x)
         return x
 
-    def forward(self, x):
+    def forward(self, x, actions):
+        # x: (b, t, num_patches, dim)
+        # actions: (b, t, frameskip, action_dim)
+        curr_frameskip = actions.shape[2]
+
+        rel_dt = float(curr_frameskip / self.base_frameskip)
 
         # initial velocity (zero velocity at t=0)
-        v_0 = self.vel_correction(x - torch.cat([x[:,:1], x[:, :-1]], dim=1)) #/ self.dt
-        v_0 = self.norm_v(v_0)
+        v_0 = self.vel_correction(x - torch.cat([x[:,:1], x[:, :-1]], dim=1)) / (rel_dt + 1e-6)
+        # v_0 = self.norm_v(v_0)
 
         # predict acceleration
         # inferring acceleration from context of size H frames with proprio and actions concat
+        x = rearrange(x, "b t p d -> b (t p) d")
         acc = self.inner_forward(self.norm_x(x)) 
+        
+        acc = rearrange(acc, "b (t p) d -> b t p d", p=self.num_patches)
+        x = rearrange(x, "b (t p) d -> b t p d", p=self.num_patches)
 
-        decay_factor = torch.exp(-F.softplus(self.damping) * self.dt)
+        decay_factor = torch.exp(-F.softplus(self.damping) * rel_dt)
 
-        # semi-implicit euler integration
-        v_next = v_0 + (acc + decay_factor * v_0) * self.dt
-        x_next = x + (v_next * self.dt)
+        # apply action forces 
+        action_forces = self.action_encoder(actions)
+
+        rel_dt_step = rel_dt / curr_frameskip
+        v_next = v_0
+        x_next = x
+        for i in range(curr_frameskip):
+            acc += action_forces[:, :, i, :].unsqueeze(2)
+
+             # semi-implicit euler integration
+            v_next = v_next + (acc + decay_factor * v_next) * rel_dt_step
+            x_next = x_next + (v_next * rel_dt_step)
 
         x_next = self.norm_x(x_next)
         v_next = self.norm_v(v_next)

@@ -5,7 +5,7 @@ mlp_dim: 2048
 dropout: 0.1
 emb_dropout: 0
 pool: 'mean'
-inner_dim: 408
+inner_dim: null
 action_dim: ${action_emb_dim}
 dt: 1.0
 damping: -0.1
@@ -16,3 +16,4 @@ integration_steps: 1
 grad_ckpt: False
 force_orthogonal: True
 random_steps: False
+base_frameskip: ${frameskip}

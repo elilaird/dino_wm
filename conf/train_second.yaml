@@ -2,7 +2,7 @@ defaults:
   - _self_
   - env: point_maze
   - encoder: dino 
-  - action_encoder: proprio
+  - action_encoder: mlp
   - proprio_encoder: proprio
   - decoder: vqvae
   - predictor: vit_accel
@@ -80,8 +80,8 @@ concat_dim: 1
 normalize_action: True
 
 # action encoder
-action_emb_dim: 12
-num_action_repeat: 1
+action_emb_dim: 64
+num_action_repeat: 0 # crtitical to cancel out the action_emb_dim in predictor construction
 
 # proprio encoder
 proprio_emb_dim: 12 

@@ -70,6 +70,30 @@ class ProprioceptiveEmbedding(nn.Module):
         x = x.permute(0, 2, 1)
         return x
 
+class ActionEmbeddingMLP(nn.Module):
+    def __init__(self, in_chans, emb_dim, frameskip):
+        super().__init__()
+        self.in_chans = in_chans # Action_dim * frameskip
+        self.emb_dim = emb_dim
+        self.frameskip = frameskip
+        self.action_dim = in_chans // frameskip
+
+        self.action_embed = nn.Sequential(
+            nn.Linear(self.action_dim, emb_dim * 2),
+            nn.SiLU(),
+            nn.Linear(emb_dim * 2, emb_dim)
+        )
+
+    def forward(self, x):
+        B, T, D = x.shape # [B, T, D * F] where D=original_action_dim, F=frameskip
+        test_frameskip = D // self.action_dim
+
+        # reshape to [B, T, F, D]
+        x = x.view(B, T, test_frameskip, self.action_dim)
+        x = self.action_embed(x)
+        
+        return x
+
 
 class VariableProprioceptiveEmbedding(nn.Module):
     def __init__(
