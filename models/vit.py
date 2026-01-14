@@ -5084,11 +5084,15 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # projectors
         self.vel_correction = nn.Linear(dim, dim)
-        self.vel_correction.weight.data.fill_(1.0)
-        self.vel_correction.bias.data.fill_(0.0)
+        self.vel_correction.weight.data = (
+            0.9 * torch.eye(dim) + 0.1 * torch.randn(dim, dim) * 0.01
+        )
+        self.vel_correction.bias.data.zero_()
+        self.norm_v = nn.LayerNorm(dim)
         self.norm_x = nn.LayerNorm(dim)
-               
-    
+
+        self.damping = nn.Parameter(torch.tensor(damping))
+
     def extract_actions(self, x):
         x = x.clone()
         x = rearrange(x, "b (t p) d -> b t p d", p=NUM_PATCHES)
@@ -5101,24 +5105,30 @@ class SecondOrderViTPredictor(ViTPredictor):
         x = self.dropout(x)
         x = self.transformer(x)
         return x
-    
+
     def forward(self, x):
 
         # initial velocity (zero velocity at t=0)
-        v_0 = self.vel_correction(x - torch.cat([x[:,:1], x[:, :-1]], dim=1)) / self.dt
+        v_0 = self.vel_correction(x - torch.cat([x[:,:1], x[:, :-1]], dim=1)) #/ self.dt
+        v_0 = self.norm_v(v_0)
 
         # predict acceleration
         # inferring acceleration from context of size H frames with proprio and actions concat
         acc = self.inner_forward(self.norm_x(x)) 
 
+        decay_factor = torch.exp(-F.softplus(self.damping) * self.dt)
+
         # semi-implicit euler integration
-        v_next = v_0 + acc * self.dt
+        v_next = v_0 + (acc + decay_factor * v_0) * self.dt
         x_next = x + (v_next * self.dt)
+
+        x_next = self.norm_x(x_next)
+        v_next = self.norm_v(v_next)
 
         return x_next, v_next
 
     def set_dt(self, new_dt):
         self.dt = new_dt
-    
+
     def get_dt(self):
         return self.dt
