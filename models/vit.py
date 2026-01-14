@@ -5086,10 +5086,13 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.vel_correction = nn.Linear(dim, dim)
         self.vel_correction.weight.data.zero_()
         self.vel_correction.bias.data.zero_()
+        self.norm_v = nn.LayerNorm(dim)
+        self.norm_x = nn.LayerNorm(dim)
 
         self.acc_correction = nn.Linear(dim, dim)
         self.acc_correction.weight.data.zero_()
         self.acc_correction.bias.data.zero_()
+        
 
         self.damping = nn.Parameter(torch.tensor(damping))
        
@@ -5111,6 +5114,7 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # initial velocity (zero velocity at t=0)
         v_0 = self.vel_correction(x - torch.cat([x[:,:1], x[:, :-1]], dim=1)) / self.dt
+        v_0 = self.norm_v(v_0)
 
         # predict acceleration
         # inferring acceleration from context of size H frames with proprio and actions concat
@@ -5120,6 +5124,9 @@ class SecondOrderViTPredictor(ViTPredictor):
         # semi-implicit euler integration
         v_next = v_0 + (acc + self.damping * v_0) * self.dt
         x_next = x + (v_next * self.dt)
+
+        x_next = self.norm_x(x_next)
+        v_next = self.norm_v(v_next)
 
         return x_next, v_next
 
