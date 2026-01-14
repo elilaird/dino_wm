@@ -1,15 +1,15 @@
 _target_: planning.mpc.MPCPlanner
-max_iter: null # unlimited if null
+max_iter: 10 # unlimited if null
 n_taken_actions: 1
 sub_planner:
   target: planning.gd.GDPlanner
   horizon: 5
   action_noise: 0.003
   sample_type: 'randn' # 'zero' or 'randn'
-  lr: 1e-1 #1 
-  opt_steps: 1000
+  lr: 1 
+  opt_steps: 100
   eval_every: 10
-  optimizer_type: "adam" # "sgd" or "adam"
+  optimizer_type: "sgd" # "sgd" or "adam"
   max_grad_norm: null
 
 name: mpc_gd
