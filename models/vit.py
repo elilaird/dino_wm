@@ -5092,8 +5092,8 @@ class SecondOrderViTPredictor(ViTPredictor):
             0.9 * torch.eye(dim) + 0.1 * torch.randn(dim, dim) * 0.01
         )
         self.vel_correction.bias.data.zero_()
-        self.norm_v = nn.LayerNorm(dim)
-        self.norm_x = nn.LayerNorm(dim)
+        self.norm_acc = nn.LayerNorm(dim)
+        self.norm_ffn = nn.LayerNorm(dim)
 
         self.damping = nn.Parameter(torch.tensor(damping))
 
@@ -5151,7 +5151,7 @@ class SecondOrderViTPredictor(ViTPredictor):
 
             # q (acc) -> k, v (action)
             action_k, action_v = self.kv_proj(curr_action).chunk(2, dim=-1)
-            acc_q = self.q_proj(rearrange(acc_0, "b t p d -> b (t p) d"))
+            acc_q = self.q_proj(rearrange(self.norm_acc(acc_0), "b t p d -> b (t p) d"))
 
             # cross attention
             forces, _ = self.action_attn(
@@ -5163,7 +5163,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             forces = rearrange(forces, "b (t p) d -> b t p d", p=self.num_patches)
             
             acc_0 = acc_0 + self.out_proj(forces)
-            acc_0 = acc_0 + self.forces_ffn(acc_0)
+            acc_0 = acc_0 + self.forces_ffn(self.norm_ffn(acc_0))
 
             def dynamics(t, state):
                 _, v_next = state.chunk(2, dim=-1)
@@ -5172,8 +5172,8 @@ class SecondOrderViTPredictor(ViTPredictor):
             
             state_next = odeint(dynamics, state_0, torch.tensor([0.0, rel_dt_step]), method=self.integration_method, options={"step_size": rel_dt_step / self.integration_steps})[-1]
             x_next, v_next = state_next.chunk(2, dim=-1)
-            x_next = self.norm_x(x_next)
-            v_next = self.norm_v(v_next)
+            # x_next = self.norm_x(x_next)
+            # v_next = self.norm_v(v_next)
 
         return x_next, v_next
 
