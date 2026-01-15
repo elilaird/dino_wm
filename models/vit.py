@@ -5097,11 +5097,19 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         self.damping = nn.Parameter(torch.tensor(damping))
 
-        self.action_query_proj = nn.Linear(action_dim, 256)
-        self.kv_proj = nn.Linear(dim, 2 * 256)
-        self.action_out_proj = nn.Linear(256, dim)
-        self.action_attn = nn.MultiheadAttention(256, num_heads=8, batch_first=True, dropout=dropout)
-        self.register_buffer("action_mask", generate_mask_matrix(num_patches, num_frames))
+        forces_dim = 256
+        self.q_proj = nn.Linear(dim, forces_dim)
+        self.kv_proj = nn.Linear(action_dim, 2 * forces_dim)
+        self.out_proj = nn.Linear(forces_dim, dim)
+        self.action_attn = nn.MultiheadAttention(forces_dim, num_heads=8, batch_first=True, dropout=dropout)
+        self.register_buffer("actions_mask", generate_mask_matrix(num_patches, num_frames))
+
+        self.forces_ffn = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+            nn.Dropout(dropout),
+        )
         
     def inner_forward(self, x):
         b, n, _ = x.shape
@@ -5130,39 +5138,35 @@ class SecondOrderViTPredictor(ViTPredictor):
         # apply damping
         decay_factor = torch.exp(-F.softplus(self.damping) * rel_dt)
 
-        # action queries
-        action_queries = self.action_query_proj(rearrange(actions, "b t f a -> b (t f) a"))
-        action_queries = rearrange(action_queries, "b (t f) d -> b t f d", f=curr_frameskip)
-
         # apply action forces 
         rel_dt_step = rel_dt / curr_frameskip
         v_next = v_0
         x_next = x # (b, t, p, d)
         for i in range(curr_frameskip):
-            curr_action = action_queries[:, :, i]
+            curr_action = actions[:, :, i]
 
             curr_action = curr_action.unsqueeze(2).expand(-1, -1, self.num_patches, -1) # (b, t, 1, d) -> (b, t, p, d)
             curr_action = rearrange(curr_action, "b t p d -> b (t p) d")
-
-            x_k, x_v = self.kv_proj(rearrange(x_next, "b t p d -> b (t p) d")).chunk(2, dim=-1)
+            
+            # q (acc) -> k, v (action)
+            action_k, action_v = self.kv_proj(curr_action).chunk(2, dim=-1)
+            acc_q = self.q_proj(rearrange(acc, "b t p d -> b (t p) d"))
 
             curr_act_len = curr_action.shape[1]
-            x_len = x_k.shape[1]
-            bool_mask = (self.action_mask.squeeze()[:curr_act_len, :x_len] == 0)
-
+            acc_len = acc_q.shape[1]
+            bool_mask = (self.actions_mask.squeeze()[:acc_len, :curr_act_len] == 0)
 
             # cross attention
             forces, _ = self.action_attn(
-                query=curr_action,
-                key=x_k, 
-                value=x_v,
+                query=acc_q,
+                key=action_k, 
+                value=action_v,
                 attn_mask=bool_mask,
             )
-            forces = self.action_out_proj(forces)
             forces = rearrange(forces, "b (t p) d -> b t p d", p=self.num_patches)
-
-            # apply tokenwise forces
-            acc += forces
+            
+            acc = acc + self.out_proj(forces)
+            acc = acc + self.forces_ffn(acc)
 
             # semi-implicit euler integration
             v_next = v_next + (acc + decay_factor * v_next) * rel_dt_step
