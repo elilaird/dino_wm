@@ -5163,8 +5163,8 @@ class SecondOrderViTPredictor(ViTPredictor):
             )
             forces = rearrange(forces, "b (t p) d -> b t p d", p=self.num_patches)
             
-            acc_0 = acc_0 + self.out_proj(forces)
-            acc_0 = acc_0 + self.forces_ffn(self.norm_ffn(acc_0))
+            instant_force = acc_0 + self.out_proj(forces)
+            instant_force = instant_force + self.forces_ffn(self.norm_ffn(instant_force))
 
             def dynamics(t, state):
                 _, v_next = state.chunk(2, dim=-1)
