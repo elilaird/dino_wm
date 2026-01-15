@@ -5130,31 +5130,28 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # predict acceleration
         x = rearrange(x, "b t p d -> b (t p) d")
-        acc = self.inner_forward(self.norm_x(x)) 
+        acc_0 = self.inner_forward(self.norm_x(x)) 
+        flattened_patches = x.shape[1]
         
-        acc = rearrange(acc, "b (t p) d -> b t p d", p=self.num_patches)
+        acc_0 = rearrange(acc_0, "b (t p) d -> b t p d", p=self.num_patches)
         x = rearrange(x, "b (t p) d -> b t p d", p=self.num_patches)
 
-        # apply damping
-        decay_factor = torch.exp(-F.softplus(self.damping) * rel_dt)
+        decay_factor = torch.exp(-F.softplus(self.damping))
 
         # apply action forces 
         rel_dt_step = rel_dt / curr_frameskip
         v_next = v_0
         x_next = x # (b, t, p, d)
         for i in range(curr_frameskip):
-            curr_action = actions[:, :, i]
 
-            curr_action = curr_action.unsqueeze(2).expand(-1, -1, self.num_patches, -1) # (b, t, 1, d) -> (b, t, p, d)
+            state_0 = torch.cat([x_next, v_next], dim=-1)
+            curr_action = actions[:, :, i].unsqueeze(2).expand(-1, -1, self.num_patches, -1) # (b, t, 1, d) -> (b, t, p, d)
             curr_action = rearrange(curr_action, "b t p d -> b (t p) d")
-            
+            bool_mask = (self.actions_mask.squeeze()[:flattened_patches, :curr_action.shape[1]] == 0)
+
             # q (acc) -> k, v (action)
             action_k, action_v = self.kv_proj(curr_action).chunk(2, dim=-1)
-            acc_q = self.q_proj(rearrange(acc, "b t p d -> b (t p) d"))
-
-            curr_act_len = curr_action.shape[1]
-            acc_len = acc_q.shape[1]
-            bool_mask = (self.actions_mask.squeeze()[:acc_len, :curr_act_len] == 0)
+            acc_q = self.q_proj(rearrange(acc_0, "b t p d -> b (t p) d"))
 
             # cross attention
             forces, _ = self.action_attn(
@@ -5165,15 +5162,18 @@ class SecondOrderViTPredictor(ViTPredictor):
             )
             forces = rearrange(forces, "b (t p) d -> b t p d", p=self.num_patches)
             
-            acc = acc + self.out_proj(forces)
-            acc = acc + self.forces_ffn(acc)
+            acc_0 = acc_0 + self.out_proj(forces)
+            acc_0 = acc_0 + self.forces_ffn(acc_0)
 
-            # semi-implicit euler integration
-            v_next = v_next + (acc + decay_factor * v_next) * rel_dt_step
-            x_next = x_next + (v_next * rel_dt_step)
-
-        x_next = self.norm_x(x_next)
-        v_next = self.norm_v(v_next)
+            def dynamics(t, state):
+                _, v_next = state.chunk(2, dim=-1)
+                dvdt = acc_0 + decay_factor * v_next
+                return torch.cat([v_next, dvdt], dim=-1)
+            
+            state_next = odeint(dynamics, state_0, torch.tensor([0.0, rel_dt_step]), method=self.integration_method, options={"step_size": rel_dt_step / self.integration_steps})[-1]
+            x_next, v_next = state_next.chunk(2, dim=-1)
+            x_next = self.norm_x(x_next)
+            v_next = self.norm_v(v_next)
 
         return x_next, v_next
 
