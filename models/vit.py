@@ -5092,6 +5092,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             0.9 * torch.eye(dim) + 0.1 * torch.randn(dim, dim) * 0.01
         )
         self.vel_correction.bias.data.zero_()
+        self.norm_x = nn.LayerNorm(dim)
         self.norm_acc = nn.LayerNorm(dim)
         self.norm_ffn = nn.LayerNorm(dim)
 
