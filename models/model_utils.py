@@ -26,6 +26,17 @@ def generate_block_causal_mask(num_frames, num_patches, device):
 
     return mask
 
+def generate_block_diagonal_mask(num_frames, num_patches, device):
+    time_mask = torch.eye(num_frames, device=device)
+
+    space_mask = torch.ones(num_patches, num_patches, device=device)
+
+    mask = torch.kron(time_mask, space_mask)
+    mask = mask.float()
+    mask = mask.masked_fill(mask == 0, float("-inf"))
+    mask = mask.masked_fill(mask == 1, float(0.0))
+
+    return mask
 
 
 def generate_mask_matrix(npatch, nwindow):

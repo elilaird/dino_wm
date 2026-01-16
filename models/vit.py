@@ -5067,13 +5067,14 @@ class DynamicsPredictor(nn.Module):
 
 class CausalTransformerDynamics(nn.Module):
     def __init__(
-        self, dim, action_dim, hidden_dim, num_patches, num_frames, num_layers=2, nhead=4
+        self, dim, action_dim, hidden_dim, num_patches, num_frames, num_layers=2, nhead=4, mask_type="block_causal"
     ):
         super().__init__()
         self.dim = dim
         self.num_patches = num_patches
         self.num_frames = num_frames  # Needed to constructing the mask
         self.hidden_dim = hidden_dim # should provide a bottleneck for physics
+        self.mask_type = mask_type
 
         # Input Projection: (z + v + action) -> dim
         self.input_proj = nn.Sequential(nn.Linear(2 * dim + action_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU())
@@ -5102,17 +5103,23 @@ class CausalTransformerDynamics(nn.Module):
         self.output_proj = nn.Linear(hidden_dim, dim)
 
         # Zero-init output for stability
-        self.output_proj.weight.data.zero_()
-        self.output_proj.bias.data.zero_()
+        # self.output_proj.weight.data.zero_()
+        # self.output_proj.bias.data.zero_()
 
-        # Cache the mask so we don't rebuild it every sub-step
-        # We register it as a buffer so it moves to GPU automatically
-        self.register_buffer(
-            "causal_mask",
-            generate_block_causal_mask(
-                num_frames, num_patches, device=torch.device("cpu")
-            ),
-        )
+        if self.mask_type == "block_causal":
+            self.register_buffer(
+                "causal_mask",
+                generate_block_causal_mask(
+                    num_frames, num_patches, device=torch.device("cpu")
+                ),
+            )
+        elif self.mask_type == "block_diagonal":
+            self.register_buffer(
+                "causal_mask",
+                generate_block_diagonal_mask(
+                    num_frames, num_patches, device=torch.device("cpu")
+                ),
+            )
 
     def forward(self, t, augmented_state):
         """
@@ -5174,6 +5181,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         base_frameskip: float = 5.0,
         dynamics_type: str = "mlp",
         dynamics_layers: int = 2,
+        mask_type: str = "block_causal",
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5203,7 +5211,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.base_frameskip = float(base_frameskip)
         self.dynamics_type = dynamics_type
         self.dynamics_layers = dynamics_layers
-
+        self.mask_type = mask_type
         # projectors
         self.phase_head = nn.Linear(dim, dim*2)
         self.action_proj = nn.Linear(action_dim, action_dim * 2)
@@ -5220,6 +5228,7 @@ class SecondOrderViTPredictor(ViTPredictor):
                 num_frames=num_frames,
                 num_layers=dynamics_layers,
                 nhead=4,
+                mask_type=self.mask_type,
             )
         else:
             raise ValueError(f"Invalid dynamics type: {dynamics_type}. Options: mlp, transformer")
