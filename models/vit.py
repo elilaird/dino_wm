@@ -5049,6 +5049,7 @@ class DynamicsPredictor(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, dim) # Outputs Acceleration
         )
+        self.norm = nn.LayerNorm(2 * dim + action_dim)
         self.action_dim = action_dim
         self.dim = dim
 
@@ -5059,7 +5060,7 @@ class DynamicsPredictor(nn.Module):
         v = state[..., self.dim:self.dim*2]
         act = state[..., self.dim*2:]
 
-        acceleration = self.net(state)
+        acceleration = self.net(self.norm(state))
         
         # dxdt, dvdt, da/dt (dummy just so adjoint can see actions)
         return torch.cat([v, acceleration, torch.zeros_like(act)], dim=-1)
