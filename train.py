@@ -129,7 +129,7 @@ class Trainer:
             ddp_kwargs = DistributedDataParallelKwargs(
                 find_unused_parameters=True 
             )
-        elif predictor_name == "models.vit.CacheMemoryViTPredictor":
+        elif predictor_name == "models.vit.CacheMemoryViTPredictor" or predictor_name == "models.vit.SecondOrderViTPredictor":
             ddp_kwargs = DistributedDataParallelKwargs(
                 find_unused_parameters=True 
             )
