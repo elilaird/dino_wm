@@ -5065,6 +5065,103 @@ class DynamicsPredictor(nn.Module):
         # dxdt, dvdt, da/dt (dummy just so adjoint can see actions)
         return torch.cat([v, acceleration, torch.zeros_like(act)], dim=-1)
 
+
+class CausalTransformerDynamics(nn.Module):
+    def __init__(
+        self, dim, action_dim, hidden_dim, num_patches, num_frames, num_layers=2, nhead=4
+    ):
+        super().__init__()
+        self.dim = dim
+        self.num_patches = num_patches
+        self.num_frames = num_frames  # Needed to constructing the mask
+        self.hidden_dim = hidden_dim
+
+        # Input Projection: (z + v + action) -> dim
+        self.input_proj = nn.Linear(2 * dim + action_dim, hidden_dim)
+
+        # Positional Embeddings
+        # We need distinct embeddings for Space (Patch) and Time (Frame)
+        self.pos_embed_spatial = nn.Parameter(
+            torch.randn(1, 1, num_patches, hidden_dim) * 0.02
+        )
+        self.pos_embed_temporal = nn.Parameter(
+            torch.randn(1, num_frames, 1, hidden_dim) * 0.02
+        )
+
+        # The Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=nhead,
+            dim_feedforward=hidden_dim * 4,
+            dropout=0.1,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers, norm=nn.LayerNorm(hidden_dim)
+        )
+
+        # Output Projection (Acceleration)
+        self.output_proj = nn.Linear(hidden_dim, dim)
+
+        # Zero-init output for stability
+        self.output_proj.weight.data.zero_()
+        self.output_proj.bias.data.zero_()
+
+        # Cache the mask so we don't rebuild it every sub-step
+        # We register it as a buffer so it moves to GPU automatically
+        self.register_buffer(
+            "causal_mask",
+            generate_block_causal_mask(
+                num_frames, num_patches, device=torch.device("cpu")
+            ),
+        )
+
+    def forward(self, t, augmented_state):
+        """
+        augmented_state: [Batch, Time, Patches, 2*Dim + ActionDim]
+        """
+        B, T, P, _ = augmented_state.shape
+
+        # 1. Unpack & Project
+        # [B, T, P, Input_Dim] -> [B, T, P, Dim]
+        x = self.input_proj(augmented_state)
+
+        # 2. Add Factorized Positional Embeddings
+        # Broadcast Spatial across Time, and Temporal across Space
+        x = x + self.pos_embed_spatial
+        x = (
+            x + self.pos_embed_temporal[:, :T, :, :]
+        )  # Handle case if T < max_frames
+
+        # 3. Flatten for Transformer
+        # [B, T, P, D] -> [B, T*P, D]
+        x_flat = rearrange(x, "b t p d -> b (t p) d")
+
+        # 4. Get Correct Mask slice
+        # If the input T is smaller than max_frames (e.g. during inference), slice the mask
+        curr_seq_len = T * P
+        mask = self.causal_mask[:curr_seq_len, :curr_seq_len]
+
+        # 5. Transformer Pass (with Mask)
+        x_flat = self.transformer(x_flat, mask=mask)
+
+        # 6. Unflatten
+        # [B, T*P, D] -> [B, T, P, D]
+        x_out = rearrange(x_flat, "b (t p) d -> b t p d", t=T, p=P)
+
+        # 7. Compute Derivatives
+        acceleration = self.output_proj(x_out)
+
+        # Re-pack derivatives [dz, dv, da]
+        # v comes from input state (index dim to 2*dim)
+        v = augmented_state[..., self.dim : 2 * self.dim]
+        d_action = torch.zeros_like(augmented_state[..., 2 * self.dim :])
+
+        return torch.cat([v, acceleration, d_action], dim=-1)
+
+
 class SecondOrderViTPredictor(ViTPredictor):
     def __init__(
         self,
@@ -5091,6 +5188,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         grad_ckpt: bool = False,
         random_steps: bool = False,
         base_frameskip: float = 5.0,
+        dynamics_type: str = "mlp",
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5118,13 +5216,27 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.integration_method = integration_method
         self.random_steps = random_steps
         self.base_frameskip = float(base_frameskip)
+        self.dynamics_type = dynamics_type
 
         # projectors
         self.phase_head = nn.Linear(dim, dim*2)
         self.action_proj = nn.Linear(action_dim, action_dim * 2)
 
         # dynamics func
-        self.dynamics_func = DynamicsPredictor(dim, action_dim * 2, hidden_dim=inner_dim)
+        if dynamics_type == "mlp":
+            self.dynamics_func = DynamicsPredictor(dim, action_dim * 2, hidden_dim=inner_dim)
+        elif dynamics_type == "transformer":
+            self.dynamics_func = CausalTransformerDynamics(
+                dim=dim,
+                action_dim=action_dim * 2,
+                hidden_dim=inner_dim,
+                num_patches=num_patches,
+                num_frames=num_frames,
+                num_layers=2,
+                nhead=4,
+            )
+        else:
+            raise ValueError(f"Invalid dynamics type: {dynamics_type}. Options: mlp, transformer")
 
         
     def inner_forward(self, x):

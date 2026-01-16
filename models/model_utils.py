@@ -4,6 +4,30 @@ def pair(t):
     return t if isinstance(t, tuple) else (t, t)
 
 
+def generate_block_causal_mask(num_frames, num_patches, device):
+    """
+    Returns a mask of shape (T*P, T*P)
+    """
+    # 1. Time Mask: Lower Triangular (T x T)
+    # Frame T can see Frames 0...T
+    time_mask = torch.tril(torch.ones(num_frames, num_frames, device=device))
+
+    # 2. Spatial Mask: All Ones (P x P)
+    # All patches in a frame can see each other
+    space_mask = torch.ones(num_patches, num_patches, device=device)
+
+    # 3. Kronecker Product -> Block Causal
+    mask = torch.kron(time_mask, space_mask)
+
+    # 4. Convert to Additive Mask (0.0 for keep, -inf for discard)
+    mask = mask.float()
+    mask = mask.masked_fill(mask == 0, float("-inf"))
+    mask = mask.masked_fill(mask == 1, float(0.0))
+
+    return mask
+
+
+
 def generate_mask_matrix(npatch, nwindow):
     zeros = torch.zeros(npatch, npatch)
     ones = torch.ones(npatch, npatch)
@@ -194,4 +218,3 @@ def generate_frame_mask_with_memory(num_patches, num_frames, n_memory, device=No
     
     mask = torch.cat(rows, dim=0).unsqueeze(0).unsqueeze(0)
     return mask
-

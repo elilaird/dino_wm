@@ -17,3 +17,4 @@ grad_ckpt: False
 force_orthogonal: True
 random_steps: False
 base_frameskip: ${frameskip}
+dynamics_type: "mlp"
