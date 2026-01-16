@@ -5175,6 +5175,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         random_steps: bool = False,
         base_frameskip: float = 5.0,
         dynamics_type: str = "mlp",
+        dynamics_layers: int = 2,
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5203,6 +5204,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.random_steps = random_steps
         self.base_frameskip = float(base_frameskip)
         self.dynamics_type = dynamics_type
+        self.dynamics_layers = dynamics_layers
 
         # projectors
         self.phase_head = nn.Linear(dim, dim*2)
@@ -5218,7 +5220,7 @@ class SecondOrderViTPredictor(ViTPredictor):
                 hidden_dim=inner_dim,
                 num_patches=num_patches,
                 num_frames=num_frames,
-                num_layers=2,
+                num_layers=dynamics_layers,
                 nhead=4,
             )
         else:
