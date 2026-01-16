@@ -252,14 +252,15 @@ class SecondOrderModel(nn.Module):
             loss_components["rollout_k_loss"] = rollout_k_loss
 
         # log log(v_pred_norm)
+        z_pred_norm = torch.norm(z_pred, dim=-1)
         v_pred_norm = torch.norm(v_pred, dim=-1)
+        loss_components["z_pred_norm"] = torch.log(z_pred_norm + 1e-6).mean()
         loss_components["v_pred_norm"] = torch.log(v_pred_norm + 1e-6).mean()
 
-        if self.kinetic_energy_reg_lambda > 0.0:
-            kinetic_energy = 0.5 * v_pred_norm
-            kinetic_energy_loss = self.kinetic_energy_reg_lambda * kinetic_energy.mean()
-            loss = loss + kinetic_energy_loss
-            loss_components["kinetic_energy_reg"] = kinetic_energy_loss
+        if self.pred_norm_loss_lambda > 0.0:
+            pred_norm_loss = self.pred_norm_loss_lambda * (z_pred_norm + v_pred_norm).mean()
+            loss = loss + pred_norm_loss
+            loss_components["pred_norm_loss"] = pred_norm_loss
 
         # velocity magnitude regularization loss
         if self.velocity_loss_lambda > 0.0:

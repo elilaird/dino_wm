@@ -7,6 +7,6 @@ train_predictor: ${train_predictor}
 train_decoder: ${train_decoder}
 decoder_loss_type: ${decoder_loss_type}
 velocity_loss_lambda: 0.0
-kinetic_energy_reg_lambda: 0.0
+pred_norm_loss_lambda: 0.0
 rollout_loss_lambda: 0.0
 rollout_k: 0
