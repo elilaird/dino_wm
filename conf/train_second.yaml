@@ -87,10 +87,10 @@ num_action_repeat: 0 # crtitical to cancel out the action_emb_dim in predictor c
 proprio_emb_dim: 12 
 num_proprio_repeat: 1
 
-num_frames: 4
-num_hist: 3
+num_frames: 5
+num_hist: 4
 num_pred: 1 # only supports 1
-step_size: 4
+step_size: 5
 has_predictor: True # set this to False for only training a decoder
 has_decoder: True # set this to False for only training a predictor
 

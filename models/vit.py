@@ -5032,6 +5032,38 @@ class AdaLN(nn.Module):
         self.ln.reset_parameters()
 
 
+
+class DynamicsPredictor(nn.Module):
+    """
+    The 'Physics Engine'. 
+    Takes Current State (z), Velocity (v), and Action (a) -> Outputs Acceleration (dv/dt)
+    """
+    def __init__(self, dim, action_dim, hidden_dim=256):
+        super().__init__()
+        # Input: State + Velocity + Action
+        self.net = nn.Sequential(
+            nn.Linear(2 * dim + action_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, dim) # Outputs Acceleration
+        )
+        self.action_dim = action_dim
+        self.dim = dim
+
+    def forward(self, t, state):
+        """
+        state: Tensor [Batch, Time, Patches, 2 * Dim + action_dim] (Concat of x and v and action)
+        """
+        v = state[..., self.dim:self.dim*2]
+        act = state[..., self.dim*2:]
+
+        acceleration = self.net(state)
+        
+        # dxdt, dvdt, da/dt (dummy just so adjoint can see actions)
+        return torch.cat([v, acceleration, torch.zeros_like(act)], dim=-1)
+
 class SecondOrderViTPredictor(ViTPredictor):
     def __init__(
         self,
@@ -5074,8 +5106,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         )
         self.num_patches = num_patches
         self.grad_ckpt = grad_ckpt
-        self.out_dim = dim
-        self.inner_dim = dim
+        self.dim = dim
+        self.inner_dim = inner_dim
         self.action_dim = action_dim
         self.dt = dt
         self.integration_func = getattr(torchdiffeq, integration_func, None)
@@ -5087,30 +5119,12 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.base_frameskip = float(base_frameskip)
 
         # projectors
-        self.vel_correction = nn.Linear(dim, dim)
-        self.vel_correction.weight.data = (
-            0.9 * torch.eye(dim) + 0.1 * torch.randn(dim, dim) * 0.01
-        )
-        self.vel_correction.bias.data.zero_()
-        self.norm_x = nn.LayerNorm(dim)
-        self.norm_acc = nn.LayerNorm(dim)
-        self.norm_ffn = nn.LayerNorm(dim)
+        self.phase_head = nn.Linear(dim, dim*2)
+        self.action_proj = nn.Linear(action_dim, action_dim * 2)
 
-        self.damping = nn.Parameter(torch.tensor(damping))
+        # dynamics func
+        self.dynamics_func = DynamicsPredictor(dim, action_dim * 2, hidden_dim=inner_dim)
 
-        forces_dim = 256
-        self.q_proj = nn.Linear(dim, forces_dim)
-        self.kv_proj = nn.Linear(action_dim, 2 * forces_dim)
-        self.out_proj = nn.Linear(forces_dim, dim)
-        self.action_attn = nn.MultiheadAttention(forces_dim, num_heads=8, batch_first=True, dropout=dropout)
-        self.register_buffer("actions_mask", generate_mask_matrix(num_patches, num_frames))
-
-        self.forces_ffn = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.SiLU(),
-            nn.Linear(dim, dim),
-            nn.Dropout(dropout),
-        )
         
     def inner_forward(self, x):
         b, n, _ = x.shape
@@ -5118,65 +5132,51 @@ class SecondOrderViTPredictor(ViTPredictor):
         x = self.dropout(x)
         x = self.transformer(x)
         return x
+    
+    def get_initial_state(self, x):
+        """
+        x: (b, t, num_patches, dim)
+        """
+        x = rearrange(x, "b t p d -> b (t p) d")
+        phase0 = self.inner_forward(x)
+        phase0 = rearrange(phase0, "b (t p) d -> b t p d", p=self.num_patches)
+
+        state = self.phase_head(phase0)
+        z0, v0 = state.chunk(2, dim=-1)
+
+        # bound velocity
+        v0 = torch.tanh(v0)
+        
+        return torch.cat([z0, v0], dim=-1)
 
     def forward(self, x, actions):
         # x: (b, t, num_patches, dim)
-        # actions: (b, t, frameskip, action_dim)
+        # actions: (b, t, frameskip, action_dim) -> Note: frameskip is # subframes between t and t+1 \
+        # where x is sampled by sampling every base_frameskip frames, but the actions are sampled every frameskip frames
+
         curr_frameskip = actions.shape[2]
-
         rel_dt = float(curr_frameskip / self.base_frameskip)
-
-        # initial velocity (zero velocity at t=0)
-        v_0 = self.vel_correction(x - torch.cat([x[:,:1], x[:, :-1]], dim=1)) / (rel_dt + 1e-6)
-
-        # predict acceleration
-        x = rearrange(x, "b t p d -> b (t p) d")
-        acc_0 = self.inner_forward(self.norm_x(x)) 
-        flattened_patches = x.shape[1]
-        
-        acc_0 = rearrange(acc_0, "b (t p) d -> b t p d", p=self.num_patches)
-        x = rearrange(x, "b (t p) d -> b t p d", p=self.num_patches)
-
-        decay_factor = torch.exp(-F.softplus(self.damping))
-
-        # apply action forces 
         rel_dt_step = rel_dt / curr_frameskip
-        v_next = v_0
-        x_next = x # (b, t, p, d)
-        for i in range(curr_frameskip):
 
-            
+        # get initial state
+        state = self.get_initial_state(x) # (b, t, num_patches, dim)
+        actions = self.action_proj(actions) # (b, t, frameskip, action_dim * 2)
+
+        for i in range(curr_frameskip):            
             curr_action = actions[:, :, i].unsqueeze(2).expand(-1, -1, self.num_patches, -1) # (b, t, 1, d) -> (b, t, p, d)
-            curr_action = rearrange(curr_action, "b t p d -> b (t p) d")
-            bool_mask = (self.actions_mask.squeeze()[:flattened_patches, :curr_action.shape[1]] == 0)
-
-            # q (acc) -> k, v (action)
-            action_k, action_v = self.kv_proj(curr_action).chunk(2, dim=-1)
-            acc_q = self.q_proj(rearrange(self.norm_acc(acc_0), "b t p d -> b (t p) d"))
-
-            # cross attention
-            forces, _ = self.action_attn(
-                query=acc_q,
-                key=action_k, 
-                value=action_v,
-                attn_mask=bool_mask,
-            )
-            forces = rearrange(forces, "b (t p) d -> b t p d", p=self.num_patches)
+            augmented_state = torch.cat([state, curr_action], dim=-1)
             
-            instant_force = acc_0 + self.out_proj(forces)
-            instant_force = instant_force + self.forces_ffn(self.norm_ffn(instant_force))
+            sol = self.integration_func(
+                self.dynamics_func,
+                augmented_state,
+                torch.tensor([0.0, rel_dt_step], device=x.device),
+                method=self.integration_method,
+                options={"step_size": rel_dt_step / self.integration_steps}
+            )[-1] # (b, t, num_patches, 2 * dim + action_dim)
 
-            state_0 = torch.cat([x_next, v_next], dim=-1)
+            state = sol[..., :self.dim*2] # remove action from state
 
-            def dynamics(t, state):
-                _, v_next = state.chunk(2, dim=-1)
-                dvdt = instant_force + decay_factor * v_next
-                return torch.cat([v_next, dvdt], dim=-1)
-            
-            state_next = odeint(dynamics, state_0, torch.tensor([0.0, rel_dt_step]), method=self.integration_method, options={"step_size": rel_dt_step / self.integration_steps})[-1]
-            x_next, v_next = state_next.chunk(2, dim=-1)
-
-        return x_next, v_next
+        return state.chunk(2, dim=-1)
 
     def set_dt(self, new_dt):
         self.dt = new_dt

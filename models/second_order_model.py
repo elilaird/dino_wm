@@ -232,13 +232,17 @@ class SecondOrderModel(nn.Module):
         z, act_emb = self.encode(obs, act)
         act_emb = act_emb[:, :self.num_hist, ...]
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
-        z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
+        z_tgt = z[:, self.num_pred + 1 :, :, :]  # (b, num_hist, num_patches, dim)
 
         visual_tgt = obs["visual"][
-            :, self.num_pred :, ...
+            :, self.num_pred + 1:, ...
         ]  # (b, num_hist, 3, img_size, img_size)
 
         z_pred, v_pred  = self.predict(z_src, act_emb)
+        
+        # remove first frame from loss since can't estimate velocity for it
+        z_pred = z_pred[:, 1:]
+        v_pred = v_pred[:, 1:]
 
         if self.rollout_loss_lambda > 0.0 and self.rollout_k > 0:
             rollout_obs = {k: v[:, :1, ...].detach() for k, v in obs.items()}
@@ -365,18 +369,21 @@ class SecondOrderModel(nn.Module):
         # act_0 = act[:, :num_obs_init]
         # action = act[:, num_obs_init:]
         z, act_emb = self.encode(obs_0, act)
-        act_0 = act_emb[:, :num_obs_init]
-        action = act_emb[:, num_obs_init:] 
+        act0 = act_emb[:, :num_obs_init]
+        act_start = 0
+        act_end = num_obs_init
 
         t = 0
         inc = 1
         while t < act_emb.shape[1] - num_obs_init:
-            z_pred, _ = self.predict(z[:, -self.num_hist :], act_emb[:, t: t + inc, ...]) # act: (b, t+inc, frameskip, action_dim) only adding action to last frame
+            z_pred, _ = self.predict(z[:, -self.num_hist :], act_emb[:, act_start: act_end, ...])
             z_new = z_pred[:, -inc:, ...]
             z = torch.cat([z, z_new], dim=1)
             t += inc
+            act_start += inc if z.shape[1] > self.num_hist else 0
+            act_end += inc
 
-        z_pred, _ = self.predict(z[:, -self.num_hist :], act_emb[:, -1:])
+        z_pred, _ = self.predict(z[:, -self.num_hist :], act_emb[:, act_start:, ...])
         z_new = z_pred[:, -1 :, ...] # take only the next pred
         z = torch.cat([z, z_new], dim=1)
         z_obses, _ = self.separate_emb(z)

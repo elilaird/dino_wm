@@ -129,7 +129,7 @@ class Trainer:
             ddp_kwargs = DistributedDataParallelKwargs(
                 find_unused_parameters=True 
             )
-        elif predictor_name == "models.vit.CacheMemoryViTPredictor" or predictor_name == "models.vit.SecondOrderViTPredictor":
+        elif predictor_name == "models.vit.CacheMemoryViTPredictor": # or predictor_name == "models.vit.SecondOrderViTPredictor":
             ddp_kwargs = DistributedDataParallelKwargs(
                 find_unused_parameters=True 
             )
@@ -1074,6 +1074,7 @@ class Trainer:
                 self.logs_update(time_logs)
 
             if self.cfg.has_decoder and plot:
+                obs_window = {k: v[:, 1:, ...] for k, v in obs.items()}
                 self.decoder_eval(i, obs_window, z_components)
 
             self.logs_update(
@@ -1166,46 +1167,8 @@ class Trainer:
                         }
                         self.logs_update(val_long_horizon_logs)
 
-                    # loop closure tests
-                    if OmegaConf.select(self.cfg, "eval_loopclosure", default=None) is not None and self.cfg.eval_loopclosure.data_path is not None:
-                        from datasets.minigrid_dataset import MiniGridMemmapDataset
-                        loop_dset = MiniGridMemmapDataset(
-                            n_rollout=None,
-                            transform=self.cfg.dataset.transform,
-                            data_path=self.cfg.eval_loopclosure.data_path,
-                            normalize_action=False,
-                            total_episodes=self.cfg.eval_loopclosure.total_episodes,
-                            proprio_available=True,
-                        )
-                        loop_rollout_logs = self.loopclosure_rollout(loop_dset)
-                        loop_rollout_logs = {
-                            f"val_{k}": [v] for k, v in loop_rollout_logs.items()
-                        }
-                        self.logs_update(loop_rollout_logs)
 
-                    # long imagination
-                    if OmegaConf.select(self.cfg, "eval_long_imagination", default=False):
-                        long_imagination_logs = self.long_imagination_rollout(self.val_traj_dset, query_phase_start_idx=self.cfg.query_phase_start_idx, num_rollout=self.cfg.num_eval_samples)
-                        long_imagination_logs = {
-                            f"val_{k}": [v] for k, v in long_imagination_logs.items()
-                        }
-                        self.logs_update(long_imagination_logs)
 
-                    # context recall
-                    if OmegaConf.select(self.cfg, "eval_context_recall", default=False) and self.context_recall_dset is not None:
-                        context_recall_logs = self.context_recall_rollout(self.context_recall_dset["valid"], query_phase_start_idx=self.cfg.teleport_start_idx, num_rollout=self.cfg.num_eval_samples)
-                        context_recall_logs = {
-                            f"val_{k}": [v] for k, v in context_recall_logs.items()
-                        }
-                        self.logs_update(context_recall_logs)
-                    
-                    # recent memory recall
-                    if OmegaConf.select(self.cfg, "eval_recent_memory_recall", default=False):
-                        recent_memory_recall_logs = self.recent_memory_recall_rollout(self.val_traj_dset, num_rollouts=self.cfg.num_eval_samples)
-                        recent_memory_recall_logs = {
-                            f"val_{k}": [v] for k, v in recent_memory_recall_logs.items()
-                        }
-                        self.logs_update(recent_memory_recall_logs)
 
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
@@ -1248,7 +1211,8 @@ class Trainer:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
                     z_obs_out, _ = self.model.separate_emb(z_out)
-                    z_gt = self.model.encode_obs(obs_window)
+                    obs_window_pred = {k: v[:, 1:, ...] for k, v in obs_window.items()}
+                    z_gt = self.model.encode_obs(obs_window_pred)
                     z_tgt = slice_trajdict_with_t(
                         z_gt, start_idx=self.cfg.num_pred
                     )
@@ -1267,11 +1231,11 @@ class Trainer:
                 if visual_out is not None:
                     for t in range(
                         self.cfg.num_hist,
-                        self.cfg.num_hist + self.cfg.num_pred,
+                        self.cfg.num_hist + self.cfg.num_pred - 1,
                     ):
                         img_pred_scores = eval_images(
                             visual_out[:, t - self.cfg.num_pred],
-                            obs_window["visual"][:, t],
+                            obs_window["visual"][:, t+1],
                         )
                         img_pred_scores = self.accelerator.gather_for_metrics(
                             img_pred_scores
@@ -1693,7 +1657,7 @@ class Trainer:
 
         if z_components["visual_out"] is not None:
             for t in range(
-                self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
+                self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred - 1
             ):
                 img_pred_scores = eval_images(
                     z_components["visual_out"][:, t - self.cfg.num_pred],
