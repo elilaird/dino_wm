@@ -232,17 +232,17 @@ class SecondOrderModel(nn.Module):
         z, act_emb = self.encode(obs, act)
         act_emb = act_emb[:, :self.num_hist, ...]
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
-        z_tgt = z[:, self.num_pred + 1 :, :, :]  # (b, num_hist, num_patches, dim)
+        z_tgt = z[:, self.num_pred  :, :, :]  # (b, num_hist, num_patches, dim)
 
         visual_tgt = obs["visual"][
-            :, self.num_pred + 1:, ...
+            :, self.num_pred:, ...
         ]  # (b, num_hist, 3, img_size, img_size)
 
         z_pred, v_pred  = self.predict(z_src, act_emb)
         
         # remove first frame from loss since can't estimate velocity for it
-        z_pred = z_pred[:, 1:]
-        v_pred = v_pred[:, 1:]
+        # z_pred = z_pred[:, 1:]
+        # v_pred = v_pred[:, 1:]
 
         if self.rollout_loss_lambda > 0.0 and self.rollout_k > 0:
             rollout_obs = {k: v[:, :1, ...].detach() for k, v in obs.items()}
