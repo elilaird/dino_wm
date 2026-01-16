@@ -5074,25 +5074,23 @@ class CausalTransformerDynamics(nn.Module):
         self.dim = dim
         self.num_patches = num_patches
         self.num_frames = num_frames  # Needed to constructing the mask
-        self.hidden_dim = hidden_dim
+        self.hidden_dim = hidden_dim # should provide a bottleneck for physics
+        
 
         # Input Projection: (z + v + action) -> dim
-        self.input_proj = nn.Linear(2 * dim + action_dim, hidden_dim)
+        self.input_proj = nn.Sequential(nn.Linear(2 * dim + action_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU())
 
         # Positional Embeddings
         # We need distinct embeddings for Space (Patch) and Time (Frame)
-        self.pos_embed_spatial = nn.Parameter(
-            torch.randn(1, 1, num_patches, hidden_dim) * 0.02
-        )
-        self.pos_embed_temporal = nn.Parameter(
-            torch.randn(1, num_frames, 1, hidden_dim) * 0.02
-        )
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * (num_patches), hidden_dim)
+        )  
 
         # The Transformer
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=nhead,
-            dim_feedforward=hidden_dim * 4,
+            dim_feedforward=hidden_dim * 2,
             dropout=0.1,
             activation="gelu",
             batch_first=True,
@@ -5126,25 +5124,13 @@ class CausalTransformerDynamics(nn.Module):
 
         # 1. Unpack & Project
         # [B, T, P, Input_Dim] -> [B, T, P, Dim]
-        x = self.input_proj(augmented_state)
-
-        # 2. Add Factorized Positional Embeddings
-        # Broadcast Spatial across Time, and Temporal across Space
-        x = x + self.pos_embed_spatial
-        x = (
-            x + self.pos_embed_temporal[:, :T, :, :]
-        )  # Handle case if T < max_frames
-
-        # 3. Flatten for Transformer
-        # [B, T, P, D] -> [B, T*P, D]
+        x = self.input_proj(augmented_state)# Handle case if T < max_frames
         x_flat = rearrange(x, "b t p d -> b (t p) d")
+        x = x + self.pos_embedding[:, :x_flat.shape[1]]
 
-        # 4. Get Correct Mask slice
-        # If the input T is smaller than max_frames (e.g. during inference), slice the mask
         curr_seq_len = T * P
         mask = self.causal_mask[:curr_seq_len, :curr_seq_len]
 
-        # 5. Transformer Pass (with Mask)
         x_flat = self.transformer(x_flat, mask=mask)
 
         # 6. Unflatten
@@ -5228,7 +5214,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         elif dynamics_type == "transformer":
             self.dynamics_func = CausalTransformerDynamics(
                 dim=dim,
-                action_dim=action_dim * 2,
+                action_dim=action_dim,
                 hidden_dim=inner_dim,
                 num_patches=num_patches,
                 num_frames=num_frames,
