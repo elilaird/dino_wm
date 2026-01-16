@@ -5032,7 +5032,6 @@ class AdaLN(nn.Module):
         self.ln.reset_parameters()
 
 
-
 class DynamicsPredictor(nn.Module):
     """
     The 'Physics Engine'. 
@@ -5075,7 +5074,6 @@ class CausalTransformerDynamics(nn.Module):
         self.num_patches = num_patches
         self.num_frames = num_frames  # Needed to constructing the mask
         self.hidden_dim = hidden_dim # should provide a bottleneck for physics
-        
 
         # Input Projection: (z + v + action) -> dim
         self.input_proj = nn.Sequential(nn.Linear(2 * dim + action_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU())
@@ -5124,9 +5122,9 @@ class CausalTransformerDynamics(nn.Module):
 
         # 1. Unpack & Project
         # [B, T, P, Input_Dim] -> [B, T, P, Dim]
-        x = self.input_proj(augmented_state)# Handle case if T < max_frames
-        x_flat = rearrange(x, "b t p d -> b (t p) d")
-        x = x + self.pos_embedding[:, :x_flat.shape[1]]
+        x_flat = rearrange(augmented_state, "b t p d -> b (t p) d")
+        x_flat = self.input_proj(x_flat)  
+        x_flat = x_flat + self.pos_embedding[:, :x_flat.shape[1]]
 
         curr_seq_len = T * P
         mask = self.causal_mask[:curr_seq_len, :curr_seq_len]
@@ -5216,7 +5214,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         elif dynamics_type == "transformer":
             self.dynamics_func = CausalTransformerDynamics(
                 dim=dim,
-                action_dim=action_dim,
+                action_dim=action_dim * 2,
                 hidden_dim=inner_dim,
                 num_patches=num_patches,
                 num_frames=num_frames,
