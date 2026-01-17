@@ -5217,15 +5217,15 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.mask_type = mask_type
         # projectors
         self.phase_head = nn.Linear(dim, dim*2)
-        self.action_proj = nn.Linear(action_dim, action_dim * 2)
+        self.action_proj = nn.Linear(action_dim, action_dim)
 
         # dynamics func
         if dynamics_type == "mlp":
-            self.dynamics_func = DynamicsPredictor(dim, action_dim * 2, hidden_dim=inner_dim)
+            self.dynamics_func = DynamicsPredictor(dim, action_dim, hidden_dim=inner_dim)
         elif dynamics_type == "transformer":
             self.dynamics_func = CausalTransformerDynamics(
                 dim=dim,
-                action_dim=action_dim * 2,
+                action_dim=action_dim,
                 hidden_dim=inner_dim,
                 num_patches=num_patches,
                 num_frames=num_frames,
@@ -5271,7 +5271,7 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         # get initial state
         state = self.get_initial_state(x) # (b, t, num_patches, dim)
-        actions = self.action_proj(actions) # (b, t, frameskip, action_dim * 2)
+        actions = self.action_proj(actions) # (b, t, frameskip, action_dim)
 
         for i in range(curr_frameskip):            
             curr_action = actions[:, :, i].unsqueeze(2).expand(-1, -1, self.num_patches, -1) # (b, t, 1, d) -> (b, t, p, d)
