@@ -5185,6 +5185,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         dynamics_type: str = "mlp",
         dynamics_layers: int = 2,
         mask_type: str = "block_causal",
+        bound_velocity: bool = False,
     ):
         super().__init__(
             num_patches=num_patches,
@@ -5215,6 +5216,9 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.dynamics_type = dynamics_type
         self.dynamics_layers = dynamics_layers
         self.mask_type = mask_type
+        self.bound_velocity = bound_velocity
+
+
         # projectors
         self.phase_head = nn.Linear(dim, dim*2)
         self.action_proj = nn.Linear(action_dim, action_dim)
@@ -5266,8 +5270,6 @@ class SecondOrderViTPredictor(ViTPredictor):
         # where x is sampled by sampling every base_frameskip frames, but the actions are sampled every frameskip frames
 
         curr_frameskip = actions.shape[2]
-        # rel_dt = float(curr_frameskip / self.base_frameskip)
-        # rel_dt_step = rel_dt / curr_frameskip
 
         # get initial state
         state = self.get_initial_state(x) # (b, t, num_patches, dim)
@@ -5286,6 +5288,9 @@ class SecondOrderViTPredictor(ViTPredictor):
             )[-1] # (b, t, num_patches, 2 * dim + action_dim)
 
             state = sol[..., :self.dim*2] # remove action from state
+            
+            if self.bound_velocity:
+                state = torch.cat([state[..., :self.dim], torch.tanh(state[..., self.dim:])], dim=-1)
 
         return state.chunk(2, dim=-1)
 
