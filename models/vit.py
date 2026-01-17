@@ -5078,6 +5078,7 @@ class CausalTransformerDynamics(nn.Module):
 
         # Input Projection: (z + v + action) -> dim
         self.input_proj = nn.Sequential(nn.Linear(2 * dim + action_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU())
+        self.in_norm = nn.LayerNorm(2 * dim + action_dim)
 
         # Positional Embeddings
         # We need distinct embeddings for Space (Patch) and Time (Frame)
@@ -5099,6 +5100,8 @@ class CausalTransformerDynamics(nn.Module):
             encoder_layer, num_layers=num_layers, norm=nn.LayerNorm(hidden_dim)
         )
 
+
+        
         # Output Projection (Acceleration)
         self.output_proj = nn.Linear(hidden_dim, dim)
 
@@ -5130,7 +5133,7 @@ class CausalTransformerDynamics(nn.Module):
         # 1. Unpack & Project
         # [B, T, P, Input_Dim] -> [B, T, P, Dim]
         x_flat = rearrange(augmented_state, "b t p d -> b (t p) d")
-        x_flat = self.input_proj(x_flat)  
+        x_flat = self.input_proj(self.in_norm(x_flat))  
         x_flat = x_flat + self.pos_embedding[:, :x_flat.shape[1]]
 
         curr_seq_len = T * P
