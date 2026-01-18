@@ -5304,7 +5304,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         z = z / self.pos_scale
         v = v / self.vel_scale
 
-        return torch.cat([z, v], dim=-1)
+        return z, v
 
     def set_dt(self, new_dt):
         self.dt = new_dt
