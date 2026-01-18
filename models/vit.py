@@ -5221,6 +5221,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         # scales
         # self.pos_scale = nn.Parameter(torch.ones(dim))
         # self.vel_scale = nn.Parameter(torch.ones(dim))
+        self.pos_norm = nn.LayerNorm(dim)
+        self.vel_norm = nn.LayerNorm(dim)
 
 
         # projectors
@@ -5296,6 +5298,11 @@ class SecondOrderViTPredictor(ViTPredictor):
             )[-1] # (b, t, num_patches, 2 * dim + action_dim)
 
             state = sol[..., :self.dim*2] # remove action from state
+            z, v = state.chunk(2, dim=-1)
+            z = self.pos_norm(z)
+            v = self.vel_norm(v)
+            state = torch.cat([z, v], dim=-1)
+
             
             if self.bound_velocity:
                 state = torch.cat([state[..., :self.dim], torch.tanh(state[..., self.dim:])], dim=-1)
