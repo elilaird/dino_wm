@@ -5041,14 +5041,14 @@ class DynamicsPredictor(nn.Module):
         super().__init__()
         # Input: State + Velocity + Action
         self.net = nn.Sequential(
-            nn.Linear(2 * dim + action_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
+            nn.utils.spectral_norm(nn.Linear(2 * dim + action_dim, hidden_dim)),
+            # nn.LayerNorm(hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
             nn.GELU(),
-            nn.Linear(hidden_dim, dim) # Outputs Acceleration
+            nn.utils.spectral_norm(nn.Linear(hidden_dim, dim)) # Outputs Acceleration
         )
-        self.norm = nn.LayerNorm(2 * dim + action_dim)
+        # self.norm = nn.LayerNorm(2 * dim + action_dim)
         self.action_dim = action_dim
         self.dim = dim
 
@@ -5059,7 +5059,7 @@ class DynamicsPredictor(nn.Module):
         v = state[..., self.dim:self.dim*2]
         act = state[..., self.dim*2:]
 
-        acceleration = self.net(self.norm(state))
+        acceleration = self.net(state)
         
         # dxdt, dvdt, da/dt (dummy just so adjoint can see actions)
         return torch.cat([v, acceleration, torch.zeros_like(act)], dim=-1)
@@ -5219,12 +5219,12 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.bound_velocity = bound_velocity
 
         # scales
-        self.pos_scale = nn.Parameter(torch.ones(dim))
-        self.vel_scale = nn.Parameter(torch.ones(dim))
+        # self.pos_scale = nn.Parameter(torch.ones(dim))
+        # self.vel_scale = nn.Parameter(torch.ones(dim))
 
 
         # projectors
-        self.phase_head = nn.Linear(dim, dim*2)
+        self.phase_head = nn.utils.spectral_norm(nn.Linear(dim, dim*2))
         self.action_proj = nn.Linear(action_dim, action_dim)
 
         # dynamics func
@@ -5267,8 +5267,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         if self.bound_velocity:
             v0 = torch.tanh(v0)
 
-        z0 = z0 * self.pos_scale
-        v0 = v0 * self.vel_scale
+        # z0 = z0 * self.pos_scale
+        # v0 = v0 * self.vel_scale
         
         return torch.cat([z0, v0], dim=-1)
 
@@ -5301,8 +5301,8 @@ class SecondOrderViTPredictor(ViTPredictor):
                 state = torch.cat([state[..., :self.dim], torch.tanh(state[..., self.dim:])], dim=-1)
         
         z, v = state.chunk(2, dim=-1)
-        z = z / self.pos_scale
-        v = v / self.vel_scale
+        # z = z / self.pos_scale
+        # v = v / self.vel_scale
 
         return z, v
 
