@@ -5041,14 +5041,16 @@ class DynamicsPredictor(nn.Module):
         super().__init__()
         # Input: State + Velocity + Action
         self.net = nn.Sequential(
-            nn.utils.spectral_norm(nn.Linear(2 * dim + action_dim, hidden_dim)),
-            # nn.LayerNorm(hidden_dim),
+            nn.Linear(2 * dim + action_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.GELU(),
-            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.utils.spectral_norm(nn.Linear(hidden_dim, dim)) # Outputs Acceleration
+            nn.Linear(hidden_dim, dim) # Outputs Acceleration
         )
         # self.norm = nn.LayerNorm(2 * dim + action_dim)
+        self.acc_norm = nn.LayerNorm(dim)
+        self.v_norm = nn.LayerNorm(dim)
         self.action_dim = action_dim
         self.dim = dim
 
@@ -5060,6 +5062,8 @@ class DynamicsPredictor(nn.Module):
         act = state[..., self.dim*2:]
 
         acceleration = self.net(state)
+        acceleration = self.acc_norm(acceleration)
+        v = self.v_norm(v)
         
         # dxdt, dvdt, da/dt (dummy just so adjoint can see actions)
         return torch.cat([v, acceleration, torch.zeros_like(act)], dim=-1)
@@ -5221,12 +5225,12 @@ class SecondOrderViTPredictor(ViTPredictor):
         # scales
         # self.pos_scale = nn.Parameter(torch.ones(dim))
         # self.vel_scale = nn.Parameter(torch.ones(dim))
-        self.pos_norm = nn.LayerNorm(dim)
-        self.vel_norm = nn.LayerNorm(dim)
+        # self.pos_norm = nn.LayerNorm(dim)
+        # self.vel_norm = nn.LayerNorm(dim)
 
 
         # projectors
-        self.phase_head = nn.utils.spectral_norm(nn.Linear(dim, dim*2))
+        self.phase_head = nn.Linear(dim, dim*2)
         self.action_proj = nn.Linear(action_dim, action_dim)
 
         # dynamics func
@@ -5298,10 +5302,10 @@ class SecondOrderViTPredictor(ViTPredictor):
             )[-1] # (b, t, num_patches, 2 * dim + action_dim)
 
             state = sol[..., :self.dim*2] # remove action from state
-            z, v = state.chunk(2, dim=-1)
-            z = self.pos_norm(z)
-            v = self.vel_norm(v)
-            state = torch.cat([z, v], dim=-1)
+            # z, v = state.chunk(2, dim=-1)
+            # z = self.pos_norm(z)
+            # v = self.vel_norm(v)
+            # state = torch.cat([z, v], dim=-1)
 
             
             if self.bound_velocity:
