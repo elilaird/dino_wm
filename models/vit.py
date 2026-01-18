@@ -5041,12 +5041,12 @@ class DynamicsPredictor(nn.Module):
         super().__init__()
         # Input: State + Velocity + Action
         self.net = nn.Sequential(
-            nn.utils.spectral_norm(nn.Linear(2 * dim + action_dim, hidden_dim)),
-            # nn.LayerNorm(hidden_dim),
+            nn.Linear(2 * dim + action_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.GELU(),
-            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.utils.spectral_norm(nn.Linear(hidden_dim, dim)) # Outputs Acceleration
+            nn.Linear(hidden_dim, dim) # Outputs Acceleration
         )
         # self.norm = nn.LayerNorm(2 * dim + action_dim)
         self.action_dim = action_dim
@@ -5226,7 +5226,7 @@ class SecondOrderViTPredictor(ViTPredictor):
 
 
         # projectors
-        self.phase_head = nn.utils.spectral_norm(nn.Linear(dim, dim*2))
+        self.phase_head = nn.Linear(dim, dim*2)
         self.action_proj = nn.Linear(action_dim, action_dim)
 
         # dynamics func
