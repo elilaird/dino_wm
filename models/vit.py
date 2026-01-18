@@ -5218,6 +5218,10 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.mask_type = mask_type
         self.bound_velocity = bound_velocity
 
+        # scales
+        self.pos_scale = nn.Parameter(torch.ones(dim))
+        self.vel_scale = nn.Parameter(torch.ones(dim))
+
 
         # projectors
         self.phase_head = nn.Linear(dim, dim*2)
@@ -5260,7 +5264,11 @@ class SecondOrderViTPredictor(ViTPredictor):
         z0, v0 = state.chunk(2, dim=-1)
 
         # bound velocity
-        v0 = torch.tanh(v0)
+        if self.bound_velocity:
+            v0 = torch.tanh(v0)
+
+        z0 = z0 * self.pos_scale
+        v0 = v0 * self.vel_scale
         
         return torch.cat([z0, v0], dim=-1)
 
@@ -5291,8 +5299,12 @@ class SecondOrderViTPredictor(ViTPredictor):
             
             if self.bound_velocity:
                 state = torch.cat([state[..., :self.dim], torch.tanh(state[..., self.dim:])], dim=-1)
+        
+        z, v = state.chunk(2, dim=-1)
+        z = z / self.pos_scale
+        v = v / self.vel_scale
 
-        return state.chunk(2, dim=-1)
+        return torch.cat([z, v], dim=-1)
 
     def set_dt(self, new_dt):
         self.dt = new_dt
