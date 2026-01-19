@@ -5077,7 +5077,7 @@ class CausalTransformerDynamics(nn.Module):
         self.mask_type = mask_type
 
         # Input Projection: (z + v + action) -> dim
-        self.input_proj = nn.Sequential(nn.Linear(2 * dim + action_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU())
+        self.input_proj = nn.Sequential(nn.utils.spectral_norm(nn.Linear(2 * dim + action_dim, hidden_dim)), nn.LayerNorm(hidden_dim), nn.GELU())
         self.in_norm = nn.LayerNorm(2 * dim + action_dim)
 
         # Positional Embeddings
@@ -5099,11 +5099,9 @@ class CausalTransformerDynamics(nn.Module):
         self.transformer = nn.TransformerEncoder(
             encoder_layer, num_layers=num_layers, norm=nn.LayerNorm(hidden_dim)
         )
-
-
         
         # Output Projection (Acceleration)
-        self.output_proj = nn.Linear(hidden_dim, dim)
+        self.output_proj = nn.utils.spectral_norm(nn.Linear(hidden_dim, dim))
 
         # Zero-init output for stability
         # self.output_proj.weight.data.zero_()
@@ -5218,11 +5216,6 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.mask_type = mask_type
         self.bound_velocity = bound_velocity
 
-        # scales
-        # self.pos_scale = nn.Parameter(torch.ones(dim))
-        # self.vel_scale = nn.Parameter(torch.ones(dim))
-
-
         # projectors
         self.phase_head = nn.utils.spectral_norm(nn.Linear(dim, dim*2))
         self.action_proj = nn.Linear(action_dim, action_dim)
@@ -5301,8 +5294,6 @@ class SecondOrderViTPredictor(ViTPredictor):
                 state = torch.cat([state[..., :self.dim], torch.tanh(state[..., self.dim:])], dim=-1)
         
         z, v = state.chunk(2, dim=-1)
-        # z = z / self.pos_scale
-        # v = v / self.vel_scale
 
         return z, v
 
