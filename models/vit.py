@@ -5041,10 +5041,11 @@ class DynamicsPredictor(nn.Module):
         super().__init__()
         # Input: State + Velocity + Action
         self.net = nn.Sequential(
-            nn.utils.spectral_norm(nn.Linear(2 * dim + action_dim, hidden_dim)),
-            # nn.LayerNorm(hidden_dim),
+            nn.Linear(2 * dim + action_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.GELU(),
-            nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.utils.spectral_norm(nn.Linear(hidden_dim, dim)) # Outputs Acceleration
         )
