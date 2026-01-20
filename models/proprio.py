@@ -105,10 +105,10 @@ class ActionMLPLSTM(nn.Module):
         self.action_embed = nn.Sequential(
             nn.Linear(self.action_dim, emb_dim * 2),
             nn.SiLU(),
-            nn.Linear(emb_dim * 2, emb_dim)
+            nn.Linear(emb_dim * 2, emb_dim * 2)
         )
         self.action_lstm = nn.LSTM(
-            input_size=emb_dim,
+            input_size=emb_dim * 2,
             hidden_size=emb_dim,  # Match your embedding dimension
             num_layers=1,
             batch_first=True,
