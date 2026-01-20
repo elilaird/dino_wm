@@ -5184,7 +5184,11 @@ class SecondOrderViTPredictor(ViTPredictor):
         dynamics_layers: int = 2,
         mask_type: str = "block_causal",
         bound_velocity: bool = False,
+        action_conditioning: bool = False,
     ):
+        if action_conditioning:
+            dim = dim + action_dim // 2
+
         super().__init__(
             num_patches=num_patches,
             num_frames=num_frames,
@@ -5215,6 +5219,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.dynamics_layers = dynamics_layers
         self.mask_type = mask_type
         self.bound_velocity = bound_velocity
+        self.action_conditioning = action_conditioning
 
         # projectors
         self.phase_head = nn.utils.spectral_norm(nn.Linear(dim, dim*2))
@@ -5237,6 +5242,34 @@ class SecondOrderViTPredictor(ViTPredictor):
         else:
             raise ValueError(f"Invalid dynamics type: {dynamics_type}. Options: mlp, transformer")
 
+        # action conditioning for main network
+        if self.action_conditioning:
+            self.action_lstm = nn.LSTM(
+                input_size=action_dim,
+                hidden_size=action_dim // 2,  # Match your embedding dimension
+                num_layers=1,
+                batch_first=True,
+                bidirectional=False
+            )
+    
+    def action_conditioning_forward(self, x, actions):
+        """
+        x: (b, t, num_patches, dim)
+        actions: (b, t, frameskip, action_dim)
+        """
+        b, t, p, xd = x.shape
+        _, _, fs, ad = actions.shape
+        
+        actions_flat = actions.reshape(b * t, fs, ad) 
+        _, (h, _) = self.action_lstm(actions_flat) # (b, t, action_dim // 2)
+        action_emb = h[-1].view(b, t, -1)
+
+        # concat to x
+        action_emb_tiled = action_emb.unsqueeze(2).expand(-1, -1, p, -1)
+        
+        x = torch.cat([x, action_emb_tiled], dim=-1) # (b, t, num_patches, dim + action_dim)
+
+        return x
         
     def inner_forward(self, x):
         b, n, _ = x.shape
@@ -5272,6 +5305,9 @@ class SecondOrderViTPredictor(ViTPredictor):
 
         curr_frameskip = actions.shape[2]
 
+        if self.action_conditioning:
+            x = self.action_conditioning_forward(x, actions)
+
         # get initial state
         state = self.get_initial_state(x) # (b, t, num_patches, dim)
         actions = self.action_proj(actions) # (b, t, frameskip, action_dim)
@@ -5294,6 +5330,10 @@ class SecondOrderViTPredictor(ViTPredictor):
                 state = torch.cat([state[..., :self.dim], torch.tanh(state[..., self.dim:])], dim=-1)
         
         z, v = state.chunk(2, dim=-1)
+
+        if self.action_conditioning:
+            v = v[..., :-(self.action_dim // 2)]
+            z = z[..., :-(self.action_dim // 2)]
 
         return z, v
 
