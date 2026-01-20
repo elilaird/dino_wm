@@ -471,12 +471,12 @@ def load_model_state_dict(model_ckpt, train_cfg, num_action_repeat, device):
         models["proprio_encoder"] = hydra.utils.instantiate(train_cfg.proprio_encoder)
     
     if "action_encoder" in state_dicts:
-        models["action_encoder"] = hydra.utils.instantiate(train_cfg.action_encoder)
+        models["action_encoder"] = hydra.utils.instantiate(train_cfg.action_encoder, frameskip=train_cfg.frameskip)
         models["action_encoder"].load_state_dict(state_dicts["action_encoder"])
         print(f"Loaded action encoder from state dict checkpoint")
     else:
         print(f"Loaded untrained action encoder from config")
-        models["action_encoder"] = hydra.utils.instantiate(train_cfg.action_encoder)
+        models["action_encoder"] = hydra.utils.instantiate(train_cfg.action_encoder, frameskip=train_cfg.frameskip)
     
     # Handle decoder
     if train_cfg.has_decoder:
