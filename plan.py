@@ -593,13 +593,6 @@ def planning_main(cfg_dict):
     print("Build workspace")
     print(f"Using frameskip: {cfg_dict['test_frameskip']}")
 
-    original_dt = model.get_dt()
-    new_dt = cfg_dict["test_frameskip"] / original_dt
-    model.set_dt(new_dt)
-    print(f"Set predictor dt to {new_dt}=={model.get_dt()}")
-    assert new_dt == model.get_dt(), f"Predictor dt {model.get_dt()} does not match new_dt {new_dt}"
-
-
     plan_workspace = PlanWorkspace(
         cfg_dict=cfg_dict,
         wm=model,
