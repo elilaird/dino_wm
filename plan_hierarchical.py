@@ -67,11 +67,6 @@ class HierarchicalPlanWorkspace:
         self.action_dim = self.dset.action_dim * self.fine_frameskip
         self.debug_dset_init = cfg_dict["debug_dset_init"]
 
-        self.is_discrete = isinstance(self.wm.action_encoder, DiscreteActionEncoder)
-        if self.is_discrete:
-            self.action_dim = self.wm.action_encoder.num_actions
-            print(f"HierarchicalPlanWorkspace: Using discrete actions with {self.action_dim} possible values")
-
         objective_fn = hydra.utils.call(
             cfg_dict["objective"],
         )
@@ -103,7 +98,6 @@ class HierarchicalPlanWorkspace:
             seed=self.eval_seed,
             preprocessor=self.data_preprocessor,
             n_plot_samples=self.cfg_dict["n_plot_samples"],
-            is_discrete=self.is_discrete,
         )
 
         self.fine_evaluator = PlanEvaluator(
@@ -117,7 +111,6 @@ class HierarchicalPlanWorkspace:
             seed=self.eval_seed,
             preprocessor=self.data_preprocessor,
             n_plot_samples=self.cfg_dict["n_plot_samples"],
-            is_discrete=self.is_discrete,
         )
 
         if self.wandb_run is None or isinstance(
@@ -136,7 +129,6 @@ class HierarchicalPlanWorkspace:
             evaluator=self.fine_evaluator,  # Use fine evaluator for hierarchical planner
             wandb_run=self.wandb_run,
             log_filename=self.log_filename,
-            is_discrete=self.is_discrete,
             # Pass frameskips to hierarchical planner
             coarse_frameskip=self.coarse_frameskip,
             fine_frameskip=self.fine_frameskip,
@@ -152,6 +144,7 @@ class HierarchicalPlanWorkspace:
 
         print(f"Hierarchical horizons: coarse={coarse_horizon} (frameskip={self.coarse_frameskip}), "
               f"fine={fine_horizon} (frameskip={self.fine_frameskip})")
+        print(f"action dim: {self.action_dim}")
 
         self.dump_targets()
 

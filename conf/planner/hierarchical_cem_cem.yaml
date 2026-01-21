@@ -10,13 +10,13 @@ coarse_planner:
 fine_planner:
   target: planning.cem.CEMPlanner
   horizon: 10  # Will be overridden by script based on goal_H
-  topk: 30
-  num_samples: 300
+  topk: 10
+  num_samples: 50
   var_scale: 0.5  # Smaller variance for fine planning
   opt_steps: 30
   eval_every: 5
-coarse_frameskip: 5
-fine_frameskip: 1
+coarse_frameskip: 10
+fine_frameskip: 5
 tracking_weight: 1.0
 upsample_method: "repeat"
 

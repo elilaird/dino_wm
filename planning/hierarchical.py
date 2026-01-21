@@ -215,48 +215,35 @@ class HierarchicalPlanner(BasePlanner):
         # Step 1: Coarse planning
         print(f"{self.logging_prefix}: Starting coarse planning...")
 
-        # Temporarily modify evaluator frameskip for coarse planning
-        original_frameskip = self.evaluator.frameskip
-        self.evaluator.frameskip = self.coarse_frameskip
+        coarse_actions, _ = self.coarse_planner.plan(obs_0, obs_g, actions=None)
+        print(f"{self.logging_prefix}: Coarse planning completed. Shape: {coarse_actions.shape}")
 
-        try:
-            coarse_actions, _ = self.coarse_planner.plan(obs_0, obs_g, actions=None)
-            print(f"{self.logging_prefix}: Coarse planning completed. Shape: {coarse_actions.shape}")
 
-            # Rollout coarse trajectory to get intermediate states for tracking
-            trans_obs_0 = move_to_device(
-                self.preprocessor.transform_obs(obs_0), self.device
+        # Rollout coarse trajectory to get intermediate states for tracking
+        trans_obs_0 = move_to_device(
+            self.preprocessor.transform_obs(obs_0), self.device
+        )
+        trans_obs_g = move_to_device(
+            self.preprocessor.transform_obs(obs_g), self.device
+        )
+
+        with torch.no_grad():
+            coarse_z_obses, _ = self.wm.rollout(
+                obs_0=trans_obs_0,
+                act=coarse_actions,
             )
-            trans_obs_g = move_to_device(
-                self.preprocessor.transform_obs(obs_g), self.device
-            )
 
-            with torch.no_grad():
-                coarse_z_obses, _ = self.wm.rollout(
-                    obs_0=trans_obs_0,
-                    act=coarse_actions,
-                )
+        # Convert coarse predictions back to observation space for tracking (no proprio loss so use dummy proprio)
+        coarse_obs_track = self.wm.decode_obs(coarse_z_obses)[0]
+        dummy_proprio = torch.zeros((coarse_z_obses["proprio"].shape[0], coarse_z_obses["proprio"].shape[1], trans_obs_g["proprio"].shape[2]), device=coarse_actions.device)
+        coarse_obs_track = {"visual": coarse_obs_track["visual"], "proprio": dummy_proprio}
 
-            # Convert coarse predictions back to observation space for tracking
-            coarse_obs_track = {}
-            for key in trans_obs_0.keys():
-                if key in coarse_z_obses:
-                    # Decode visual features back to pixels if needed
-                    if key == "visual" and hasattr(self.wm, 'decoder') and self.wm.decoder is not None:
-                        coarse_obs_track[key] = self.wm.decoder(coarse_z_obses[key])
-                    else:
-                        coarse_obs_track[key] = coarse_z_obses[key]
-
-            # Add goal observation as final tracking target
-            for key in coarse_obs_track.keys():
-                coarse_obs_track[key] = torch.cat([
-                    coarse_obs_track[key], 
-                    trans_obs_g[key]
-                ], dim=1)
-
-        finally:
-            # Restore original frameskip
-            self.evaluator.frameskip = original_frameskip
+        # Add goal observation as final tracking target
+        for key in coarse_obs_track.keys():
+            coarse_obs_track[key] = torch.cat([
+                coarse_obs_track[key], 
+                trans_obs_g[key]
+            ], dim=1)
 
         # Step 2: Upsample coarse actions to fine resolution
         fine_horizon = self.fine_planner.horizon
@@ -268,9 +255,6 @@ class HierarchicalPlanner(BasePlanner):
         )
 
         # Step 3: Fine planning with tracking
-        print(f"{self.logging_prefix}: Starting fine planning with tracking...")
-        print(f"{self.logging_prefix}: Upsampled actions shape: {upsampled_actions.shape}")
-
         # Create tracking targets by downsampling the coarse trajectory to fine resolution
         tracking_targets = self._downsample_trajectory(
             coarse_obs_track,
@@ -279,19 +263,20 @@ class HierarchicalPlanner(BasePlanner):
         )
 
         # Override the fine planner's objective to include tracking
-        original_objective = self.fine_planner.objective_fn
         self.fine_planner.objective_fn = self._create_tracking_objective_fn()
 
-        try:
-            fine_actions, action_len = self.fine_planner.plan(
-                obs_0, tracking_targets, actions=upsampled_actions
-            )
-            print(f"{self.logging_prefix}: Fine planning completed. Shape: {fine_actions.shape}")
+        # reshape tracking_targets to HWC
+        tracking_targets['visual'] = rearrange(tracking_targets['visual'], "b t c h w -> b t h w c")
+        tracking_targets = {k: v.to("cpu") for k, v in tracking_targets.items()}
 
-        finally:
-            # Restore original objective
-            self.fine_planner.objective_fn = original_objective
+        print(f"obs_0 shape: {obs_0['visual'].shape}")
+        print(f"tracking_targets shape: {tracking_targets['visual'].shape}")
+        print(f"upsampled_actions shape: {upsampled_actions.shape}")
 
+        fine_actions, action_len = self.fine_planner.plan(
+            obs_0, tracking_targets, actions=upsampled_actions
+        )
+        print(f"{self.logging_prefix}: Fine planning completed. Shape: {fine_actions.shape}")
         # Log hierarchical planning metrics
         if self.wandb_run is not None:
             self.wandb_run.log({
