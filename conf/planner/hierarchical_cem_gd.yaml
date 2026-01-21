@@ -1,0 +1,25 @@
+_target_: planning.hierarchical.HierarchicalPlanner
+coarse_planner:
+  target: planning.cem.CEMPlanner
+  horizon: 20  # Will be overridden by script based on goal_H
+  topk: 20
+  num_samples: 200
+  var_scale: 1.0
+  opt_steps: 20
+  eval_every: 5
+fine_planner:
+  target: planning.gd.GDPlanner
+  horizon: 10  # Will be overridden by script based on goal_H
+  action_noise: 0.01
+  sample_type: "randn"
+  lr: 0.01
+  opt_steps: 50
+  eval_every: 5
+  optimizer_type: "adam"
+  max_grad_norm: 1.0
+coarse_frameskip: 5
+fine_frameskip: 1
+tracking_weight: 1.0
+upsample_method: "repeat"
+
+name: hierarchical_cem_gd
