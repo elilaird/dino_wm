@@ -243,8 +243,8 @@ class PlanWorkspace:
 
             self.obs_0 = obs_0
             self.obs_g = obs_g
-            self.state_0 = start_state
-            self.state_g = goal_state
+            self.state_0 = start_states
+            self.state_g = goal_states
             self.gt_actions = None
 
         else:
