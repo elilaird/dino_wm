@@ -357,7 +357,7 @@ class SecondOrderModel(nn.Module):
     def rollout(self, obs_0, act, bypass_memory_reset=False):
         """
         input:  obs_0 (dict): (b, n, 3, img_size, img_size)
-                  act: (b, t+n, frameskip, action_dim)
+                  act: (b, t+n, frameskip * action_dim)
         output: embeddings of rollout obs
                 visuals: (b, t+n+1, 3, img_size, img_size)
                 z: (b, t+n+1, num_patches, emb_dim)
