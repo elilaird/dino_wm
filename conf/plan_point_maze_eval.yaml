@@ -19,7 +19,7 @@ model_epoch: latest
 
 seed: 99
 n_evals: 20 
-goal_source: 'random_state'
+goal_source: 'random_state' # ["manual_easy", "manual_medium", "manual_hard"]'
 goal_H: 6
 n_plot_samples: 10
 K: null

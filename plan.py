@@ -205,6 +205,37 @@ class PlanWorkspace:
             self.state_0 = rand_init_state  # (b, d)
             self.state_g = rand_goal_state
             self.gt_actions = None
+
+        elif self.goal_source in ["manual_easy", "manual_medium", "manual_hard"]:
+            # set start and goal states manually to farthest points
+            TOP_LEFT_STATE = np.array([0.80, 0.80, 0.0, 0.0])
+            TOP_RIGHT_STATE = np.array([2.80, 0.80, 0.0, 0.0])
+            BOTTOM_LEFT_STATE = np.array([0.80, 2.75, 0.0, 0.0])
+            BOTTOM_RIGHT_STATE = np.array([2.80, 2.75, 0.0, 0.0])
+
+            if self.goal_source == "manual_easy":
+                start_state = TOP_LEFT_STATE
+                goal_state = BOTTOM_LEFT_STATE
+            elif self.goal_source == "manual_medium":
+                start_state = TOP_LEFT_STATE
+                goal_state = BOTTOM_RIGHT_STATE
+            elif self.goal_source == "manual_hard":
+                start_state = TOP_LEFT_STATE
+                goal_state = TOP_RIGHT_STATE
+
+            obs_0, state_0 = self.env.prepare(self.eval_seed, start_state)
+            obs_g, state_g = self.env.prepare(self.eval_seed, goal_state)
+
+            for k in obs_0.keys():
+                obs_0[k] = np.expand_dims(obs_0[k], axis=1)
+                obs_g[k] = np.expand_dims(obs_g[k], axis=1)
+
+            self.obs_0 = obs_0
+            self.obs_g = obs_g
+            self.state_0 = start_state
+            self.state_g = goal_state
+            self.gt_actions = None
+
         else:
             # update env config from val trajs
             observations, states, actions, env_info = (
