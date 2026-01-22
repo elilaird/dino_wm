@@ -189,6 +189,7 @@ class PlanWorkspace:
             rand_init_state, rand_goal_state = self.env.sample_random_init_goal_states(
                 self.eval_seed
             )
+
             if self.env_name == "deformable_env": # take rand init state from dset for deformable envs
                 rand_init_state = np.array([x[0] for x in states])
 
@@ -208,10 +209,10 @@ class PlanWorkspace:
 
         elif self.goal_source in ["manual_easy", "manual_medium", "manual_hard"]:
             # set start and goal states manually to farthest points
-            TOP_LEFT_STATE = np.array([0.80, 0.80, 0.0, 0.0])
-            TOP_RIGHT_STATE = np.array([2.80, 0.80, 0.0, 0.0])
-            BOTTOM_LEFT_STATE = np.array([0.80, 2.75, 0.0, 0.0])
-            BOTTOM_RIGHT_STATE = np.array([2.80, 2.75, 0.0, 0.0])
+            TOP_LEFT_STATE = np.array([0.80, 0.80])
+            TOP_RIGHT_STATE = np.array([2.80, 0.80])
+            BOTTOM_LEFT_STATE = np.array([0.80, 2.75])
+            BOTTOM_RIGHT_STATE = np.array([2.80, 2.75])
 
             if self.goal_source == "manual_easy":
                 start_state = TOP_LEFT_STATE
@@ -222,9 +223,19 @@ class PlanWorkspace:
             elif self.goal_source == "manual_hard":
                 start_state = TOP_LEFT_STATE
                 goal_state = TOP_RIGHT_STATE
+            
+            # add noise to start and goal states for each of n_evals
+            start_states = []
+            goal_states = []
+            for i in range(self.n_evals):
+                start_states.append(np.concatenate([start_state + np.random.normal(0, 0.01, [2]), np.random.uniform(-5.2262554, 5.2262554, [2])]))
+                goal_states.append(np.concatenate([goal_state + np.random.normal(0, 0.01, [2]), np.random.uniform(-5.2262554, 5.2262554, [2])]))
+            
+            start_states = np.stack(start_states)
+            goal_states = np.stack(goal_states)
 
-            obs_0, state_0 = self.env.prepare(self.eval_seed, start_state)
-            obs_g, state_g = self.env.prepare(self.eval_seed, goal_state)
+            obs_0, state_0 = self.env.prepare(self.eval_seed, start_states)
+            obs_g, state_g = self.env.prepare(self.eval_seed, goal_states)
 
             for k in obs_0.keys():
                 obs_0[k] = np.expand_dims(obs_0[k], axis=1)
