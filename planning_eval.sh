@@ -1,12 +1,21 @@
 #!/bin/bash
 
-# Usage: ./planning_eval.sh <branch> <time> <model_name> <epochs> [additional_args...]
+# Usage: ./planning_eval.sh [--hierarchical] <branch> <time> <model_name> <epochs> [additional_args...]
 # Example: ./planning_eval.sh unconstrained-second-order 1:15:00 2025-12-17/17-30-10 "10 20 30 40 50" goal_H=6
+# Example: ./planning_eval.sh --hierarchical unconstrained-second-order 1:15:00 2025-12-17/17-30-10 "10 20 30 40 50" goal_H=6 coarse_frameskip=5 fine_frameskip=1
 # Range syntax: "10-50:10" (start-end:step) or "10-50" (every integer from start to end)
+# --hierarchical: Use hierarchical planning with coarse-to-fine MPC
+
+HIERARCHICAL=false
+if [ "$1" = "--hierarchical" ]; then
+    HIERARCHICAL=true
+    shift
+fi
 
 if [ $# -lt 4 ]; then
-    echo "Usage: $0 <branch> <time> <model_name> <epochs> [additional_args...]"
+    echo "Usage: $0 [--hierarchical] <branch> <time> <model_name> <epochs> [additional_args...]"
     echo "epochs should be space-separated list like '10 20 30' or '10-50:10' for range with step, or '10-50' for every integer from start to end"
+    echo "--hierarchical: Use hierarchical planning instead of regular planning"
     exit 1
 fi
 
@@ -35,13 +44,25 @@ else
     EPOCHS="$EPOCHS_STR"
 fi
 
+PARTITION=${PARTITION:-batch}
 # Base environment variables
-BASE_ENV="GPU=1 CPUS=16 TYPE=plan MEM=16G BRANCH=$BRANCH PARTITION=batch TIME=$TIME CONDA_ENV=world_models"
+BASE_ENV="GPU=1 CPUS=16 MEM=16G BRANCH=$BRANCH PARTITION=$PARTITION TIME=$TIME CONDA_ENV=world_models"
 
 # Loop through epochs
 for epoch in $EPOCHS; do
     echo "Running evaluation for epoch $epoch..."
-    CMD="$BASE_ENV ./make_sbatch.sh --config-name plan_point_maze_eval.yaml model_name=$MODEL_NAME model_epoch=$epoch $@"
+
+    if [ "$HIERARCHICAL" = true ]; then
+        CONFIG_NAME="plan_hierarchical.yaml"
+        TYPE="plan_hierarchical"
+        echo "Using hierarchical planning configuration"
+    else
+        CONFIG_NAME="plan_point_maze_eval.yaml"
+        TYPE="plan"
+        echo "Using regular planning configuration"
+    fi
+
+    CMD="$BASE_ENV TYPE=$TYPE ./make_sbatch.sh --config-name $CONFIG_NAME model_name=$MODEL_NAME model_epoch=$epoch $@"
     # echo "Command: $CMD"
     eval $CMD
 done
