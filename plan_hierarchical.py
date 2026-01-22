@@ -33,49 +33,8 @@ ALL_MODEL_KEYS = [
     "action_encoder",
 ]
 
-def build_plan_cfg_dicts(
-    plan_cfg_path="",
-    ckpt_base_path="",
-    model_name="",
-    model_epoch="final",
-    planner=["gd", "cem"],
-    goal_source=["dset"],
-    goal_H=[1, 5, 10],
-    alpha=[0, 0.1, 1],
-):
-    """
-    Return a list of plan overrides, for model_path, add a key in the dict {"model_path": model_path}.
-    """
-    config_path = os.path.dirname(plan_cfg_path)
-    overrides = [
-        {
-            "planner": p,
-            "goal_source": g_source,
-            "goal_H": g_H,
-            "ckpt_base_path": ckpt_base_path,
-            "model_name": model_name,
-            "model_epoch": model_epoch,
-            "objective": {"alpha": a},
-        }
-        for p, g_source, g_H, a in product(planner, goal_source, goal_H, alpha)
-    ]
-    cfg = OmegaConf.load(plan_cfg_path)
-    cfg_dicts = []
-    for override_args in overrides:
-        planner = override_args["planner"]
-        planner_cfg = OmegaConf.load(
-            os.path.join(config_path, f"planner/{planner}.yaml")
-        )
-        cfg["planner"] = OmegaConf.merge(cfg.get("planner", {}), planner_cfg)
-        override_args.pop("planner")
-        cfg = OmegaConf.merge(cfg, OmegaConf.create(override_args))
-        cfg_dict = OmegaConf.to_container(cfg)
-        cfg_dict["planner"]["horizon"] = cfg_dict["goal_H"]  # assume planning horizon equals to goal horizon
-        cfg_dicts.append(cfg_dict)
-    return cfg_dicts
 
-
-class PlanWorkspace:
+class HierarchicalPlanWorkspace:
     def __init__(
         self,
         cfg_dict: dict,
@@ -83,7 +42,8 @@ class PlanWorkspace:
         dset,
         env: SubprocVectorEnv,
         env_name: str,
-        frameskip: int,
+        coarse_frameskip: int,
+        fine_frameskip: int,
         wandb_run: wandb.run,
     ):
         self.cfg_dict = cfg_dict
@@ -91,7 +51,8 @@ class PlanWorkspace:
         self.dset = dset
         self.env = env
         self.env_name = env_name
-        self.frameskip = frameskip
+        self.coarse_frameskip = coarse_frameskip
+        self.fine_frameskip = fine_frameskip
         self.wandb_run = wandb_run
         self.device = next(wm.parameters()).device
 
@@ -101,13 +62,10 @@ class PlanWorkspace:
         self.n_evals = cfg_dict["n_evals"]
         self.goal_source = cfg_dict["goal_source"]
         self.goal_H = cfg_dict["goal_H"]
-        self.action_dim = self.dset.action_dim * self.frameskip
-        self.debug_dset_init = cfg_dict["debug_dset_init"]
 
-        self.is_discrete = isinstance(self.wm.action_encoder, DiscreteActionEncoder)
-        if self.is_discrete:
-            self.action_dim = self.wm.action_encoder.num_actions
-            print(f"PlanWorkspace: Using discrete actions with {self.action_dim} possible values")
+        # For hierarchical planning, we use fine frameskip for action dimensions
+        self.action_dim = self.dset.action_dim * self.fine_frameskip
+        self.debug_dset_init = cfg_dict["debug_dset_init"]
 
         objective_fn = hydra.utils.call(
             cfg_dict["objective"],
@@ -128,18 +86,31 @@ class PlanWorkspace:
         else:
             self.prepare_targets()
 
-        self.evaluator = PlanEvaluator(
+        # Create evaluators for both coarse and fine planning
+        self.coarse_evaluator = PlanEvaluator(
             obs_0=self.obs_0,
             obs_g=self.obs_g,
             state_0=self.state_0,
             state_g=self.state_g,
             env=self.env,
             wm=self.wm,
-            frameskip=self.frameskip,
+            frameskip=self.coarse_frameskip,
             seed=self.eval_seed,
             preprocessor=self.data_preprocessor,
             n_plot_samples=self.cfg_dict["n_plot_samples"],
-            is_discrete=self.is_discrete,
+        )
+
+        self.fine_evaluator = PlanEvaluator(
+            obs_0=self.obs_0,
+            obs_g=self.obs_g,
+            state_0=self.state_0,
+            state_g=self.state_g,
+            env=self.env,
+            wm=self.wm,
+            frameskip=self.fine_frameskip,
+            seed=self.eval_seed,
+            preprocessor=self.data_preprocessor,
+            n_plot_samples=self.cfg_dict["n_plot_samples"],
         )
 
         if self.wandb_run is None or isinstance(
@@ -150,26 +121,30 @@ class PlanWorkspace:
         self.log_filename = "logs.json"  # planner and final eval logs are dumped here
         self.planner = hydra.utils.instantiate(
             self.cfg_dict["planner"],
-            wm=self.wm, 
+            wm=self.wm,
             env=self.env,  # only for mpc
             action_dim=self.action_dim,
             objective_fn=objective_fn,
             preprocessor=self.data_preprocessor,
-            evaluator=self.evaluator,
+            evaluator=self.fine_evaluator,  # Use fine evaluator for hierarchical planner
             wandb_run=self.wandb_run,
             log_filename=self.log_filename,
-            is_discrete=self.is_discrete,
+            # Pass frameskips to hierarchical planner
+            coarse_frameskip=self.coarse_frameskip,
+            fine_frameskip=self.fine_frameskip,
         )
 
-        # optional: assume planning horizon equals to goal horizon
-        from planning.mpc import MPCPlanner
-        if isinstance(self.planner, MPCPlanner):
-            self.planner.sub_planner.horizon = cfg_dict["goal_H"]
-            # self.planner.n_taken_actions = cfg_dict["goal_H"]
-            self.planner.n_taken_actions = cfg_dict['planner']['n_taken_actions']
+        # Set horizons for hierarchical planner
+        # goal_H represents total task length in fine time units
+        fine_horizon = cfg_dict["goal_H"]
+        coarse_horizon = int(fine_horizon * self.fine_frameskip / self.coarse_frameskip)
 
-        else:
-            self.planner.horizon = cfg_dict["goal_H"]
+        self.planner.coarse_planner.horizon = coarse_horizon
+        self.planner.fine_planner.horizon = fine_horizon
+
+        print(f"Hierarchical horizons: coarse={coarse_horizon} (frameskip={self.coarse_frameskip}), "
+              f"fine={fine_horizon} (frameskip={self.fine_frameskip})")
+        print(f"action dim: {self.action_dim}")
 
         self.dump_targets()
 
@@ -189,7 +164,6 @@ class PlanWorkspace:
             rand_init_state, rand_goal_state = self.env.sample_random_init_goal_states(
                 self.eval_seed
             )
-
             if self.env_name == "deformable_env": # take rand init state from dset for deformable envs
                 rand_init_state = np.array([x[0] for x in states])
 
@@ -206,51 +180,11 @@ class PlanWorkspace:
             self.state_0 = rand_init_state  # (b, d)
             self.state_g = rand_goal_state
             self.gt_actions = None
-
-        elif self.goal_source in ["manual_easy", "manual_medium", "manual_hard"]:
-            # set start and goal states manually to farthest points
-            TOP_LEFT_STATE = np.array([0.80, 0.80])
-            TOP_RIGHT_STATE = np.array([2.80, 0.80])
-            BOTTOM_LEFT_STATE = np.array([0.80, 2.75])
-            BOTTOM_RIGHT_STATE = np.array([2.80, 2.75])
-
-            if self.goal_source == "manual_easy":
-                start_state = TOP_LEFT_STATE
-                goal_state = BOTTOM_LEFT_STATE
-            elif self.goal_source == "manual_medium":
-                start_state = TOP_LEFT_STATE
-                goal_state = BOTTOM_RIGHT_STATE
-            elif self.goal_source == "manual_hard":
-                start_state = TOP_LEFT_STATE
-                goal_state = TOP_RIGHT_STATE
-            
-            # add noise to start and goal states for each of n_evals
-            start_states = []
-            goal_states = []
-            for i in range(self.n_evals):
-                start_states.append(np.concatenate([start_state + np.random.normal(0, 0.01, [2]), np.random.uniform(-5.2262554, 5.2262554, [2])]))
-                goal_states.append(np.concatenate([goal_state + np.random.normal(0, 0.01, [2]), np.random.uniform(-5.2262554, 5.2262554, [2])]))
-            
-            start_states = np.stack(start_states)
-            goal_states = np.stack(goal_states)
-
-            obs_0, state_0 = self.env.prepare(self.eval_seed, start_states)
-            obs_g, state_g = self.env.prepare(self.eval_seed, goal_states)
-
-            for k in obs_0.keys():
-                obs_0[k] = np.expand_dims(obs_0[k], axis=1)
-                obs_g[k] = np.expand_dims(obs_g[k], axis=1)
-
-            self.obs_0 = obs_0
-            self.obs_g = obs_g
-            self.state_0 = start_states
-            self.state_g = goal_states
-            self.gt_actions = None
-
         else:
             # update env config from val trajs
+            # Use fine frameskip for trajectory sampling
             observations, states, actions, env_info = (
-                self.sample_traj_segment_from_dset(traj_len=self.frameskip * self.goal_H + 1)
+                self.sample_traj_segment_from_dset(traj_len=self.fine_frameskip * self.goal_H + 1)
             )
             self.env.update_env(env_info)
 
@@ -260,7 +194,7 @@ class PlanWorkspace:
             actions = torch.stack(actions)
             if self.goal_source == "random_action":
                 actions = torch.randn_like(actions)
-            wm_actions = rearrange(actions, "b (t f) d -> b t (f d)", f=self.frameskip)
+            wm_actions = rearrange(actions, "b (t f) d -> b t (f d)", f=self.fine_frameskip)
             exec_actions = self.data_preprocessor.denormalize_actions(actions)
             # replay actions in env to get gt obses
             rollout_obses, rollout_states = self.env.rollout(
@@ -307,7 +241,7 @@ class PlanWorkspace:
                 for key, arr in obs.items()
             }
             state = state[offset : offset + traj_len]
-            act = act[offset : offset + self.frameskip * self.goal_H]
+            act = act[offset : offset + self.fine_frameskip * self.goal_H]
             actions.append(act)
             states.append(state)
             observations.append(obs)
@@ -355,7 +289,7 @@ class PlanWorkspace:
 
         torch.cuda.empty_cache()
 
-        logs, successes, _, _ = self.evaluator.eval_actions(
+        logs, successes, _, _ = self.fine_evaluator.eval_actions(
             actions.detach(), action_len, save_video=True, filename="output_final"
         )
 
@@ -391,11 +325,11 @@ def load_ckpt_state_dict(snapshot_path, device):
     """Load checkpoint with state dicts and return both state dicts and training config."""
     with snapshot_path.open("rb") as f:
         payload = torch.load(f, map_location=device, weights_only=False)
-    
+
     loaded_keys = []
     state_dicts = {}
     train_cfg = None
-    
+
     for k, v in payload.items():
         if k in ALL_MODEL_KEYS:
             loaded_keys.append(k)
@@ -404,7 +338,7 @@ def load_ckpt_state_dict(snapshot_path, device):
             train_cfg = v
         elif k == "epoch":
             pass  # epoch is handled separately
-    
+
     result = {
         "state_dicts": state_dicts,
         "train_cfg": train_cfg,
@@ -470,7 +404,7 @@ def load_model_state_dict(model_ckpt, train_cfg, num_action_repeat, device):
             state_dicts = ckpt_data["state_dicts"]
             epoch = ckpt_data["epoch"]
             print(f"Loading from state dict checkpoint epoch {epoch}: {model_ckpt}")
-            
+
             # Use training config from checkpoint if available, otherwise use provided config
             if ckpt_data["train_cfg"] is not None:
                 train_cfg = ckpt_data["train_cfg"]
@@ -485,7 +419,7 @@ def load_model_state_dict(model_ckpt, train_cfg, num_action_repeat, device):
 
     # Instantiate models using hydra config
     models = {}
-    
+
     if "encoder" in state_dicts:
         models["encoder"] = hydra.utils.instantiate(train_cfg.encoder)
         models["encoder"].load_state_dict(state_dicts["encoder"])
@@ -493,7 +427,7 @@ def load_model_state_dict(model_ckpt, train_cfg, num_action_repeat, device):
     else:
         models["encoder"] = hydra.utils.instantiate(train_cfg.encoder)
         print(f"Loaded untrained encoder from config")
-    
+
     if "predictor" in state_dicts:
         models["predictor"] = hydra.utils.instantiate(train_cfg.predictor)
         models["predictor"].load_state_dict(state_dicts["predictor"])
@@ -503,7 +437,7 @@ def load_model_state_dict(model_ckpt, train_cfg, num_action_repeat, device):
             raise ValueError("Predictor config not found in training config")
         models["predictor"] = hydra.utils.instantiate(train_cfg.predictor)
         print(f"Loaded untrained predictor from config")
-    
+
     if "proprio_encoder" in state_dicts:
         models["proprio_encoder"] = hydra.utils.instantiate(train_cfg.proprio_encoder)
         models["proprio_encoder"].load_state_dict(state_dicts["proprio_encoder"])
@@ -511,7 +445,7 @@ def load_model_state_dict(model_ckpt, train_cfg, num_action_repeat, device):
     else:
         print(f"Loaded untrained proprio encoder from config")
         models["proprio_encoder"] = hydra.utils.instantiate(train_cfg.proprio_encoder)
-    
+
     if "action_encoder" in state_dicts:
         models["action_encoder"] = hydra.utils.instantiate(train_cfg.action_encoder, frameskip=train_cfg.frameskip)
         models["action_encoder"].load_state_dict(state_dicts["action_encoder"])
@@ -519,7 +453,7 @@ def load_model_state_dict(model_ckpt, train_cfg, num_action_repeat, device):
     else:
         print(f"Loaded untrained action encoder from config")
         models["action_encoder"] = hydra.utils.instantiate(train_cfg.action_encoder, frameskip=train_cfg.frameskip)
-    
+
     # Handle decoder
     if train_cfg.has_decoder:
         if "decoder" in state_dicts:
@@ -579,12 +513,12 @@ class DummyWandbRun:
         pass
 
 
-def planning_main(cfg_dict):
+def hierarchical_planning_main(cfg_dict):
     output_dir = cfg_dict["saved_folder"]
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if cfg_dict["wandb_logging"]:
         wandb_run = wandb.init(
-            project=f"plan_{cfg_dict['planner']['name']}", config=cfg_dict
+            project=f"plan_hierarchical_{cfg_dict['planner']['name']}", config=cfg_dict
         )
         wandb.run.name = "{}".format(output_dir.split("plan_outputs/")[-1]) + f"_{os.environ['SLURM_JOB_ID']}"
     else:
@@ -600,8 +534,7 @@ def planning_main(cfg_dict):
         model_cfg.env.dataset,
         num_hist=model_cfg.num_hist,
         num_pred=model_cfg.num_pred,
-        # frameskip=model_cfg.frameskip,
-        frameskip=cfg_dict["test_frameskip"],
+        frameskip=cfg_dict["fine_frameskip"],  # Use fine frameskip for dataset loading
     )
     dset = dset["valid"]
 
@@ -632,34 +565,35 @@ def planning_main(cfg_dict):
             ]
         )
 
-    print("Build workspace")
-    print(f"Using frameskip: {cfg_dict['test_frameskip']}")
+    print("Build hierarchical workspace")
+    print(f"Using coarse_frameskip: {cfg_dict['coarse_frameskip']}")
+    print(f"Using fine_frameskip: {cfg_dict['fine_frameskip']}")
 
-    plan_workspace = PlanWorkspace(
+    plan_workspace = HierarchicalPlanWorkspace(
         cfg_dict=cfg_dict,
         wm=model,
         dset=dset,
         env=env,
         env_name=model_cfg.env.name,
-        frameskip=cfg_dict["test_frameskip"],
-        # frameskip=model_cfg.frameskip,
+        coarse_frameskip=cfg_dict["coarse_frameskip"],
+        fine_frameskip=cfg_dict["fine_frameskip"],
         wandb_run=wandb_run,
     )
 
-    print("Perform planning")
+    print("Perform hierarchical planning")
     logs = plan_workspace.perform_planning()
     return logs
 
 
-@hydra.main(config_path="conf", config_name="plan")
+@hydra.main(config_path="conf", config_name="plan_hierarchical")
 def main(cfg: OmegaConf):
     with open_dict(cfg):
         cfg["saved_folder"] = os.getcwd()
-        log.info(f"Planning result saved dir: {cfg['saved_folder']}")
+        log.info(f"Hierarchical planning result saved dir: {cfg['saved_folder']}")
     cfg_dict = cfg_to_dict(cfg)
     print(cfg_dict)
     cfg_dict["wandb_logging"] = True
-    planning_main(cfg_dict)
+    hierarchical_planning_main(cfg_dict)
 
 
 if __name__ == "__main__":

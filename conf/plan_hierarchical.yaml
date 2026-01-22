@@ -1,0 +1,35 @@
+defaults:
+  - _self_
+  - planner: hierarchical_cem_cem
+
+base_path: /projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/
+
+hydra:
+  run:
+    dir: ${base_path}/plan_outputs/${now:%Y%m%d%H%M%S}_${replace_slash:${model_name}}_hierarchical_gH${goal_H}_c${coarse_frameskip}_f${fine_frameskip}
+  sweep:
+    dir: ${base_path}/plan_outputs/${now:%Y%m%d%H%M%S}_${replace_slash:${model_name}}_hierarchical_gH${goal_H}_c${coarse_frameskip}_f${fine_frameskip}
+    subdir: ${hydra.job.num}
+
+# model to load for planning
+ckpt_base_path: /lustre/smuexa01/client/users/ejlaird/dino_wm/checkpoints
+model_name: null
+model_epoch: latest
+
+seed: 99
+n_evals: 10
+goal_source: 'random_state' # 'random_state' or 'dset' or 'random_action'
+goal_H: 10 # fine horizon: total task length in fine time units
+n_plot_samples: 10
+
+# Hierarchical planning parameters
+coarse_frameskip: 5
+fine_frameskip: 1
+
+debug_dset_init: False
+
+objective:
+  _target_: planning.objectives.create_objective_fn
+  alpha: 0
+  base: 2 # coeff base for weighting all frames. Only applies when mode == 'all'
+  mode: last

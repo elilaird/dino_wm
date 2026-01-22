@@ -1,0 +1,27 @@
+_target_: planning.hierarchical.HierarchicalPlanner
+coarse_planner:
+  target: planning.gd.GDPlanner
+  horizon: 25  # Will be overridden by script based on goal_H
+  action_noise: 0.05
+  sample_type: "randn"
+  lr: 0.005
+  opt_steps: 30
+  eval_every: 5
+  optimizer_type: "adam"
+  max_grad_norm: 2.0
+fine_planner:
+  target: planning.gd.GDPlanner
+  horizon: 8  # Will be overridden by script based on goal_H
+  action_noise: 0.01
+  sample_type: "randn"
+  lr: 0.02
+  opt_steps: 40
+  eval_every: 5
+  optimizer_type: "adam"
+  max_grad_norm: 1.0
+coarse_frameskip: 10
+fine_frameskip: 2
+tracking_weight: 0.5
+upsample_method: "linear"
+
+name: hierarchical_gd_gd
