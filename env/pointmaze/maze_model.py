@@ -227,12 +227,10 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle):
                  reset_target=True,
                  return_value='state', # 'obs' or 'state'
                  with_target= False,
-                 frameskip=5,
                  **kwargs):
         # offline_env.OfflineEnv.__init__(self, **kwargs)
         self.with_target = with_target
         self.reset_target = reset_target
-        self.frameskip = frameskip
         self.str_maze_spec = maze_spec
         self.maze_arr = parse_maze(maze_spec)
         self.reward_type = reward_type
@@ -255,7 +253,7 @@ class MazeEnv(mujoco_env.MujocoEnv, utils.EzPickle):
             mujoco_env.MujocoEnv.__init__(
                 self, 
                 model_path=f.name, 
-                frame_skip=self.frameskip, 
+                frame_skip=5, 
                 observation_space=self.observation_space,
                 width=224,
                 height=224,
