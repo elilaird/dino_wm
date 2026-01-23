@@ -326,22 +326,22 @@ class Trainer:
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
         self._keys_to_save += ["aux_predictor", "aux_predictor_optimizer"] if self.cfg.train_aux_predictor else []
 
-        if self.cfg.dynamics_eval:
-            from env.pointmaze.point_maze_wrapper import PointMazeWrapper
-            from env.pointmaze.maze_model import U_MAZE
-            from datasets.img_transforms import default_transform
+        # if self.cfg.dynamics_eval:
+        from env.pointmaze.point_maze_wrapper import PointMazeWrapper
+        from env.pointmaze.maze_model import U_MAZE
+        from datasets.img_transforms import default_transform
 
-            self.dynamics_preprocessor = Preprocessor(
-                action_mean=self.datasets["train"].action_mean,
-                action_std=self.datasets["train"].action_std,
-                state_mean=self.datasets["train"].state_mean,
-                state_std=self.datasets["train"].state_std,
-                proprio_mean=self.datasets["train"].proprio_mean,
-                proprio_std=self.datasets["train"].proprio_std,
-                transform=default_transform()
-            )
+        self.dynamics_preprocessor = Preprocessor(
+            action_mean=self.datasets["train"].action_mean,
+            action_std=self.datasets["train"].action_std,
+            state_mean=self.datasets["train"].state_mean,
+            state_std=self.datasets["train"].state_std,
+            proprio_mean=self.datasets["train"].proprio_mean,
+            proprio_std=self.datasets["train"].proprio_std,
+            transform=default_transform()
+        )
 
-            self.env = PointMazeWrapper(maze_spec=U_MAZE)
+        self.env = PointMazeWrapper(maze_spec=U_MAZE)
 
         self.init_models()
         self.init_optimizers()
@@ -1154,12 +1154,12 @@ class Trainer:
                     }
                     self.logs_update(val_variable_frameskip_rollout_logs)
 
-                if self.cfg.dynamics_eval:
-                    val_dynamics_logs = self.dynamics_eval()
-                    val_dynamics_logs = {
-                        f"val_{k}": [v] for k, v in val_dynamics_logs.items()
-                    }
-                    self.logs_update(val_dynamics_logs)
+
+                val_dynamics_logs = self.dynamics_eval()
+                val_dynamics_logs = {
+                    f"val_{k}": [v] for k, v in val_dynamics_logs.items()
+                }
+                self.logs_update(val_dynamics_logs)
 
                 if self.epoch % self.cfg.eval_every_x_epoch == 0:
                     # long horizon treatments
@@ -1376,12 +1376,11 @@ class Trainer:
                 }
                 self.logs_update(test_rollout_logs)
 
-                if self.cfg.dynamics_eval:
-                    test_dynamics_logs = self.dynamics_eval()
-                    test_dynamics_logs = {
-                        f"test_{k}": [v] for k, v in test_dynamics_logs.items()
-                    }
-                    self.logs_update(test_dynamics_logs)
+                test_dynamics_logs = self.dynamics_eval()
+                test_dynamics_logs = {
+                    f"test_{k}": [v] for k, v in test_dynamics_logs.items()
+                }
+                self.logs_update(test_dynamics_logs)
 
                 # variable frameskip openloop rollout
                 if self.cfg.variable_frameskip_test:

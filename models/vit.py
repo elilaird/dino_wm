@@ -5045,6 +5045,7 @@ class DynamicsPredictor(nn.Module):
             # nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.utils.spectral_norm(nn.Linear(hidden_dim, hidden_dim)),
+            # nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.utils.spectral_norm(nn.Linear(hidden_dim, dim)) # Outputs Acceleration
         )
@@ -5319,7 +5320,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             sol = self.integration_func(
                 self.dynamics_func,
                 augmented_state,
-                torch.tensor([0.0, 1.0 / curr_frameskip], device=x.device), # since looping through frameskip, always integrating for 1 step
+                torch.tensor([0.0, 1.0 / self.base_frameskip], device=x.device), # since looping through frameskip, always integrating for 1 step
                 method=self.integration_method,
                 # options={"step_size": rel_dt_step / self.integration_steps}
             )[-1] # (b, t, num_patches, 2 * dim + action_dim)
