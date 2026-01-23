@@ -611,8 +611,11 @@ def planning_main(cfg_dict):
     )
     model = load_model_state_dict(model_ckpt, model_cfg, num_action_repeat, device=device)
 
+    print(f"Setting environment frameskip to {cfg_dict['test_frameskip']}")
+    model_cfg.env.kwargs["frameskip"] = cfg_dict["test_frameskip"]
+
     # use dummy vector env for wall and deformable envs
-    if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
+    if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env" or model_cfg.env.name == "point_maze":
         from env.serial_vector_env import SerialVectorEnv
         env = SerialVectorEnv(
             [
@@ -631,6 +634,13 @@ def planning_main(cfg_dict):
                 for _ in range(cfg_dict["n_evals"])
             ]
         )
+    
+    # print(f"Environment frameskip: {env.workers[0]._env_fn().frameskip}")
+    # print(f"reward type: {env.workers[0]._env_fn().reward_type}")
+    # print(f"worker: {env.workers[0]}")
+    print(f"Internal frameskip: {env.envs[0].unwrapped.frameskip}")
+
+
 
     print("Build workspace")
     print(f"Using frameskip: {cfg_dict['test_frameskip']}")
