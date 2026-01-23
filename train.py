@@ -1376,6 +1376,13 @@ class Trainer:
                 }
                 self.logs_update(test_rollout_logs)
 
+                if self.cfg.dynamics_eval:
+                    test_dynamics_logs = self.dynamics_eval()
+                    test_dynamics_logs = {
+                        f"test_{k}": [v] for k, v in test_dynamics_logs.items()
+                    }
+                    self.logs_update(test_dynamics_logs)
+
                 # variable frameskip openloop rollout
                 if self.cfg.variable_frameskip_test:
                     test_variable_frameskip_rollout_logs = self.variable_frameskip_openloop_rollout(
