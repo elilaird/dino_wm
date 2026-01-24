@@ -21,4 +21,4 @@ dynamics_type: "mlp"
 dynamics_layers: 2
 mask_type: "block_causal"
 bound_velocity: False
-action_conditioning: False
+action_conditioning: True

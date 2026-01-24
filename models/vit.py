@@ -5279,7 +5279,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         x = self.transformer(x)
         return x
     
-    def get_initial_state(self, x):
+    def get_initial_state(self, x, time_scale=1.0):
         """
         x: (b, t, num_patches, dim)
         """
@@ -5293,6 +5293,8 @@ class SecondOrderViTPredictor(ViTPredictor):
         # bound velocity
         if self.bound_velocity:
             v0 = torch.tanh(v0)
+
+        v0 = v0 / time_scale
 
         # z0 = z0 * self.pos_scale
         # v0 = v0 * self.vel_scale
@@ -5310,7 +5312,7 @@ class SecondOrderViTPredictor(ViTPredictor):
             x = self.action_conditioning_forward(x, actions)
 
         # get initial state
-        state = self.get_initial_state(x) # (b, t, num_patches, dim)
+        state = self.get_initial_state(x, time_scale=curr_frameskip / self.base_frameskip) # (b, t, num_patches, dim)
         actions = self.action_proj(actions) # (b, t, frameskip, action_dim)
 
         for i in range(curr_frameskip):            
