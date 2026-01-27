@@ -261,7 +261,7 @@ class SecondOrderModel(nn.Module):
 
         # velocity magnitude regularization loss
         if self.velocity_loss_lambda > 0.0:
-            v_tgt = (z_tgt - z_src) / self.get_dt()
+            v_tgt = (z_tgt - z_src) / (act.shape[2] / self.get_dt())
             v_loss = self.velocity_loss_lambda * self.emb_criterion(v_pred, v_tgt.detach())
             loss = loss + v_loss
             loss_components["velocity_loss"] = v_loss

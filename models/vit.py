@@ -5225,8 +5225,7 @@ class SecondOrderViTPredictor(ViTPredictor):
         # projectors
         self.phase_head = nn.utils.spectral_norm(nn.Linear(dim, dim*2))
         self.action_proj = nn.Linear(action_dim, action_dim)
-        self.x_manifold_proj = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
-        self.v_manifold_proj = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
+     
 
         # dynamics func
         if dynamics_type == "mlp":
@@ -5330,14 +5329,11 @@ class SecondOrderViTPredictor(ViTPredictor):
             )[-1] # (b, t, num_patches, 2 * dim + action_dim)
 
             state = sol[..., :self.dim*2] # remove action from state
-            state = torch.cat([self.x_manifold_proj(state[..., :self.dim]), self.v_manifold_proj(state[..., self.dim:])], dim=-1)
             
             if self.bound_velocity:
                 state = torch.cat([state[..., :self.dim], torch.tanh(state[..., self.dim:])], dim=-1)
         
         z, v = state.chunk(2, dim=-1)
-        z = self.x_manifold_proj(z)
-        v = self.v_manifold_proj(v)
 
         if self.action_conditioning:
             v = v[..., :-(self.action_dim // 2)]
@@ -5349,4 +5345,4 @@ class SecondOrderViTPredictor(ViTPredictor):
         self.dt = new_dt
 
     def get_dt(self):
-        return self.dt
+        return self.base_frameskip
