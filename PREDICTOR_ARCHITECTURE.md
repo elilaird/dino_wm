@@ -6,7 +6,7 @@ This document provides detailed technical documentation for the predictor models
 
 The predictor is the core component of DINO-WM that learns to forecast future visual embeddings given a history of observations, actions, and proprioceptive states. All predictors share a common interface but differ in their internal mechanisms for handling temporal dependencies and memory.
 
-**Location**: `models/vit.py`, `models/memory.py`
+**Location**: `models/vit.py`, `models/mamba_predictor.py`, `models/memory.py`
 
 ---
 
@@ -394,9 +394,110 @@ Output: (B, T, dim)
 
 ---
 
+## Mamba Predictor (Selective State Space)
+
+### 8. MambaPredictor
+
+Replaces the ViT transformer with stacked Mamba selective state space model blocks. Processes the full flattened token sequence with O(L) complexity instead of O(L²) attention, while achieving implicit causality through left-to-right recurrence.
+
+**Location**: `models/mamba_predictor.py`
+
+**Architecture**:
+```
+Input: (B, num_frames × num_patches, dim)
+  ↓
+Positional Embedding (learned, per-patch)
+  ↓
+Dropout (emb_dropout)
+  ↓
+Mamba Blocks (depth layers):
+  ├─ LayerNorm → Mamba(d_model, d_state, d_conv, expand) → Dropout → Residual
+  └─ FeedForward (pre-norm, from vit.py) → Residual
+  ↓
+LayerNorm
+  ↓
+Output: (B, num_frames × num_patches, dim)
+```
+
+**Key Features**:
+- **Implicit causality**: Mamba's selective scan processes tokens left-to-right. Since frames are concatenated in temporal order, patches in frame `t` naturally depend only on frames `0..t`. No explicit attention masks or `NUM_FRAMES`/`NUM_PATCHES` globals are needed.
+- **O(L) complexity**: Linear in sequence length via the parallel scan algorithm, compared to O(L²) for attention. For a typical sequence of 5 frames × 198 patches = 990 tokens, this is a significant reduction.
+- **Parallel scan**: The `mamba_ssm.Mamba` layer uses a fused CUDA kernel (`selective_scan_cuda`) that computes the full recurrence in parallel, with O(L) work and O(log L) depth.
+- **Input-dependent dynamics**: Unlike fixed SSMs (e.g., `SSMCell` in `vit.py`), Mamba's state transitions are input-dependent (selective), allowing the model to learn which information to propagate or forget.
+- **Stateless between calls**: Uses parallel scan with no persistent hidden state. Each forward pass is independent, matching `ViTPredictor` behavior. `reset_memory()` is a no-op.
+
+**Mamba Block Internals** (from `mamba_ssm`):
+```
+Input x: (B, L, dim)
+  ↓
+Linear projection → (B, L, expand × dim)
+  ↓
+Split into two branches:
+  Branch 1: Conv1d(d_conv) → SiLU → Selective SSM → output
+  Branch 2: SiLU → gate
+  ↓
+Gated output: branch1 ⊙ branch2
+  ↓
+Linear projection → (B, L, dim)
+```
+
+The selective SSM computes:
+```
+B_t = Linear(x_t)           # input-dependent input matrix
+C_t = Linear(x_t)           # input-dependent output matrix
+Δ_t = softplus(Linear(x_t)) # input-dependent step size
+
+h_t = Ā_t ⊙ h_{t-1} + B̄_t ⊙ B_t × x_t
+y_t = C_t × h_t
+```
+where `Ā_t = exp(-Δ_t × A)` and A is a learnable diagonal matrix.
+
+**Parameters**:
+- `num_patches`: Number of patches per frame
+- `num_frames`: Number of frames in input sequence
+- `dim`: Embedding dimension (e.g., 384)
+- `depth`: Number of Mamba + FFN layers (default: 6)
+- `d_state`: SSM state dimension per channel (default: 16)
+- `d_conv`: Local convolution width before selective scan (default: 4)
+- `expand`: Inner dimension multiplier (default: 2, so inner_dim = 2 × dim)
+- `dropout`, `emb_dropout`: Dropout rates
+
+**Parameter Count** (dim=384, depth=6, expand=2): ~12M parameters, comparable to the ViT config (~10M).
+
+**Configuration** (`conf/predictor/mamba.yaml`):
+```yaml
+_target_: models.mamba_predictor.MambaPredictor
+depth: 6
+d_state: 16
+d_conv: 4
+expand: 2
+dropout: 0.1
+emb_dropout: 0.0
+```
+
+**Usage**:
+```bash
+python train.py predictor=mamba env=point_maze frameskip=5 num_hist=3
+```
+
+**Dependencies**: Requires `mamba-ssm>=2.0.0` and `causal-conv1d>=1.2.0` (CUDA required).
+
+**Design Comparison with Existing SSMs**:
+
+| Aspect | SSMCell (vit.py) | StateSpaceViTPredictor | MambaPredictor |
+|--------|-----------------|----------------------|----------------|
+| State transitions | Fixed (learned τ) | Fixed (learned τ) | Input-dependent (selective) |
+| Computation | Sequential frame loop | Sequential frame loop | Parallel scan (fused CUDA) |
+| Persistent state | Yes (`H_buffer`) | Yes (`H_buffer`) | No (stateless) |
+| Attention | Yes (after SSM) | Yes (after SSM) | No (pure SSM + FFN) |
+| Causality | Via attention mask | Via attention mask | Implicit in recurrence |
+| Complexity | O(L²) (attention) | O(L²) (attention) | O(L) |
+
+---
+
 ## State Space Models (Experimental)
 
-### 8. StateSpaceViTPredictor
+### 9. StateSpaceViTPredictor
 
 Integrates a linear state-space model (SSM) for maintaining a compressed hidden state across frames.
 
@@ -531,12 +632,13 @@ pred_visual = output[:, :num_frames*num_patches, :]
 ```
 
 ### Global Variables
-`NUM_FRAMES` and `NUM_PATCHES` are set globally at predictor initialization to configure mask generation:
+`NUM_FRAMES` and `NUM_PATCHES` are set globally at predictor initialization to configure attention mask generation:
 ```python
 global NUM_FRAMES, NUM_PATCHES
 NUM_FRAMES = num_frames
 NUM_PATCHES = num_patches
 ```
+Note: `MambaPredictor` does not use these globals — causality is implicit in its recurrence.
 
 ---
 
@@ -644,20 +746,22 @@ for t in range(horizon):
 
 ## Comparison Table
 
-| Model | Memory Type | Shared Memory | Prepended Tokens | Additive Injection | Complexity |
-|-------|-------------|---------------|------------------|-------------------|------------|
-| ViTPredictor | None | - | No | No | Low |
-| ViTPredictorWithPersistentTokens | Persistent | - | Yes (P) | No | Low |
-| AdditiveControlViTPredictor | None | - | No | Yes (actions) | Low |
-| MAGViTPredictor | Neural | Yes | No | Via gating | Medium |
-| MACViTPredictor | Neural | Yes | Yes (P + M) | No | High |
-| LayerMACViTPredictor | Neural | No (per-layer) | Yes (P + M) | No | Highest |
-| LookupViTPredictor | Lookup | Yes | Yes (M) | No | Medium |
-| StateSpaceViTPredictor | Linear SSM | Yes | Varies by mode | Optional | Medium |
+| Model | Memory Type | Shared Memory | Prepended Tokens | Additive Injection | Seq. Complexity |
+|-------|-------------|---------------|------------------|-------------------|-----------------|
+| ViTPredictor | None | - | No | No | O(L²) |
+| ViTPredictorWithPersistentTokens | Persistent | - | Yes (P) | No | O(L²) |
+| AdditiveControlViTPredictor | None | - | No | Yes (actions) | O(L²) |
+| MAGViTPredictor | Neural | Yes | No | Via gating | O(L²) |
+| MACViTPredictor | Neural | Yes | Yes (P + M) | No | O(L²) |
+| LayerMACViTPredictor | Neural | No (per-layer) | Yes (P + M) | No | O(L²) |
+| LookupViTPredictor | Lookup | Yes | Yes (M) | No | O(L²) |
+| **MambaPredictor** | **None** | **-** | **No** | **No** | **O(L)** |
+| StateSpaceViTPredictor | Linear SSM | Yes | Varies by mode | Optional | O(L²) |
 
 **Legend**:
 - P: Persistent tokens
 - M: Memory slots/tokens
+- Seq. Complexity: Complexity with respect to sequence length L (attention-based models are O(L²); Mamba is O(L))
 
 ---
 
@@ -666,6 +770,7 @@ for t in range(horizon):
 - **ViT**: Dosovitskiy et al., "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale", ICLR 2021
 - **Persistent Memory**: Applicable to various memory-augmented architectures
 - **Neural Memory**: Inspired by online learning and Hebbian-like updates
+- **Mamba**: Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces", 2023
 - **State Space Models**: Gu et al., "Efficiently Modeling Long Sequences with Structured State Spaces", ICLR 2022
 
 ---
