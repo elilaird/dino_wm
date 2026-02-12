@@ -1,0 +1,13 @@
+_target_: models.vit.mLSTMViTPredictor
+depth: 4
+heads: 16
+mlp_dim: 2048
+dropout: 0.1
+emb_dropout: 0.0
+state_dim: 8          # num_heads for mLSTM (head_dim = 256/8 = 32)
+injection_type: "mlstm"
+use_cls_token: ${use_cls_token}
+step_size: ${step_size}
+n_mem_blocks: ${n_mem_blocks}
+shift_memory: False
+mem_layer_type: "all"

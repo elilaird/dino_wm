@@ -536,3 +536,276 @@ class BasicHiddenMambaLayer(nn.Module):
 
     def set_step_size(self, step_size):
         self.step_size = step_size
+
+
+# ============================================================================
+# mLSTM Components
+# ============================================================================
+
+
+class CausalConv1d(nn.Module):
+    """1D convolution with left-padding for causality."""
+
+    def __init__(self, channels, kernel_size, groups=1):
+        super().__init__()
+        self.pad = kernel_size - 1
+        self.conv = nn.Conv1d(channels, channels, kernel_size, groups=groups)
+
+    def forward(self, x):
+        # x: [B, C, T]
+        x = F.pad(x, (self.pad, 0))
+        return self.conv(x)
+
+
+class mLSTMCell(nn.Module):
+    """
+    mLSTM cell with matrix memory updated via outer-product covariance rules
+    and exponential gating.
+
+    Memory state per (batch, patch, head):
+      C: [B, P, H, d_head, d_head]  — matrix memory (key-value associations)
+      n: [B, P, H, d_head]          — normalizer
+    """
+
+    def __init__(self, d_model=256, num_heads=8, head_dim=None, conv_kernel_size=4):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = head_dim if head_dim is not None else d_model // num_heads
+        assert self.head_dim * num_heads == d_model, \
+            f"d_model={d_model} not divisible by num_heads={num_heads}"
+
+        # Projections for Q, K, V
+        self.proj_qkv = nn.Linear(d_model, 3 * d_model)
+
+        # Causal depthwise conv on Q and K only
+        self.conv_qk = CausalConv1d(
+            2 * d_model, conv_kernel_size, groups=2 * d_model
+        )
+
+        # Gate projections (per head) — sigmoid-based for stability
+        self.proj_i = nn.Linear(d_model, num_heads)
+        self.proj_f = nn.Linear(d_model, num_heads)
+        # Initialize forget gate bias to +3 so sigmoid starts near 0.95 (high retention)
+        nn.init.constant_(self.proj_f.bias, 3.0)
+
+        # Key scaling factor to keep outer products bounded
+        self.k_scale = self.head_dim ** -0.5
+
+        # Group norm over heads for output stabilization
+        self.group_norm = nn.GroupNorm(num_heads, d_model)
+
+    @torch.no_grad()
+    def init_state(self, B, P, device, dtype=None):
+        """Returns (C_0, n_0) both zeros."""
+        C = torch.zeros(B, P, self.num_heads, self.head_dim, self.head_dim,
+                        device=device, dtype=dtype)
+        n = torch.zeros(B, P, self.num_heads, self.head_dim,
+                        device=device, dtype=dtype)
+        return C, n
+
+    def scan(self, x_win, C_0, n_0):
+        """
+        Parallel scan over T timesteps.
+        x_win: [B, T, P, D]
+        C_0:   [B, P, H, d_head, d_head]
+        n_0:   [B, P, H, d_head]
+        Returns: (h_seq [B, T, P, D], C_T, n_T)
+        """
+        B, T, P, D = x_win.shape
+        H = self.num_heads
+        dh = self.head_dim
+
+        # --- Project Q, K, V for all timesteps ---
+        x_flat = rearrange(x_win, "b t p d -> (b p) t d")
+        qkv = self.proj_qkv(x_flat)  # [(B*P), T, 3D]
+        q_all, k_all, v_all = qkv.chunk(3, dim=-1)  # each [(B*P), T, D]
+
+        # Causal conv on Q and K (conv operates on channel dim over time)
+        qk_cat = torch.cat([q_all, k_all], dim=-1)  # [(B*P), T, 2D]
+        qk_cat = rearrange(qk_cat, "bp t c -> bp c t")
+        qk_cat = self.conv_qk(qk_cat)
+        qk_cat = rearrange(qk_cat, "bp c t -> bp t c")
+        q_all, k_all = qk_cat.chunk(2, dim=-1)
+
+        # Reshape to [B, T, P, H, dh]
+        q_all = rearrange(q_all, "(b p) t (h d) -> b t p h d", b=B, p=P, h=H, d=dh)
+        k_all = rearrange(k_all, "(b p) t (h d) -> b t p h d", b=B, p=P, h=H, d=dh)
+        v_all = rearrange(v_all, "(b p) t (h d) -> b t p h d", b=B, p=P, h=H, d=dh)
+
+        # Scale keys to keep outer products bounded
+        k_all = k_all * self.k_scale
+
+        # --- Compute sigmoid gates for all timesteps ---
+        gate_input = rearrange(x_win, "b t p d -> (b t p) d")
+        i_logits = self.proj_i(gate_input)  # [(B*T*P), H]
+        f_logits = self.proj_f(gate_input)  # [(B*T*P), H]
+        i_logits = rearrange(i_logits, "(b t p) h -> b t p h", b=B, t=T, p=P)
+        f_logits = rearrange(f_logits, "(b t p) h -> b t p h", b=B, t=T, p=P)
+
+        # Sigmoid gates: bounded [0, 1] for numerical stability
+        i_gates = torch.sigmoid(i_logits)  # [B, T, P, H]
+        f_gates = torch.sigmoid(f_logits)  # [B, T, P, H]
+
+        # --- Sequential scan over T ---
+        C_t = C_0  # [B, P, H, dh, dh]
+        n_t = n_0  # [B, P, H, dh]
+        h_list = []
+
+        for t in range(T):
+            q_t = q_all[:, t]   # [B, P, H, dh]
+            k_t = k_all[:, t]   # [B, P, H, dh]
+            v_t = v_all[:, t]   # [B, P, H, dh]
+            i_t = i_gates[:, t]  # [B, P, H]
+            f_t = f_gates[:, t]  # [B, P, H]
+
+            # Expand gates for broadcasting
+            f_t_C = f_t[:, :, :, None, None]  # [B, P, H, 1, 1]
+            i_t_C = i_t[:, :, :, None, None]  # [B, P, H, 1, 1]
+            f_t_n = f_t[:, :, :, None]        # [B, P, H, 1]
+            i_t_n = i_t[:, :, :, None]        # [B, P, H, 1]
+
+            # Outer product: v ⊗ k → [B, P, H, dh, dh]
+            vk_outer = torch.einsum("bphd,bphe->bphde", v_t, k_t)
+
+            # Update memory
+            C_t = f_t_C * C_t + i_t_C * vk_outer
+            n_t = f_t_n * n_t + i_t_n * k_t
+
+            # Retrieve: h_t = C_t @ q_t / max(|n_t^T @ q_t|, 1)
+            h_t = torch.einsum("bphde,bphe->bphd", C_t, q_t)  # [B, P, H, dh]
+            nq = torch.einsum("bphd,bphd->bph", n_t, q_t)     # [B, P, H]
+            nq = torch.clamp(nq.abs(), min=1.0).unsqueeze(-1)  # [B, P, H, 1]
+            h_t = h_t / nq
+
+            h_list.append(h_t)
+
+        # Stack and reshape: [B, T, P, H, dh] → [B, T, P, D]
+        h_seq = torch.stack(h_list, dim=1)
+        h_seq = rearrange(h_seq, "b t p h d -> b t p (h d)")
+
+        return h_seq, C_t, n_t
+
+
+class mLSTMBlock(nn.Module):
+    """
+    Pre-Up-Projection mLSTM block with gated output.
+
+    Architecture:
+      x → LayerNorm → Linear(D, 2D) → split
+        ├── mem_branch → mLSTMCell → GroupNorm
+        └── gate_branch → SiLU
+      → mem_out * gate_out → Linear(D, D) → residual
+    """
+
+    def __init__(self, d_model, num_heads, head_dim=None, conv_kernel_size=4, dropout=0.0):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+
+        self.norm = nn.LayerNorm(d_model)
+        self.up_proj = nn.Linear(d_model, 2 * d_model)
+        self.cell = mLSTMCell(
+            d_model=d_model,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            conv_kernel_size=conv_kernel_size,
+        )
+        self.down_proj = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, C_prev, n_prev):
+        """
+        x: [B, T, P, D]
+        C_prev: [B, P, H, dh, dh]
+        n_prev: [B, P, H, dh]
+        Returns: (y [B, T, P, D], C_new, n_new)
+        """
+        B, T, P, D = x.shape
+        residual = x
+
+        x = self.norm(x)
+        up = self.up_proj(x)  # [B, T, P, 2D]
+        mem_branch, gate_branch = up.chunk(2, dim=-1)  # each [B, T, P, D]
+
+        # Memory branch
+        mem_out, C_new, n_new = self.cell.scan(mem_branch, C_prev, n_prev)
+        # GroupNorm expects [N, C, ...] — reshape to apply per-patch
+        mem_out_flat = rearrange(mem_out, "b t p d -> (b t p) d")
+        mem_out_flat = self.cell.group_norm(mem_out_flat.unsqueeze(-1)).squeeze(-1)
+        mem_out = rearrange(mem_out_flat, "(b t p) d -> b t p d", b=B, t=T, p=P)
+
+        # Gated output
+        gate_out = F.silu(gate_branch)
+        out = mem_out * gate_out
+
+        # Down project + residual
+        out = self.down_proj(out)
+        out = self.dropout(out)
+        y = residual + out
+
+        return y, C_new, n_new
+
+
+class BasicmLSTMLayer(nn.Module):
+    """
+    mLSTM layer matching the BasicMambaLayer interface for drop-in use
+    in StateSpaceTransformer and its subclasses.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        step_size: int,
+        num_patches: int,
+        head_dim: int = None,
+        conv_kernel_size: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.step_size = step_size
+        self.num_patches = num_patches
+
+        self.mlstm_block = mLSTMBlock(
+            d_model=d_model,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            conv_kernel_size=conv_kernel_size,
+            dropout=dropout,
+        )
+
+        self.C_cache = None
+        self.n_cache = None
+
+    def forward(self, x):
+        """
+        x: [B, T, P, D]
+        Returns: (y [B, T, P, D], H_T) where H_T is the last-step output
+        """
+        B = x.size(0)
+        P = x.size(2)
+
+        if self.C_cache is None or self.n_cache is None:
+            C_0, n_0 = self.mlstm_block.cell.init_state(
+                B, P, device=x.device, dtype=x.dtype
+            )
+        else:
+            C_0, n_0 = self.C_cache, self.n_cache
+
+        y, C_T, n_T = self.mlstm_block(x, C_0, n_0)
+
+        # Cache the final state (matching BasicMambaLayer convention)
+        self.C_cache = C_T.detach()
+        self.n_cache = n_T.detach()
+
+        return y, y  # second return matches H_T convention (used for cross-attn)
+
+    def reset_memory(self):
+        self.C_cache = None
+        self.n_cache = None
+
+    def set_step_size(self, step_size):
+        self.step_size = step_size

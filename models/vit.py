@@ -7,6 +7,7 @@ from .model_utils import *
 from .memory_retrieval import (
     BasicHiddenMambaLayer,
     BasicMambaLayer,
+    BasicmLSTMLayer,
     NeuralMemory,
     LookupMemory,
     MambaLayer,
@@ -2427,6 +2428,162 @@ class StateSpaceViTPredictor(nn.Module):
 
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)
+
+### mLSTM MEMORY VIT PREDICTOR ###
+
+
+class mLSTMTransformer(StateSpaceTransformer):
+    """StateSpaceTransformer with mLSTM memory blocks instead of Mamba SSM."""
+
+    def _build_mem_blocks(
+        self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
+    ):
+        self.ln_mem_out = nn.Identity()
+        self.mem_blocks = nn.ModuleList()
+        num_heads = state_dim  # Reinterpret state_dim as num_heads
+        for _ in range(n_mem_blocks):
+            self.mem_blocks.append(
+                BasicmLSTMLayer(
+                    d_model=dim,
+                    num_heads=num_heads,
+                    step_size=self.step_size,
+                    num_patches=self.num_patches if not self.use_cls_token else 1,
+                    dropout=dropout,
+                )
+            )
+
+
+class MemCrossAttentionmLSTMTransformer(mLSTMTransformer):
+    """mLSTM memory with cross-attention injection into transformer layers."""
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.layers = nn.ModuleList()
+        self.injection_layers = nn.ModuleList()
+        for i in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(dim, heads, dim_head, dropout),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(
+                    CrossAttentionInjection(
+                        q_dim=dim,
+                        kv_dim=dim,
+                        heads=heads,
+                        dim_head=dim_head,
+                        dropout=dropout,
+                    )
+                )
+            else:
+                self.injection_layers.append(nn.Identity())
+
+    def forward(self, x, H=None):
+        B, T, D = x.shape
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
+
+        for i, (attn, ff) in enumerate(self.layers):
+            x = x + attn(x)
+            if i in self.mem_layer_idx:
+                idx = self.mem_layer_idx.index(i)
+                x = x + self.injection_layers[idx](x, M_new)
+            x = x + ff(x)
+
+        return self.ln_out(x), self.ln_mem_out(M_new)
+
+
+class mLSTMViTPredictor(nn.Module):
+    """ViT predictor with mLSTM memory, mirroring StateSpaceViTPredictor."""
+
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        state_dim,
+        depth,
+        heads,
+        mlp_dim,
+        injection_type,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        emb_dropout=0.0,
+        dim_head=64,
+        use_cls_token=False,
+        shift_memory=False,
+        mem_layer_type="all",
+        **kwargs,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.num_patches = num_patches
+        self.num_frames = num_frames
+
+        # Update globals for causal attention masks
+        global NUM_FRAMES, NUM_PATCHES
+        NUM_FRAMES = num_frames
+        NUM_PATCHES = num_patches
+
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+
+        if injection_type == "mlstm":
+            self.transformer = mLSTMTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
+            )
+        elif injection_type == "mlstm_ca":
+            self.transformer = MemCrossAttentionmLSTMTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
+            )
+        else:
+            raise ValueError(f"Invalid mLSTM injection type: {injection_type}")
+
+    def forward(self, x):
+        b, n, _ = x.shape
+        x = x + self.pos_embedding[:, :n]
+        x = self.dropout(x)
+        return self.transformer(x)
+
+    def reset_memory(self):
+        self.transformer.reset_memory()
+
+    def set_step_size(self, step_size):
+        self.transformer.set_step_size(step_size)
+
 
 ### CACHE MEMORY VIT PREDICTOR ###
 
