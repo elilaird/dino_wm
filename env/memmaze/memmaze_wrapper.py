@@ -34,13 +34,13 @@ class MemMazeWrapper(GymnasiumWrapper):
         Sample random initial and goal positions in the maze.
         Returns positions that can be used with prepare() method.
         """
-        np.random.seed(seed)
-        
+        rng = np.random.RandomState(seed)
+
         # Reset environment to get current target positions in observation format
         obs, _ = super().reset(seed=seed)
         init_pos = obs['agent_pos']
-        goal_pos = obs['targets_pos'][np.random.randint(len(obs['targets_pos'] ))]
-        
+        goal_pos = obs['targets_pos'][rng.randint(len(obs['targets_pos']))]
+
         return init_pos, goal_pos
         
     def eval_state(self, goal_state, cur_state):
@@ -71,16 +71,16 @@ class MemMazeWrapper(GymnasiumWrapper):
         if self.maze_xy_scale is None or self.maze_width is None or self.maze_height is None or self.center_ji is None:
             self.set_maze_params()
 
-        # super().reset(seed=seed)
+        super().reset(seed=seed)
         world_init_state = self.grid_to_world(init_state)
         self.env._task._walker.shift_pose(
-            self.env.physics, 
-            [world_init_state[0], world_init_state[1], 0.1], 
+            self.env.physics,
+            [world_init_state[0], world_init_state[1], 0.1],
             rotate_velocity=True
         )
         obs, _, _, _, info = self.step(0)# no-op action
         state = info["state"]
-        
+
         return obs, state
 
     def step_multiple(self, actions):
@@ -108,16 +108,17 @@ class MemMazeWrapper(GymnasiumWrapper):
         for k in obses.keys():
             obses[k] = np.vstack([np.expand_dims(obs[k], 0), obses[k]])
         states = np.vstack([np.expand_dims(state, 0), infos["state"]])
-        states = np.stack(states)
         return obses, states
         
     def update_env(self, env_info):
-        # Update environment configuration
+        """Update environment configuration. Memory maze doesn't require updates."""
         pass
 
     def step(self, action):
-        if isinstance(action, np.ndarray) or isinstance(action, torch.Tensor):
+        if isinstance(action, (np.ndarray, torch.Tensor)):
             action = int(action.item())
+        elif isinstance(action, (int, np.integer)):
+            action = int(action)
         obs, reward, terminated, truncated, info = super().step(action)
         info = {}
         info['state'] = obs["agent_pos"]

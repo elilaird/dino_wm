@@ -17,15 +17,14 @@ class SerialVectorEnv:
 
     def _unwrap_env(self, env):
         """Unwrap gymnasium wrappers but preserve custom wrappers"""
-        # Keep unwrapping until we find our custom WallEnvWrapper or reach the base
+        # Keep unwrapping until we find our custom wrapper with required methods
         while hasattr(env, 'env'):
-            # Check if the current env is a gymnasium wrapper (like TimeLimit)
-            if hasattr(env, 'spec') and env.spec is not None:
-                # This is likely a gymnasium wrapper, unwrap it
-                env = env.env
-            else:
-                # This might be our custom wrapper, stop unwrapping
+            # Check if current env has the custom methods we need
+            # If it has these methods, it's our custom wrapper - stop unwrapping
+            if hasattr(env, 'update_env') and hasattr(env, 'prepare') and hasattr(env, 'rollout'):
                 break
+            # Otherwise continue unwrapping
+            env = env.env
         return env
 
     def sample_random_init_goal_states(self, seed):
