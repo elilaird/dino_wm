@@ -2,6 +2,8 @@
 --find-links https://download.pytorch.org/whl/cu121
 torch
 torchvision
+causal-conv1d>=1.2.0
+mamba-ssm>=2.0.0
 accelerate
 einops
 numpy
