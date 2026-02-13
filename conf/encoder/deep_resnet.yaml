@@ -1,0 +1,11 @@
+_target_: models.encoder.deep_resnet.DeepResNetTokens
+in_ch: 3
+stem_ch: 32
+stages: [2, 2, 2, 2]
+channels: [32, 64, 128, 256]
+strides: [2, 2, 2, 2]
+norm: "bn"
+emb_dim: 256
+freeze_backbone: False
+return_map: False
+gn_groups: 32

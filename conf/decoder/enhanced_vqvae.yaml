@@ -1,0 +1,10 @@
+_target_: models.decoder.enhanced_vqvae.EnhancedVQVAE
+in_channel: 3
+channel: 128
+n_res_block: 4
+n_res_channel: 32
+emb_dim: 256
+n_embed: 1024
+decay: 0.99
+quantize: True
+beta: 1.0

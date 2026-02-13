@@ -1,0 +1,102 @@
+defaults:
+  - _self_
+  - env: memory_maze_3x7
+  - encoder: deep_resnet 
+  - action_encoder: discrete
+  - proprio_encoder: memmaze
+  - decoder: enhanced_vqvae
+  - predictor: vit_4layer
+  - model: stochastic
+  - aux_predictor: retention
+
+dry_run: False
+debug: False 
+
+# base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
+ckpt_base_path: /projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/checkpoints # put absolute path here
+ckpt_name: "model_latest.pth"
+
+hydra:
+  run:
+    dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
+training:
+  seed: 0
+  epochs: 20
+  batch_size: 128 # gpu_batch_size (128 for 16 gpus)
+  save_every_x_epoch: 1 
+  reconstruct_every_x_batch: 500
+  num_reconstruct_samples: 6
+  encoder_lr: 1e-3
+  decoder_lr: 1e-3
+  predictor_lr: 3e-4
+  action_encoder_lr: 3e-4
+  aux_predictor_lr: 1e-4
+  decoder_weight_decay: 0.01
+  encoder_weight_decay: 0.01
+  predictor_weight_decay: 0.1
+  action_encoder_weight_decay: 0.01
+  aux_predictor_weight_decay: 0.01
+  max_grad_norm: 1.0
+  use_scheduler: True
+  T_0: 40  # Number of epochs for the first restart
+  T_mult: 2  # A factor increases T_i after a restart
+  eta_min_ratio: 0.1  # minimum LR as ratio of initial LR
+  decay_factor: 0.9  # Factor to decay peak LR at each restart
+  warmup_percent: 0.01 # warmup percentage of total steps
+
+
+train_encoder: True
+train_decoder: True
+train_predictor: True
+train_aux_predictor: False
+per_window_ret_frames: 1
+ret_loss_weight: 0.05
+max_retention_cache_size: 10
+
+use_cls_token: False
+
+n_mem_blocks: 4
+
+decoder_loss_type: smooth_l1
+
+eval_every_x_epoch: 1
+num_eval_samples: 10
+horizon_treatment: 100
+
+eval_long_imagination: True
+query_phase_start_idx: 301
+
+eval_context_recall: True
+context_recall_data_path: ${oc.env:DATASET_DIR}/memory_maze/memory-maze-3x7-teleport-chunked-w-proprio
+teleport_start_idx: 150
+ctx_recall_num_frames: 250
+
+eval_recent_memory_recall: True
+
+full_sequence: False
+img_size: 64 
+frameskip: 1
+concat_dim: 1
+
+# action encoder
+action_emb_dim: 12
+num_action_repeat: 1
+normalize_action: False
+
+# proprio encoder
+proprio_emb_dim: 12 
+num_proprio_repeat: 1
+
+overlap_size: 6
+num_frames: 500
+num_hist: 9
+num_pred: 1 
+step_size: 9 # 10
+has_predictor: True # set this to False for only training a decoder
+has_decoder: True # set this to False for only training a predictor
+
+num_workers: 4

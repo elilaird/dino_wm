@@ -1,0 +1,14 @@
+_target_: models.stochastic_world_model.StochasticVWorldModel
+image_size: ${img_size}
+num_hist: ${num_hist}
+num_pred: ${num_pred}
+train_encoder: ${train_encoder}
+train_predictor: ${train_predictor}
+train_decoder: ${train_decoder}
+decoder_loss_type: ${decoder_loss_type}
+step_size: ${step_size}
+use_cls_token: ${use_cls_token}
+per_window_ret_frames: ${per_window_ret_frames}
+ret_loss_weight: ${ret_loss_weight}
+max_retention_cache_size: ${max_retention_cache_size}
+beta: 1.0
