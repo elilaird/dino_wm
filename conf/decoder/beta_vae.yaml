@@ -1,0 +1,8 @@
+_target_: models.decoder.beta_vae.BetaVAEDecoder
+in_channel: 3
+channel: 128
+n_res_block: 2
+n_res_channel: 32
+emb_dim: 256
+beta: 1.0
+latent_dim: 128

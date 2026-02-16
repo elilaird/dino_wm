@@ -2498,6 +2498,221 @@ class MemCrossAttentionmLSTMTransformer(mLSTMTransformer):
         return self.ln_out(x), self.ln_mem_out(M_new)
 
 
+class MemoryInjectionmLSTMTransformer(mLSTMTransformer):
+    """mLSTM memory with additive projection (MISST) injection into transformer layers."""
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.alphas = nn.ParameterList(
+            [
+                nn.Parameter(torch.ones(1) * kwargs.get("alpha_init", 0.1))
+                for _ in self.mem_layer_idx
+            ]
+        )
+
+        self.layers = nn.ModuleList()
+        self.injection_layers = nn.ModuleList()
+        for i in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(dim, heads, dim_head, dropout),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(nn.Linear(dim, dim))
+            else:
+                self.injection_layers.append(nn.Identity())
+
+    def forward(self, x, H=None):
+        B, T, D = x.shape
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
+
+        for i, (attn, ff) in enumerate(self.layers):
+            x = x + attn(x)
+            if i in self.mem_layer_idx:
+                idx = self.mem_layer_idx.index(i)
+                x = x + self.injection_layers[idx](M_new) * self.alphas[idx]
+            x = x + ff(x)
+
+        return self.ln_out(x), self.ln_mem_out(M_new)
+
+
+class AdaMemmLSTMTransformer(mLSTMTransformer):
+    """mLSTM memory with adaptive layer norm (AdaMem) injection into transformer layers."""
+
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        state_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        dim_head=64,
+        zero_init: bool = False,
+        use_cls_token: bool = False,
+        shift_memory: bool = False,
+        both_injections: bool = False,
+        mem_layer_type: str = "all",
+        **kwargs,
+    ):
+        self.both_injections = both_injections
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            state_dim,
+            step_size,
+            n_mem_blocks,
+            dropout,
+            dim_head,
+            zero_init=zero_init,
+            use_cls_token=use_cls_token,
+            shift_memory=shift_memory,
+            both_injections=both_injections,
+            mem_layer_type=mem_layer_type,
+            **kwargs,
+        )
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.layers = nn.ModuleList()
+        self.injection_layers = nn.ModuleList()
+        for i in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(dim, heads, dim_head, dropout),
+                        FeedForward(dim, mlp_dim, dropout),
+                    ]
+                )
+            )
+            if i in self.mem_layer_idx:
+                self.injection_layers.append(
+                    nn.ModuleList(
+                        [
+                            AdaptiveLayerNorm(
+                                dim, dim, zero_init=kwargs.get("zero_init", False)
+                            ) if self.both_injections else TwoInputIdentity(),
+                            AdaptiveLayerNorm(
+                                dim, dim, zero_init=kwargs.get("zero_init", False)
+                            )
+                        ]
+                    )
+                )
+            else:
+                self.injection_layers.append(nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()]))
+
+    def forward(self, x, H=None):
+        B, T, D = x.shape
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
+
+        for i, (attn, ff) in enumerate(self.layers):
+            injection_1, injection_2 = self.injection_layers[i]
+            x = x + attn(injection_1(x, M_new))
+            x = x + ff(injection_2(x, M_new))
+
+        return self.ln_out(x), self.ln_mem_out(M_new)
+
+
+class LoRAmLSTMTransformer(mLSTMTransformer):
+    """mLSTM memory with LoRA injection into transformer attention layers."""
+
+    def __init__(
+        self,
+        dim,
+        num_patches,
+        depth,
+        heads,
+        mlp_dim,
+        state_dim,
+        step_size,
+        n_mem_blocks,
+        dropout=0.0,
+        dim_head=64,
+        lora_rank: int = 16,
+        lora_alpha: float = 2.0,
+        use_qk: bool = True,
+        use_vo: bool = False,
+        gen_type: str = "A",
+        use_cls_token: bool = False,
+        shift_memory: bool = False,
+        mem_layer_type: str = "all",
+        **kwargs,
+    ):
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.use_qk = use_qk
+        self.use_vo = use_vo
+        self.gen_type = gen_type
+        super().__init__(
+            dim,
+            num_patches,
+            depth,
+            heads,
+            mlp_dim,
+            state_dim,
+            step_size,
+            n_mem_blocks,
+            dropout,
+            dim_head,
+            use_cls_token=use_cls_token,
+            shift_memory=shift_memory,
+            mem_layer_type=mem_layer_type,
+            **kwargs,
+        )
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
+        self.layers = nn.ModuleList()
+        for i in range(depth):
+            block = nn.ModuleList([])
+            if i in self.mem_layer_idx:
+                block.append(
+                    DynamicLoRAAttention(
+                        dim=dim,
+                        heads=heads,
+                        dim_head=dim_head,
+                        r=self.lora_rank,
+                        alpha=self.lora_alpha,
+                        gen_type=self.gen_type,
+                        use_qk=self.use_qk,
+                        use_vo=self.use_vo,
+                        dropout=dropout,
+                        inject_pooled=True
+                    )
+                )
+            else:
+                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout))
+            block.append(FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout))
+            self.layers.append(block)
+
+    def forward(self, x, H=None):
+        B, T, D = x.shape
+        M_new = self._mem_blocks_forward(x)
+        x = self.ln_in(x)
+
+        for i, (attn, ff) in enumerate(self.layers):
+            attn_out = attn(x, M_new) if i in self.mem_layer_idx else attn(x)
+            x = x + attn_out
+            x = x + ff(x)
+
+        return self.ln_out(x), self.ln_mem_out(M_new)
+
+
 class mLSTMViTPredictor(nn.Module):
     """ViT predictor with mLSTM memory, mirroring StateSpaceViTPredictor."""
 
@@ -2517,6 +2732,14 @@ class mLSTMViTPredictor(nn.Module):
         dropout=0.0,
         emb_dropout=0.0,
         dim_head=64,
+        alpha_init: float = 0.1,
+        zero_init: bool = False,
+        both_injections: bool = False,
+        lora_rank: int = 16,
+        lora_alpha: float = 2.0,
+        use_qk: bool = True,
+        use_vo: bool = False,
+        gen_type: str = "A",
         use_cls_token=False,
         shift_memory=False,
         mem_layer_type="all",
@@ -2565,6 +2788,62 @@ class mLSTMViTPredictor(nn.Module):
                 n_mem_blocks=n_mem_blocks,
                 dropout=dropout,
                 dim_head=dim_head,
+                use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
+            )
+        elif injection_type == "mlstm_misst":
+            self.transformer = MemoryInjectionmLSTMTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                alpha_init=alpha_init,
+                use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
+                mem_layer_type=mem_layer_type,
+            )
+        elif injection_type == "mlstm_adamem":
+            self.transformer = AdaMemmLSTMTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                zero_init=zero_init,
+                use_cls_token=use_cls_token,
+                shift_memory=shift_memory,
+                both_injections=both_injections,
+                mem_layer_type=mem_layer_type,
+            )
+        elif injection_type == "mlstm_lora":
+            self.transformer = LoRAmLSTMTransformer(
+                dim=dim,
+                num_patches=num_patches,
+                depth=depth,
+                heads=heads,
+                mlp_dim=mlp_dim,
+                state_dim=state_dim,
+                step_size=step_size,
+                n_mem_blocks=n_mem_blocks,
+                dropout=dropout,
+                dim_head=dim_head,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                use_qk=use_qk,
+                use_vo=use_vo,
+                gen_type=gen_type,
                 use_cls_token=use_cls_token,
                 shift_memory=shift_memory,
                 mem_layer_type=mem_layer_type,

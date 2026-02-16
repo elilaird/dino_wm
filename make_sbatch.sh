@@ -62,7 +62,7 @@ else
     fi
 fi
 
-LOG_FILE="output/${TYPE}/${TYPE}_%j.out"
+LOG_FILE="legacy_output/${TYPE}/${TYPE}_%j.out"
 
 echo "COMMAND: GPU=${GPU} CPUS=${CPUS} MEM=${MEM} BRANCH ${BRANCH} PARTITION=${PARTITION} TIME=${TIME} TYPE=${TYPE} CONDA_ENV=${CONDA_ENV} ./make_sbatch.sh ${COMMAND}"
 
