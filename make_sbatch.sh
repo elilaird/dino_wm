@@ -50,7 +50,7 @@ if [ "${TYPE}" = "jupyter" ]; then
     COMMAND="jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
     BRANCH="local"
 elif [ "${TYPE}" = "habitat" ]; then
-    COMMAND="python -m habitat_sim.utils.datasets_download --username fde8b8c1eb409327 --password bf777aaf24d6340bf647eb08c3b31817 --uids ${PY_ARGS}  --data-path ${DATA_DIR}/habitat"
+    COMMAND="python -m habitat_sim.utils.datasets_download --username $HABITAT_USER --password $HABITAT_PASSWORD --uids ${rY_ARGS}  --data-path ${DATA_DIR}/habitat"
     BRANCH="local"
 else
     # Use accelerate for distributed training
