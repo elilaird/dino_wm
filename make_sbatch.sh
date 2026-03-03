@@ -8,7 +8,7 @@ DATETIME=$(date +"%Y%m%d_%H%M%S")
 TIME=${TIME:-2-00:00:00}
 PARTITION=${PARTITION:-batch}
 TYPE=${TYPE:-train} # jupyter, eval, test
-CONDA_ENV=${CONDA_ENV:-dino_clean}
+CONDA_ENV=${CONDA_ENV:-world_models}
 NODES=${NODES:-1}
 BRANCH=${BRANCH:-main}
 
@@ -23,10 +23,13 @@ if [ "${PARTITION}" = "short" ]; then
 fi
 
 HOME_DIR=${HOME_DIR:-"/users/ejlaird/Projects/dino_wm"}
-ENV_DIR=${ENV_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/envs"}
-WORK_DIR=${WORK_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/workdirs"}
+# ENV_DIR=${ENV_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/envs"}
+ENV_DIR=${ENV_DIR:-"/lustre/smuexa01/client/users/ejlaird/envs"}
+WORK_DIR=${WORK_DIR:-"/lustre/smuexa01/client/users/ejlaird/workdirs"}
+# WORK_DIR=${WORK_DIR:-"/projects/coreyc/coreyc_mp_jepa/graph_world_models/ejlaird/dino_wm/workdirs"}
 DATA_DIR=${DATA_DIR:-"/lustre/smuexa01/client/users/ejlaird/dino_wm_data"}
 MUJOCO_DIR=/users/ejlaird/.mujoco/mujoco210/bin
+PYFLEXROOT=${HOME_DIR}/PyFleX
 
 if [ "${TYPE}" = "jupyter" ]; then
     WORK_DIR=${HOME_DIR}
