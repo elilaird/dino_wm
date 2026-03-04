@@ -70,7 +70,7 @@ eval_every_x_epoch: 1
 num_eval_samples: 10
 horizon_treatment: 100
 
-eval_long_imagination: True
+eval_long_imagination: False
 query_phase_start_idx: 301
 
 eval_context_recall: False

@@ -1452,6 +1452,7 @@ class Trainer:
                         for k, v in long_imagination_logs.items()
                     }
                     self.logs_update(long_imagination_logs)
+                    print("done long imagination")
 
                 # context recall
                 if (
@@ -1492,6 +1493,7 @@ class Trainer:
                         for k, v in recent_memory_recall_logs.items()
                     }
                     self.logs_update(recent_memory_recall_logs)
+                print("done ")
 
         self.accelerator.wait_for_everyone()
 
