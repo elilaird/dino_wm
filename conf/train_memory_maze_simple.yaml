@@ -27,7 +27,7 @@ training:
   seed: 0
   epochs: 20
   batch_size: 128 # gpu_batch_size (128 for 16 gpus)
-  save_every_x_epoch: 1 
+  save_every_x_epoch: 10 
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
   encoder_lr: 1e-3
@@ -73,7 +73,7 @@ horizon_treatment: 100
 eval_long_imagination: True
 query_phase_start_idx: 301
 
-eval_context_recall: True
+eval_context_recall: False
 context_recall_data_path: ${oc.env:DATASET_DIR}/memory_maze/memory-maze-3x7-teleport-chunked-w-proprio
 teleport_start_idx: 150
 ctx_recall_num_frames: 250
