@@ -30,8 +30,19 @@ class TwoInputIdentity(nn.Module):
     def forward(self, x1, x2):
         return x1
 
+
 class RetentionPredictor(nn.Module):
-    def __init__(self, dim, cond_dim, depth=2, heads=8, dim_head=64, mlp_dim=1024, cond_repeat=7, dropout=0.0):
+    def __init__(
+        self,
+        dim,
+        cond_dim,
+        depth=2,
+        heads=8,
+        dim_head=64,
+        mlp_dim=1024,
+        cond_repeat=7,
+        dropout=0.0,
+    ):
         super().__init__()
 
         self.depth = depth
@@ -45,26 +56,39 @@ class RetentionPredictor(nn.Module):
 
         self.layers = nn.ModuleList([])
         for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                Attention(dim + cond_size, heads, dim_head, dropout, bias=generate_mask_matrix(NUM_PATCHES, 1)), # only one time frame
-                FeedForward(dim + cond_size, mlp_dim, dropout)
-            ]))
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim + cond_size,
+                            heads,
+                            dim_head,
+                            dropout,
+                            bias=generate_mask_matrix(NUM_PATCHES, 1),
+                        ),  # only one time frame
+                        FeedForward(dim + cond_size, mlp_dim, dropout),
+                    ]
+                )
+            )
         self.to_out = nn.Linear(dim + cond_size, dim)
 
     def add_cond(self, x, cond):
-        # tile cond 
+        # tile cond
         cond_repeated = cond.repeat(1, 1, 1, self.cond_repeat)
-        out = torch.cat([x, cond_repeated], dim=3) # (b, t, num_patches, dim + cond_dim * cond_repeat)
+        out = torch.cat(
+            [x, cond_repeated], dim=3
+        )  # (b, t, num_patches, dim + cond_dim * cond_repeat)
         return rearrange(out, "b t p d -> b (t p) d")
 
     def forward(self, x, cond):
         B, T, P, D = x.shape
-        x = self.add_cond(x, cond) # (b, (t p), dim + cond_dim * cond_repeat)
+        x = self.add_cond(x, cond)  # (b, (t p), dim + cond_dim * cond_repeat)
         for attn, ff in self.layers:
             x = x + attn(x)
             x = x + ff(x)
         out = self.to_out(x)
         return rearrange(out, "b (t p) d -> b t p d", t=T)
+
 
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):
@@ -176,7 +200,7 @@ class CrossAttention(nn.Module):
         v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-        
+
         # apply causal mask - prevent attending to future memory tokens
         dots = dots.masked_fill(self.bias[:, :, :T, :T_c] == 0, float("-inf"))
 
@@ -185,19 +209,26 @@ class CrossAttention(nn.Module):
             print("T_c: ", T_c)
             print("attn shape: ", attn.shape)
 
-            print(f"Attn is nan, dots: {dots.shape}, q: {q.shape}, k: {k.shape}, v: {v.shape}")
+            print(
+                f"Attn is nan, dots: {dots.shape}, q: {q.shape}, k: {k.shape}, v: {v.shape}"
+            )
             print(f"isnan: {torch.isnan(attn).sum()}")
             print(f"dots nan: {dots[torch.isnan(attn)].shape}")
 
-        assert not torch.isnan(attn).any(), f"Attn is nan, dots: {dots.shape}, q: {q.shape}, k: {k.shape}, v: {v.shape}"
+        assert not torch.isnan(
+            attn
+        ).any(), f"Attn is nan, dots: {dots.shape}, q: {q.shape}, k: {k.shape}, v: {v.shape}"
         attn = self.dropout(attn)
 
         out = torch.matmul(attn, v)
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
 
+
 class CrossAttentionInjection(nn.Module):
-    def __init__(self, q_dim, kv_dim, heads=8, dim_head=64, dropout=0.0, bias=None):
+    def __init__(
+        self, q_dim, kv_dim, heads=8, dim_head=64, dropout=0.0, bias=None
+    ):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == q_dim)
@@ -237,7 +268,7 @@ class CrossAttentionInjection(nn.Module):
         v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-        
+
         # apply causal mask - prevent attending to future memory tokens
         dots = dots.masked_fill(self.bias[:, :, :T, :T_c] == 0, float("-inf"))
 
@@ -247,6 +278,7 @@ class CrossAttentionInjection(nn.Module):
         out = torch.matmul(attn, v)
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
+
 
 class AttentionWithLoRA(nn.Module):
     def __init__(
@@ -286,7 +318,6 @@ class AttentionWithLoRA(nn.Module):
         if bias is None:
             bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
         self.register_buffer("bias", bias)
-
 
         self.q_lora = MemoryLoRAProj(
             in_dim=dim,
@@ -425,6 +456,7 @@ class TransformerBlock(nn.Module):
         x = x + self.attn(x)
         x = x + self.ff(x)
         return x
+
 
 class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0):
@@ -879,7 +911,9 @@ class MACTransformerBlock(nn.Module):
         bias = generate_mac_mask_matrix(
             num_patches, num_frames, n_persistent, num_frames
         )
-        self.attention = Attention(d_model, n_heads, dim_head, dropout, bias=bias)
+        self.attention = Attention(
+            d_model, n_heads, dim_head, dropout, bias=bias
+        )
 
         self.norm1 = nn.LayerNorm(d_model)
         self.ff = nn.Sequential(
@@ -916,9 +950,7 @@ class MACTransformerBlock(nn.Module):
                 [P, h, x_seg], dim=1
             )  # [B, n_persistent + T, d_model]
         else:
-            x_aug = torch.cat(
-                [h, x_seg], dim=1
-            )  # [B, T, d_model]
+            x_aug = torch.cat([h, x_seg], dim=1)  # [B, T, d_model]
 
         x_aug = x_aug + self.attention(x_aug)
         x_aug = x_aug + self.ff(x_aug)
@@ -972,7 +1004,9 @@ class MACResidualInjectionBlock(MACTransformerBlock):
         self.injection_layer = nn.Linear(d_model, d_model)
         self.alpha = nn.Parameter(torch.ones(1) * 0.1)
 
-    def forward(self, x: torch.Tensor, update_memory: bool = True) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, update_memory: bool = True
+    ) -> torch.Tensor:
         B, T, D = x.shape
         x = self.norm1(x)
 
@@ -991,8 +1025,9 @@ class MACResidualInjectionBlock(MACTransformerBlock):
                 q_t.detach(),
                 M.detach(),
             )
-          
+
         return out
+
 
 class MACCrossAttentionBlock(MACTransformerBlock):
     def __init__(
@@ -1022,9 +1057,17 @@ class MACCrossAttentionBlock(MACTransformerBlock):
             update_type=update_type,
         )
         self.attention = Attention(d_model, n_heads, dim_head, dropout)
-        self.injection_layer = CrossAttention(d_model, n_heads, dim_head, dropout, bias=generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES))
+        self.injection_layer = CrossAttention(
+            d_model,
+            n_heads,
+            dim_head,
+            dropout,
+            bias=generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES),
+        )
 
-    def forward(self, x: torch.Tensor, update_memory: bool = True) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, update_memory: bool = True
+    ) -> torch.Tensor:
         B, T, D = x.shape
         x = self.norm1(x)
 
@@ -1043,7 +1086,7 @@ class MACCrossAttentionBlock(MACTransformerBlock):
                 q_t.detach(),
                 M.detach(),
             )
-          
+
         return out
 
 
@@ -1061,7 +1104,6 @@ class MACAdaMemTransformerBlock(MACTransformerBlock):
         dim_head: int = 64,
         update_type: str = "selfattention",  # "selfattention" or "crossattention"
         proj_k_eq_q: bool = False,
-
     ):
         super().__init__(
             mem=mem,
@@ -1079,14 +1121,15 @@ class MACAdaMemTransformerBlock(MACTransformerBlock):
         self.injection_layer1 = AdaptiveLayerNorm(d_model, d_model)
         self.injection_layer2 = AdaptiveLayerNorm(d_model, d_model)
 
-    def forward(self, x: torch.Tensor, update_memory: bool = True) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, update_memory: bool = True
+    ) -> torch.Tensor:
         B, T, D = x.shape
         x = self.norm1(x)
 
         # retrieve long-term memory for current segment
         q_t = self.mem_W_Q(x)  # [B, T, d_model]
         M = self.mem.retrieve(q_t)  # [B, T, d_model]
-
 
         x = x + self.attention(self.injection_layer1(x, M))
         x = x + self.ff(self.injection_layer2(x, M))
@@ -1098,8 +1141,9 @@ class MACAdaMemTransformerBlock(MACTransformerBlock):
                 q_t.detach(),
                 M.detach(),
             )
-          
+
         return out
+
 
 class MACLoRATransformerBlock(MACTransformerBlock):
     def __init__(
@@ -1115,7 +1159,6 @@ class MACLoRATransformerBlock(MACTransformerBlock):
         dim_head: int = 64,
         update_type: str = "selfattention",  # "selfattention" or "crossattention"
         proj_k_eq_q: bool = False,
-
     ):
         super().__init__(
             mem=mem,
@@ -1129,9 +1172,13 @@ class MACLoRATransformerBlock(MACTransformerBlock):
             dim_head=dim_head,
             update_type=update_type,
         )
-        self.attention = DynamicLoRAAttention(d_model, n_heads, dim_head, r=16, alpha=0.5, dropout=dropout)
+        self.attention = DynamicLoRAAttention(
+            d_model, n_heads, dim_head, r=16, alpha=0.5, dropout=dropout
+        )
 
-    def forward(self, x: torch.Tensor, update_memory: bool = True) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, update_memory: bool = True
+    ) -> torch.Tensor:
         B, T, D = x.shape
         x = self.norm1(x)
 
@@ -1149,8 +1196,9 @@ class MACLoRATransformerBlock(MACTransformerBlock):
                 q_t.detach(),
                 M.detach(),
             )
-          
+
         return out
+
 
 class MACTransformer(nn.Module):
     def __init__(
@@ -1168,7 +1216,7 @@ class MACTransformer(nn.Module):
         update_type="selfattention",
         proj_k_eq_q=False,
         mem_layer_type: str = "all",
-        injection_type = "prepend",
+        injection_type="prepend",
     ):
         super().__init__()
         self.mem = memory_module
@@ -1176,15 +1224,15 @@ class MACTransformer(nn.Module):
         self.mem_layer_type = mem_layer_type
         self.injection_type = injection_type
 
-        if self.mem_layer_type == 'all':
+        if self.mem_layer_type == "all":
             self.mem_layer_idx = list(range(depth))
-        elif self.mem_layer_type == 'first':
+        elif self.mem_layer_type == "first":
             self.mem_layer_idx = [0]
-        elif self.mem_layer_type == 'middle':
+        elif self.mem_layer_type == "middle":
             self.mem_layer_idx = list(range(1, depth - 1))
-        elif self.mem_layer_type == 'last':
+        elif self.mem_layer_type == "last":
             self.mem_layer_idx = [depth - 1]
-        elif self.mem_layer_type == 'alternate':
+        elif self.mem_layer_type == "alternate":
             self.mem_layer_idx = list(range(0, depth, 2))
 
         self.layers = nn.ModuleList([])
@@ -1257,13 +1305,22 @@ class MACTransformer(nn.Module):
                         proj_k_eq_q=proj_k_eq_q,
                     )
                 else:
-                    raise ValueError(f"Invalid injection type: {self.injection_type}")
+                    raise ValueError(
+                        f"Invalid injection type: {self.injection_type}"
+                    )
 
                 self.layers.append(injection_layer)
-                
+
             else:
                 self.layers.append(
-                    TransformerBlock(dim, heads, dim_head, mlp_dim, dropout, bias=generate_mask_matrix(NUM_PATCHES, NUM_FRAMES))
+                    TransformerBlock(
+                        dim,
+                        heads,
+                        dim_head,
+                        mlp_dim,
+                        dropout,
+                        bias=generate_mask_matrix(NUM_PATCHES, NUM_FRAMES),
+                    )
                 )
 
     def forward(self, x):
@@ -1299,7 +1356,7 @@ class MACViTPredictor(nn.Module):
         update_type="selfattention",
         proj_k_eq_q=False,
         mem_layer_type: str = "all",
-        injection_type = "prepend",
+        injection_type="prepend",
     ):
         assert pool in {
             "cls",
@@ -1665,7 +1722,7 @@ class StateSpaceTransformer(nn.Module):
         use_gate: bool = False,
         use_cls_token: bool = False,
         shift_memory: bool = False,
-        mem_layer_type: str = "all", # "all", "first", "middle", "last", "alternate" (injection position)
+        mem_layer_type: str = "all",  # "all", "first", "middle", "last", "alternate" (injection position)
         **kwargs,
     ):
         super().__init__()
@@ -1685,15 +1742,15 @@ class StateSpaceTransformer(nn.Module):
         self.shift_memory = shift_memory
         self.mem_layer_type = mem_layer_type
 
-        if self.mem_layer_type == 'all':
+        if self.mem_layer_type == "all":
             self.mem_layer_idx = list(range(depth))
-        elif self.mem_layer_type == 'first':
+        elif self.mem_layer_type == "first":
             self.mem_layer_idx = [0]
-        elif self.mem_layer_type == 'middle':
+        elif self.mem_layer_type == "middle":
             self.mem_layer_idx = list(range(1, depth - 1))
-        elif self.mem_layer_type == 'last':
+        elif self.mem_layer_type == "last":
             self.mem_layer_idx = [depth - 1]
-        elif self.mem_layer_type == 'alternate':
+        elif self.mem_layer_type == "alternate":
             self.mem_layer_idx = list(range(0, depth, 2))
 
         if use_gate:
@@ -1718,7 +1775,7 @@ class StateSpaceTransformer(nn.Module):
     def _build_mem_blocks(
         self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
     ):
-        self.ln_mem_out = nn.Identity() # nn.LayerNorm(dim) #TODO: add back in
+        self.ln_mem_out = nn.Identity()  # nn.LayerNorm(dim) #TODO: add back in
         self.mem_blocks = nn.ModuleList([])
 
         for _ in range(n_mem_blocks):
@@ -1727,7 +1784,9 @@ class StateSpaceTransformer(nn.Module):
                     d_model=dim,
                     n_state=state_dim,
                     step_size=self.step_size,
-                    num_patches=self.num_patches if not self.use_cls_token else 1,
+                    num_patches=(
+                        self.num_patches if not self.use_cls_token else 1
+                    ),
                     dt_rank=dt_rank,
                     dropout=dropout,
                 ),
@@ -1764,7 +1823,7 @@ class StateSpaceTransformer(nn.Module):
         B, T, D = x.shape
         x = x.clone()
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
-  
+
         for mem_block in self.mem_blocks:
             x, H_T = mem_block(x)
 
@@ -1820,7 +1879,7 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
         alpha_init: float = 0.1,
         use_cls_token: bool = False,
         shift_memory: bool = False,
-        mem_layer_type: str = "all", # "all", "first", "middle", "last", "alternate" (injection position)
+        mem_layer_type: str = "all",  # "all", "first", "middle", "last", "alternate" (injection position)
         **kwargs,
     ):
         super().__init__(
@@ -1879,11 +1938,12 @@ class MemoryInjectionSSMTransformer(StateSpaceTransformer):
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             if i in self.mem_layer_idx:
-                idx = self.mem_layer_idx.index(i)            
+                idx = self.mem_layer_idx.index(i)
                 x = x + self.injection_layers[idx](M_new) * self.alphas[idx]
             x = x + ff(x)
 
         return self.ln_out(x), self.ln_mem_out(M_new)
+
 
 class AdaMemSSMTransformer(StateSpaceTransformer):
     def __init__(
@@ -1926,7 +1986,7 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
             mem_layer_type=mem_layer_type,
             **kwargs,
         )
-        
+
     def _build_transformer(
         self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
     ):
@@ -1950,24 +2010,33 @@ class AdaMemSSMTransformer(StateSpaceTransformer):
                 self.injection_layers.append(
                     nn.ModuleList(
                         [
+                            (
+                                AdaptiveLayerNorm(
+                                    dim,
+                                    dim,
+                                    zero_init=kwargs.get("zero_init", False),
+                                )
+                                if self.both_injections
+                                else TwoInputIdentity()
+                            ),
                             AdaptiveLayerNorm(
-                                dim, dim, zero_init=kwargs.get("zero_init", False)
-                            ) if self.both_injections else TwoInputIdentity(),
-                            AdaptiveLayerNorm(
-                                dim, dim, zero_init=kwargs.get("zero_init", False)
-                            )
+                                dim,
+                                dim,
+                                zero_init=kwargs.get("zero_init", False),
+                            ),
                         ]
-                    )                
+                    )
                 )
             else:
-                self.injection_layers.append(nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()]))
-            
+                self.injection_layers.append(
+                    nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()])
+                )
 
     def forward(self, x):
         M_new = self._mem_blocks_forward(x)
         x = self.ln_in(x)
 
-        for i, (attn, ff) in enumerate(self.layers):            
+        for i, (attn, ff) in enumerate(self.layers):
             injection_1, injection_2 = self.injection_layers[i]
             x = x + attn(injection_1(x, M_new))
             x = x + ff(injection_2(x, M_new))
@@ -2040,7 +2109,9 @@ class MemCrossAttentionSSMTransformer(StateSpaceTransformer):
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             if i in self.mem_layer_idx:
-                x = x + self.injection_layers[self.mem_layer_idx.index(i)](x, M_new)
+                x = x + self.injection_layers[self.mem_layer_idx.index(i)](
+                    x, M_new
+                )
             x = x + ff(x)
 
         return self.ln_out(x), self.ln_mem_out(M_new)
@@ -2082,11 +2153,11 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
             mem_layer_type=mem_layer_type,
             **kwargs,
         )
-    
+
     def _build_mem_blocks(
         self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
     ):
-        self.ln_mem_out = nn.Identity() # nn.LayerNorm(dim) #TODO: add back in
+        self.ln_mem_out = nn.Identity()  # nn.LayerNorm(dim) #TODO: add back in
         self.mem_blocks = nn.ModuleList([])
         for _ in range(n_mem_blocks):
             self.mem_blocks.append(
@@ -2094,7 +2165,9 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
                     d_model=dim,
                     n_state=state_dim,
                     step_size=self.step_size,
-                    num_patches=self.num_patches if not self.use_cls_token else 1,
+                    num_patches=(
+                        self.num_patches if not self.use_cls_token else 1
+                    ),
                     dt_rank=dt_rank,
                     dropout=dropout,
                 ),
@@ -2105,7 +2178,7 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
         x = x.clone()
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
         if self.use_cls_token:
-            x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
+            x = x[:, :, 0, :].unsqueeze(2)  # select only the cls token
 
         if self.shift_memory:
             H_0 = self.mem_blocks[0].H_cache
@@ -2114,7 +2187,7 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
 
         for mem_block in self.mem_blocks:
             x, H_T = mem_block(x)
-        
+
         if self.use_cls_token:
             # repeat the cls token to the number of patches
             x = x.repeat(1, 1, self.num_patches, 1)
@@ -2125,13 +2198,14 @@ class BasicMemCrossAttentionSSMTransformer(MemCrossAttentionSSMTransformer):
 
         return rearrange(x, "b t p d -> b (t p) d")
 
-    def reset_memory(self):    
+    def reset_memory(self):
         for mem_block in self.mem_blocks:
             mem_block.reset_memory()
 
     def set_step_size(self, step_size):
         for mem_block in self.mem_blocks:
             mem_block.set_step_size(step_size)
+
 
 class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
     def __init__(
@@ -2174,7 +2248,7 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
     def _build_mem_blocks(
         self, n_mem_blocks, dim, state_dim, dropout, mlp_dim, dt_rank, **kwargs
     ):
-        self.ln_mem_out = nn.Identity() # nn.LayerNorm(dim) #TODO: add back in
+        self.ln_mem_out = nn.Identity()  # nn.LayerNorm(dim) #TODO: add back in
         self.mem_blocks = nn.ModuleList([])
         for _ in range(n_mem_blocks):
             self.mem_blocks.append(
@@ -2182,12 +2256,14 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
                     d_model=dim,
                     n_state=state_dim,
                     step_size=self.step_size,
-                    num_patches=self.num_patches if not self.use_cls_token else 1,
+                    num_patches=(
+                        self.num_patches if not self.use_cls_token else 1
+                    ),
                     dt_rank=dt_rank,
                     dropout=dropout,
                 ),
             )
-    
+
     def _build_transformer(
         self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
     ):
@@ -2206,34 +2282,40 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
             bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES)
             if i in self.mem_layer_idx:
                 self.injection_layers.append(
-                    CrossAttentionInjection(dim, self.state_dim, heads, dim_head, dropout, bias=bias)
+                    CrossAttentionInjection(
+                        dim,
+                        self.state_dim,
+                        heads,
+                        dim_head,
+                        dropout,
+                        bias=bias,
+                    )
                 )
-    
+
     def _mem_blocks_forward(self, x):
         B, T, D = x.shape
         x = x.clone()
         x = rearrange(x, "b (t p) d -> b t p d", t=T // self.num_patches)
         if self.use_cls_token:
-            x = x[:,:, 0, :].unsqueeze(2) # select only the cls token
-        
+            x = x[:, :, 0, :].unsqueeze(2)  # select only the cls token
+
         if self.shift_memory:
             H_0 = self.mem_blocks[0].H_cache
             if H_0 is None:
                 H_0 = self.mem_blocks[0].init_state(B, device=x.device)
-                  
+
         for mem_block in self.mem_blocks:
             x, H_T = mem_block(x)
-        
+
         if self.use_cls_token:
             # repeat the cls token to the number of patches
             H_T = H_T.repeat(1, 1, self.num_patches, 1)
-        
+
         if self.shift_memory:
             H_T = H_T[:, :-1, :, :]
             H_T = torch.cat([H_0.unsqueeze(1), H_T], dim=1)
 
         return rearrange(H_T, "b t p d -> b (t p) d")
-
 
     def forward(self, x):
         M_new = self._mem_blocks_forward(x)
@@ -2242,11 +2324,13 @@ class HiddenMemCrossAttentionSSMTransformer(StateSpaceTransformer):
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             if i in self.mem_layer_idx:
-                x = x + self.injection_layers[self.mem_layer_idx.index(i)](x, M_new)
+                x = x + self.injection_layers[self.mem_layer_idx.index(i)](
+                    x, M_new
+                )
             x = x + ff(x)
 
         return self.ln_out(x), self.ln_mem_out(M_new)
-    
+
     def reset_memory(self):
         for mem_block in self.mem_blocks:
             mem_block.reset_memory()
@@ -2429,6 +2513,7 @@ class StateSpaceViTPredictor(nn.Module):
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)
 
+
 ### mLSTM MEMORY VIT PREDICTOR ###
 
 
@@ -2447,7 +2532,9 @@ class mLSTMTransformer(StateSpaceTransformer):
                     d_model=dim,
                     num_heads=num_heads,
                     step_size=self.step_size,
-                    num_patches=self.num_patches if not self.use_cls_token else 1,
+                    num_patches=(
+                        self.num_patches if not self.use_cls_token else 1
+                    ),
                     dropout=dropout,
                 )
             )
@@ -2480,8 +2567,6 @@ class MemCrossAttentionmLSTMTransformer(mLSTMTransformer):
                         dropout=dropout,
                     )
                 )
-            else:
-                self.injection_layers.append(nn.Identity())
 
     def forward(self, x, H=None):
         B, T, D = x.shape
@@ -2524,8 +2609,6 @@ class MemoryInjectionmLSTMTransformer(mLSTMTransformer):
             )
             if i in self.mem_layer_idx:
                 self.injection_layers.append(nn.Linear(dim, dim))
-            else:
-                self.injection_layers.append(nn.Identity())
 
     def forward(self, x, H=None):
         B, T, D = x.shape
@@ -2602,17 +2685,27 @@ class AdaMemmLSTMTransformer(mLSTMTransformer):
                 self.injection_layers.append(
                     nn.ModuleList(
                         [
+                            (
+                                AdaptiveLayerNorm(
+                                    dim,
+                                    dim,
+                                    zero_init=kwargs.get("zero_init", False),
+                                )
+                                if self.both_injections
+                                else TwoInputIdentity()
+                            ),
                             AdaptiveLayerNorm(
-                                dim, dim, zero_init=kwargs.get("zero_init", False)
-                            ) if self.both_injections else TwoInputIdentity(),
-                            AdaptiveLayerNorm(
-                                dim, dim, zero_init=kwargs.get("zero_init", False)
-                            )
+                                dim,
+                                dim,
+                                zero_init=kwargs.get("zero_init", False),
+                            ),
                         ]
                     )
                 )
             else:
-                self.injection_layers.append(nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()]))
+                self.injection_layers.append(
+                    nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()])
+                )
 
     def forward(self, x, H=None):
         B, T, D = x.shape
@@ -2692,12 +2785,21 @@ class LoRAmLSTMTransformer(mLSTMTransformer):
                         use_qk=self.use_qk,
                         use_vo=self.use_vo,
                         dropout=dropout,
-                        inject_pooled=True
+                        inject_pooled=True,
                     )
                 )
             else:
-                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout))
-            block.append(FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout))
+                block.append(
+                    Attention(
+                        dim=dim,
+                        heads=heads,
+                        dim_head=dim_head,
+                        dropout=dropout,
+                    )
+                )
+            block.append(
+                FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout)
+            )
             self.layers.append(block)
 
     def forward(self, x, H=None):
@@ -2866,6 +2968,7 @@ class mLSTMViTPredictor(nn.Module):
 
 ### CACHE MEMORY VIT PREDICTOR ###
 
+
 class CacheMemoryTransformer(nn.Module):
 
     def __init__(
@@ -2890,7 +2993,7 @@ class CacheMemoryTransformer(nn.Module):
         self.dropout = dropout
         self.dim_head = dim_head
         self.mem_layer_type = mem_layer_type
-        self.step_size = step_size 
+        self.step_size = step_size
         self.num_patches = num_patches
         self.cache_size = cache_size
 
@@ -2908,7 +3011,7 @@ class CacheMemoryTransformer(nn.Module):
         self.ln_in = nn.LayerNorm(dim)
         self.ln_out = nn.LayerNorm(dim)
 
-        self.H_buffer = None # (b, cache_size, p, d)
+        self.H_buffer = None  # (b, cache_size, p, d)
 
         self._build_transformer(
             depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
@@ -2927,8 +3030,10 @@ class CacheMemoryTransformer(nn.Module):
                             dim,
                             heads,
                             dim_head,
-                            dropout,     
-                            bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)                      
+                            dropout,
+                            bias=generate_mask_with_memory(
+                                NUM_PATCHES, NUM_FRAMES
+                            ),
                         ),
                         FeedForward(dim, mlp_dim, dropout),
                     ]
@@ -2941,7 +3046,11 @@ class CacheMemoryTransformer(nn.Module):
         M_new = self._get_memory()
         M_T = M_new.size(1) if M_new is not None else 0
 
-        ctx = self.ln_fuse(torch.cat([M_new, x], dim=1)) if M_new is not None else x
+        ctx = (
+            self.ln_fuse(torch.cat([M_new, x], dim=1))
+            if M_new is not None
+            else x
+        )
         for i, (attn, ff) in enumerate(self.layers):
             ctx = ctx + attn(ctx)
             ctx = ctx + ff(ctx)
@@ -2950,30 +3059,31 @@ class CacheMemoryTransformer(nn.Module):
 
         self._update_memory(ctx.detach().clone())
         return self.ln_out(ctx), self._get_memory()
-        
-    
+
     def reset_memory(self):
         self.H_buffer = None
 
     def set_step_size(self, step_size):
         self.step_size = step_size
-    
+
     def _update_memory(self, mem):
         if mem is not None:
             mem = rearrange(mem, "b (t p) d -> b t p d", p=self.num_patches)
-            mem = mem[:, :self.step_size]
+            mem = mem[:, : self.step_size]
 
             if self.H_buffer is None:
-                self.H_buffer = mem[:, -self.cache_size:]
+                self.H_buffer = mem[:, -self.cache_size :]
             else:
-                self.H_buffer = torch.cat([self.H_buffer, mem], dim=1)[:, -self.cache_size:]
-    
+                self.H_buffer = torch.cat([self.H_buffer, mem], dim=1)[
+                    :, -self.cache_size :
+                ]
+
     def _get_memory(self):
         if self.H_buffer is None:
             return self.H_buffer
         else:
             return rearrange(self.H_buffer.clone(), "b t p d -> b (t p) d")
-            
+
 
 class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
     def __init__(
@@ -3034,9 +3144,9 @@ class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
             )
             if i in self.mem_layer_idx:
                 self.injection_layers.append(nn.Linear(dim, dim))
-    
+
     def forward(self, x):
-        B, T, D = x.shape        
+        B, T, D = x.shape
         x = self.ln_in(x)
         M_new = self._get_memory()
         if M_new is not None:
@@ -3045,14 +3155,13 @@ class CacheMemoryInjectionTransformer(CacheMemoryTransformer):
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             if i in self.mem_layer_idx and M_new is not None:
-                idx = self.mem_layer_idx.index(i)       
-                injection = self.injection_layers[idx](M_new)      
+                idx = self.mem_layer_idx.index(i)
+                injection = self.injection_layers[idx](M_new)
                 x = x + injection * self.alphas[idx]
             x = x + ff(x)
 
         self._update_memory(x.detach().clone())
         return self.ln_out(x), self._get_memory()
-
 
 
 class CacheAdaMemTransformer(CacheMemoryTransformer):
@@ -3087,7 +3196,7 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
             mem_layer_type=mem_layer_type,
             zero_init=zero_init,
             both_injections=both_injections,
-            **kwargs,   
+            **kwargs,
         )
 
     def _build_transformer(
@@ -3095,7 +3204,7 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
     ):
         self.layers = nn.ModuleList([])
         self.injection_layers = nn.ModuleList([])
-        
+
         for i in range(depth):
             self.layers.append(
                 nn.ModuleList(
@@ -3114,25 +3223,35 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
                 self.injection_layers.append(
                     nn.ModuleList(
                         [
+                            (
+                                AdaptiveLayerNorm(
+                                    dim,
+                                    dim,
+                                    zero_init=kwargs.get("zero_init", False),
+                                )
+                                if self.both_injections
+                                else TwoInputIdentity()
+                            ),
                             AdaptiveLayerNorm(
-                                dim, dim, zero_init=kwargs.get("zero_init", False)
-                            ) if self.both_injections else TwoInputIdentity(),
-                            AdaptiveLayerNorm(
-                                dim, dim, zero_init=kwargs.get("zero_init", False)
-                            )
+                                dim,
+                                dim,
+                                zero_init=kwargs.get("zero_init", False),
+                            ),
                         ]
-                    )                
+                    )
                 )
             else:
-                self.injection_layers.append(nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()]))
-    
+                self.injection_layers.append(
+                    nn.ModuleList([TwoInputIdentity(), TwoInputIdentity()])
+                )
+
     def forward(self, x):
         M_new = self._get_memory()
         if M_new is not None:
             M = M_new.mean(dim=1).unsqueeze(1).repeat(1, x.size(1), 1)
         x = self.ln_in(x)
 
-        for i, (attn, ff) in enumerate(self.layers):            
+        for i, (attn, ff) in enumerate(self.layers):
             if M_new is not None:
                 injection_1, injection_2 = self.injection_layers[i]
                 x = x + attn(injection_1(x, M))
@@ -3143,6 +3262,7 @@ class CacheAdaMemTransformer(CacheMemoryTransformer):
 
         self._update_memory(x.detach().clone())
         return self.ln_out(x), self._get_memory()
+
 
 class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
     def __init__(
@@ -3182,29 +3302,40 @@ class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
             mem_layer_type=mem_layer_type,
             **kwargs,
         )
-    
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
         self.layers = nn.ModuleList([])
         for i in range(depth):
             block = nn.ModuleList([])
             if i in self.mem_layer_idx:
                 block.append(
                     DynamicLoRAAttention(
-                        dim=dim, 
-                        heads=heads, 
+                        dim=dim,
+                        heads=heads,
                         dim_head=dim_head,
-                        r=self.lora_rank, 
+                        r=self.lora_rank,
                         alpha=self.lora_alpha,
                         gen_type=self.gen_type,
                         use_qk=self.use_qk,
                         use_vo=self.use_vo,
-                        dropout=dropout, 
-                        inject_pooled=True
+                        dropout=dropout,
+                        inject_pooled=True,
                     )
                 )
             else:
-                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout))
-            block.append(FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout))
+                block.append(
+                    Attention(
+                        dim=dim,
+                        heads=heads,
+                        dim_head=dim_head,
+                        dropout=dropout,
+                    )
+                )
+            block.append(
+                FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout)
+            )
             self.layers.append(block)
 
     def forward(self, x):
@@ -3212,11 +3343,12 @@ class CacheLoRAAttentionTransformer(CacheMemoryTransformer):
         x = self.ln_in(x)
         for i, (attn, ff) in enumerate(self.layers):
             attn_out = attn(x, M_new) if i in self.mem_layer_idx else attn(x)
-            x = x + attn_out            
+            x = x + attn_out
             x = x + ff(x)
         self._update_memory(x.detach().clone())
         return self.ln_out(x), self._get_memory()
-        
+
+
 class CacheCrossAttentionTransformer(CacheMemoryTransformer):
     def __init__(
         self,
@@ -3245,7 +3377,7 @@ class CacheCrossAttentionTransformer(CacheMemoryTransformer):
             mem_layer_type=mem_layer_type,
             **kwargs,
         )
-    
+
     def _build_transformer(
         self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
     ):
@@ -3275,7 +3407,9 @@ class CacheCrossAttentionTransformer(CacheMemoryTransformer):
         for i, (attn, ff) in enumerate(self.layers):
             x = x + attn(x)
             if i in self.mem_layer_idx and M_new is not None:
-                x = x + self.injection_layers[self.mem_layer_idx.index(i)](x, M_new)
+                x = x + self.injection_layers[self.mem_layer_idx.index(i)](
+                    x, M_new
+                )
             x = x + ff(x)
 
         self._update_memory(x.detach().clone())
@@ -3468,20 +3602,26 @@ class DualAttentionSSMKeys(nn.Module):
         self.n_frames = n_frames
         self.fusion = fusion
         self.fusion_scale = fusion_scale
-        self.ssm = nn.ModuleList([
-            MambaLayer(
-                d_model=dim, n_state=dim // 2, step_size=step_size, num_patches=n_patches, dt_rank=16, dropout=dropout
-            ),
-            nn.Sequential(
-                nn.LayerNorm(dim),
-                nn.Linear(dim, dim*2),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(dim*2, dim),
-                nn.Dropout(dropout),
-            )
-        ])
-        
+        self.ssm = nn.ModuleList(
+            [
+                MambaLayer(
+                    d_model=dim,
+                    n_state=dim // 2,
+                    step_size=step_size,
+                    num_patches=n_patches,
+                    dt_rank=16,
+                    dropout=dropout,
+                ),
+                nn.Sequential(
+                    nn.LayerNorm(dim),
+                    nn.Linear(dim, dim * 2),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(dim * 2, dim),
+                    nn.Dropout(dropout),
+                ),
+            ]
+        )
 
         # projections
         self.norm = nn.LayerNorm(dim)
@@ -3543,7 +3683,7 @@ class DualAttentionSSMKeys(nn.Module):
         for layer in self.ssm:
             x = layer(x) + x
         return x
-    
+
     def forward(self, x, H0=None):
         """
         x:  [B, T, D]
@@ -3561,7 +3701,7 @@ class DualAttentionSSMKeys(nn.Module):
         V = self._heads(self.to_v(x))  # [B,H,T,dh]
 
         Y_seq = self._reshape_for_ssm(x, num_frames=F)  # [B,F,P,D]
-        Y_seq = self.ssm_forward(Y_seq).reshape(B, F*P, D)
+        Y_seq = self.ssm_forward(Y_seq).reshape(B, F * P, D)
 
         # Project to key space per token, then flatten time*patch -> tokens
         K_mem_tokens = self.proj_k_mem(Y_seq)  # [B,T,Inner]
@@ -4111,7 +4251,7 @@ class DynamicLoRAAttention(nn.Module):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
-        
+
         self.dim_head = dim_head
         self.heads = heads
         self.scale = dim_head**-0.5
@@ -4191,7 +4331,7 @@ class DynamicLoRAAttention(nn.Module):
     ) -> torch.Tensor:
         """
         x:     [B,T, dim]
-        m_tok: [B,T, dim] 
+        m_tok: [B,T, dim]
         """
         B, T, D = x.shape
 
@@ -4199,8 +4339,8 @@ class DynamicLoRAAttention(nn.Module):
 
         if m_tok is not None:
             m_tok = self.mem_norm(m_tok)
-        
-        q = self.q_proj(x, m_tok) if self.use_qk else self.q_proj(x) 
+
+        q = self.q_proj(x, m_tok) if self.use_qk else self.q_proj(x)
         k = self.k_proj(x, m_tok) if self.use_qk else self.k_proj(x)
         v = self.v_proj(x, m_tok) if self.use_vo else self.v_proj(x)
 
@@ -4209,7 +4349,7 @@ class DynamicLoRAAttention(nn.Module):
         v = self._split_heads(v)
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-    
+
         dots = dots.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
 
         attn = self.attend(dots)
@@ -4217,7 +4357,7 @@ class DynamicLoRAAttention(nn.Module):
 
         out = torch.matmul(attn, v)
         out = self._merge_heads(out)
-        
+
         out = self.o_proj(out, m_tok) if self.use_vo else self.o_proj(out)
 
         return self.dropout(out)
@@ -4252,7 +4392,7 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
         self.gen_type = gen_type
         self.use_qk = use_qk
         self.use_vo = use_vo
-        
+
         super().__init__(
             dim=dim,
             num_patches=num_patches,
@@ -4276,28 +4416,39 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
             **kwargs,
         )
 
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
         self.layers = nn.ModuleList([])
         for i in range(depth):
             block = nn.ModuleList([])
             if i in self.mem_layer_idx:
                 block.append(
                     DynamicLoRAAttention(
-                        dim=dim, 
-                        heads=heads, 
+                        dim=dim,
+                        heads=heads,
                         dim_head=dim_head,
-                        r=self.lora_rank, 
+                        r=self.lora_rank,
                         alpha=self.lora_alpha,
                         gen_type=self.gen_type,
                         use_qk=self.use_qk,
                         use_vo=self.use_vo,
-                        dropout=dropout, 
+                        dropout=dropout,
                         # bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES),
                     )
                 )
             else:
-                block.append(Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout)) #, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)))
-            block.append(FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout))
+                block.append(
+                    Attention(
+                        dim=dim,
+                        heads=heads,
+                        dim_head=dim_head,
+                        dropout=dropout,
+                    )
+                )  # , bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)))
+            block.append(
+                FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout)
+            )
             self.layers.append(block)
 
     def forward(self, x):
@@ -4305,31 +4456,51 @@ class LoRAAttentionTransformer(StateSpaceTransformer):
         x = self.ln_in(x)
         for i, (attn, ff) in enumerate(self.layers):
             attn_out = attn(x, M_new) if i in self.mem_layer_idx else attn(x)
-            x = x + attn_out            
+            x = x + attn_out
             x = x + ff(x)
         return self.ln_out(x), self.ln_mem_out(M_new)
 
 
 ########### LoRA FFN with Memory ###########
 
+
 class DynamicLoRAFFN(nn.Module):
     """
     SwiGLU FFN with three linears, each using DynamicLoRALinear:
     All per-token with memory-driven LoRA ("mm" by default).
     """
-    def __init__(self, dim: int, hidden_dim: int, r: int = 16, alpha: float = 2.0,
-                 gen_type: str = "A", dropout: float = 0.0):
+
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        r: int = 16,
+        alpha: float = 2.0,
+        gen_type: str = "A",
+        dropout: float = 0.0,
+    ):
         super().__init__()
-        self.W1 = DynamicLoRALinear(dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
-        self.W2 = DynamicLoRALinear(dim, hidden_dim, r, alpha=alpha, gen_type=gen_type)
-        self.W3 = DynamicLoRALinear(hidden_dim, dim, r, alpha=alpha, gen_type=gen_type, mem_features=dim)
+        self.W1 = DynamicLoRALinear(
+            dim, hidden_dim, r, alpha=alpha, gen_type=gen_type
+        )
+        self.W2 = DynamicLoRALinear(
+            dim, hidden_dim, r, alpha=alpha, gen_type=gen_type
+        )
+        self.W3 = DynamicLoRALinear(
+            hidden_dim,
+            dim,
+            r,
+            alpha=alpha,
+            gen_type=gen_type,
+            mem_features=dim,
+        )
 
         self.silu = nn.SiLU()
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
         x1 = self.W1(x, m_tok)
-        x2 = self.W2(x, m_tok) 
+        x2 = self.W2(x, m_tok)
         return self.W3(self.dropout(self.silu(x1) * x2), m_tok)
 
 
@@ -4357,7 +4528,7 @@ class LoRAFFNTransformer(StateSpaceTransformer):
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
         self.gen_type = gen_type
-        
+
         super().__init__(
             dim=dim,
             num_patches=num_patches,
@@ -4378,12 +4549,16 @@ class LoRAFFNTransformer(StateSpaceTransformer):
             **kwargs,
         )
 
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
         self.layers = nn.ModuleList([])
         for i in range(depth):
             block = nn.ModuleList([])
             block.append(
-                Attention(dim, heads, dim_head, dropout) #, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES))
+                Attention(
+                    dim, heads, dim_head, dropout
+                )  # , bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES))
             )
             if i in self.mem_layer_idx:
                 block.append(
@@ -4394,12 +4569,11 @@ class LoRAFFNTransformer(StateSpaceTransformer):
                         alpha=self.lora_alpha,
                         gen_type=self.gen_type,
                         dropout=dropout,
-                    )       
+                    )
                 )
             else:
                 block.append(FeedForward(dim, mlp_dim, dropout))
             self.layers.append(block)
-
 
     def forward(self, x):
         M_new = self._mem_blocks_forward(x)
@@ -4460,9 +4634,13 @@ class LoRAInjectionViTPredictor(nn.Module):
         self.dropout = nn.Dropout(emb_dropout)
 
         if injection_type in ["lora_qk", "lora_vo", "lora_qkvo"]:
-            use_qk = injection_type == "lora_qk" or injection_type == "lora_qkvo"
-            use_vo = injection_type == "lora_vo" or injection_type == "lora_qkvo"
-            
+            use_qk = (
+                injection_type == "lora_qk" or injection_type == "lora_qkvo"
+            )
+            use_vo = (
+                injection_type == "lora_vo" or injection_type == "lora_qkvo"
+            )
+
             self.transformer = LoRAAttentionTransformer(
                 dim=dim,
                 num_patches=num_patches,
@@ -4503,13 +4681,13 @@ class LoRAInjectionViTPredictor(nn.Module):
             )
         else:
             raise ValueError(f"Invalid injection type: {injection_type}")
-    
+
     def forward(self, x):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
         return self.transformer(x)
-    
+
     def reset_memory(self):
         self.transformer.reset_memory()
 
@@ -4518,6 +4696,7 @@ class LoRAInjectionViTPredictor(nn.Module):
 
 
 ########### Dynamic FFN with Memory ###########
+
 
 class FFNDynamicMemories(nn.Module):
     """
@@ -4529,14 +4708,17 @@ class FFNDynamicMemories(nn.Module):
     W2_m: r -> d_model (generated by FFNMemGenerator)
     W3_m: d_model -> r (generated by FFNMemGenerator)
     """
-    def __init__(self,
-                 dim: int,
-                 hidden_dim: int,
-                 d_m: int,            # memory token dim
-                 r: int = 64,         # memory width
-                 gen_hidden_mul = 2,
-                 dropout: float = 0.0,
-                 alpha_mem: float = 1.0):
+
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        d_m: int,  # memory token dim
+        r: int = 64,  # memory width
+        gen_hidden_mul=2,
+        dropout: float = 0.0,
+        alpha_mem: float = 1.0,
+    ):
         super().__init__()
         self.dim = dim
         self.hidden_dim = hidden_dim
@@ -4554,10 +4736,14 @@ class FFNDynamicMemories(nn.Module):
         self.drop = nn.Dropout(dropout)
 
         # Memory generator F(m): produces per-token matrices
-        self.mem_gen = FFNMemGenerator(in_features=d_m, out_features=dim, r=r, hidden_mul=gen_hidden_mul)
+        self.mem_gen = FFNMemGenerator(
+            in_features=d_m, out_features=dim, r=r, hidden_mul=gen_hidden_mul
+        )
 
         # small regularizer gates
-        self.mem_gate = nn.Parameter(torch.tensor(0.0))  # sigmoid gate for entire mem branch
+        self.mem_gate = nn.Parameter(
+            torch.tensor(0.0)
+        )  # sigmoid gate for entire mem branch
 
         self.reset_parameters()
 
@@ -4571,7 +4757,7 @@ class FFNDynamicMemories(nn.Module):
         nn.init.zeros_(self.b3)
 
         nn.init.constant_(self.mem_gate, 0.0)
-        
+
         self.mem_gen.reset_parameters()
 
     def forward(self, x: torch.Tensor, m_tok: torch.Tensor) -> torch.Tensor:
@@ -4579,15 +4765,23 @@ class FFNDynamicMemories(nn.Module):
         x:     [B,T,dim]
         m_tok: [B,T,d_m]  (per-token memory embeddings)
         """
-        
+
         # ----- Base FFN -----
-        x1 = torch.einsum("od,btd->bto", self.W1, x) + self.b1.view(1, 1, -1)  # [B,T,hidden_dim]
-        x2 = torch.einsum("od,btd->bto", self.W2, x) + self.b2.view(1, 1, -1)  # [B,T,hidden_dim]
+        x1 = torch.einsum("od,btd->bto", self.W1, x) + self.b1.view(
+            1, 1, -1
+        )  # [B,T,hidden_dim]
+        x2 = torch.einsum("od,btd->bto", self.W2, x) + self.b2.view(
+            1, 1, -1
+        )  # [B,T,hidden_dim]
         h_base = self.drop(self.silu(x1) * x2)  # [B,T,hidden_dim]
-        y_base = torch.einsum("do,bto->btd", self.W3, h_base) + self.b3.view(1, 1, -1)  # [B,T,dim]
+        y_base = torch.einsum("do,bto->btd", self.W3, h_base) + self.b3.view(
+            1, 1, -1
+        )  # [B,T,dim]
 
         # ----- Memory FFN (dynamic, per token) -----
-        W1_m, W2_m, W3_m = self.mem_gen(m_tok)  # TODO: should cache generated AB matrices
+        W1_m, W2_m, W3_m = self.mem_gen(
+            m_tok
+        )  # TODO: should cache generated AB matrices
 
         # Memory FFN forward pass
         u1 = torch.einsum("btod,btd->bto", W1_m, x)  # [B,T,r]
@@ -4599,6 +4793,7 @@ class FFNDynamicMemories(nn.Module):
         g = torch.sigmoid(self.mem_gate)
         y = y_base + g * self.alpha_mem * y_mem
         return y
+
 
 class DynamicFFNTransformer(StateSpaceTransformer):
     def __init__(
@@ -4622,7 +4817,7 @@ class DynamicFFNTransformer(StateSpaceTransformer):
         self.gen_hidden_mul = gen_hidden_mul
         self.alpha_mem = alpha_mem
         self.ffn_r = ffn_r
-        
+
         super().__init__(
             dim=dim,
             num_patches=num_patches,
@@ -4640,24 +4835,29 @@ class DynamicFFNTransformer(StateSpaceTransformer):
             ffn_r=ffn_r,
             **kwargs,
         )
-    
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(
-                nn.ModuleList([
-                    Attention(dim, heads, dim_head, dropout), #, bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)),
-                    FFNDynamicMemories(
-                        dim=dim,
-                        hidden_dim=mlp_dim,
-                        d_m=dim,
-                        r=self.ffn_r,
-                        gen_hidden_mul=self.gen_hidden_mul,
-                        alpha_mem=self.alpha_mem,
-                        dropout=dropout,
-
-                    )
-                ])
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim, heads, dim_head, dropout
+                        ),  # , bias=generate_mask_with_memory(NUM_PATCHES, NUM_FRAMES)),
+                        FFNDynamicMemories(
+                            dim=dim,
+                            hidden_dim=mlp_dim,
+                            d_m=dim,
+                            r=self.ffn_r,
+                            gen_hidden_mul=self.gen_hidden_mul,
+                            alpha_mem=self.alpha_mem,
+                            dropout=dropout,
+                        ),
+                    ]
+                )
             )
 
     def forward(self, x):
@@ -4667,7 +4867,7 @@ class DynamicFFNTransformer(StateSpaceTransformer):
 
         for attn, ff in self.layers:
             x = x + attn(x)
-            x = x + ff(x, M_new) # could cache generated AB matrices
+            x = x + ff(x, M_new)  # could cache generated AB matrices
 
         return self.ln_out(x), self.ln_mem_out(M_new)
 
@@ -4733,28 +4933,32 @@ class DynamicFFNVitPredictor(nn.Module):
             alpha_mem=alpha_mem,
             ffn_r=ffn_rank,
         )
-    
+
     def forward(self, x):
         b, n, _ = x.shape
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
         return self.transformer(x)
-    
+
     def reset_memory(self):
         self.transformer.reset_memory()
-    
+
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)
 
 
 ########### TransformerXL Implementation ###########
 
+
 class TransformerXLAttention(nn.Module):
     """
     TransformerXL-style attention with segment-level recurrence.
     Uses relative positional encodings and maintains a memory buffer.
     """
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, mem_len=0, bias=None):
+
+    def __init__(
+        self, dim, heads=8, dim_head=64, dropout=0.0, mem_len=0, bias=None
+    ):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
@@ -4786,11 +4990,11 @@ class TransformerXLAttention(nn.Module):
             bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
         self.register_buffer("bias", bias)
 
-        
-
     def _rel_shift(self, x):
         """Relative positional shift for TransformerXL attention"""
-        zero_pad = torch.zeros((*x.size()[:-2], x.size(-2), 1), device=x.device, dtype=x.dtype)
+        zero_pad = torch.zeros(
+            (*x.size()[:-2], x.size(-2), 1), device=x.device, dtype=x.dtype
+        )
         x_padded = torch.cat([zero_pad, x], dim=-1)
         x_padded = x_padded.view(*x.size()[:-2], x.size(-1) + 1, x.size(-2))
         x = x_padded[:, :, 1:].view_as(x)
@@ -4798,19 +5002,19 @@ class TransformerXLAttention(nn.Module):
 
     def forward(self, x, mems=None):
         B, T, C = x.size()
-        
+
         x = self.norm(x)
-        
+
         # Project to Q, K, V
         q = self.to_q(x)
         k = self.to_k(x)
         v = self.to_v(x)
-        
+
         # Reshape for multi-head attention
         q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
         k = rearrange(k, "b n (h d) -> b h n d", h=self.heads)
         v = rearrange(v, "b n (h d) -> b h n d", h=self.heads)
-        
+
         # Handle memory if provided
         if mems is not None and len(mems) > 0:
             # Concatenate memory with current keys and values
@@ -4825,41 +5029,52 @@ class TransformerXLAttention(nn.Module):
             mem_v = rearrange(mem_v, "b n (h d) -> b h n d", h=self.heads)
 
             # print(f"mem_k_shape after reshape: {mem_k.shape}", flush=True)
-            
+
             k = torch.cat([mem_k, k], dim=2)  # [B, H, M+T, D]
-            v = torch.cat([mem_v, v], dim=2)  # [B, H, M+T, D]  
-        
+            v = torch.cat([mem_v, v], dim=2)  # [B, H, M+T, D]
+
         # Compute attention scores
-        AC = torch.matmul(q, k.transpose(-1, -2)) * self.scale  # [B, H, T, M+T]
-        
+        AC = (
+            torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        )  # [B, H, T, M+T]
+
         # Add relative positional bias
-        BD = torch.matmul(q + self.r_w_bias.unsqueeze(0).unsqueeze(2), 
-                         k.transpose(-1, -2)) * self.scale
+        BD = (
+            torch.matmul(
+                q + self.r_w_bias.unsqueeze(0).unsqueeze(2),
+                k.transpose(-1, -2),
+            )
+            * self.scale
+        )
         BD = self._rel_shift(BD)
-        
+
         # Combine content and positional attention
         attn = AC + BD
 
-        
         # Apply causal mask
         if mems is not None:
             # For memory, we need to adjust the mask
             mem_len = mems.size(1) if mems is not None else 0
-            mask = generate_frame_mask_with_memory(NUM_PATCHES, NUM_FRAMES, mem_len, device=x.device, dtype=torch.bool)
-            mask = mask[:,:,mem_len:,:] == 1
+            mask = generate_frame_mask_with_memory(
+                NUM_PATCHES,
+                NUM_FRAMES,
+                mem_len,
+                device=x.device,
+                dtype=torch.bool,
+            )
+            mask = mask[:, :, mem_len:, :] == 1
         else:
             mask = self.bias[:, :, :T, :T] == 1
             mem_len = 0
-        
+
         attn = attn.masked_fill(~mask, float("-inf"))
-        
+
         attn = self.attend(attn)
         attn = self.dropout(attn)
 
-        
         out = torch.matmul(attn, v)
         out = rearrange(out, "b h n d -> b n (h d)")
-        
+
         return self.to_out(out)
 
 
@@ -4867,6 +5082,7 @@ class TransformerXLBlock(nn.Module):
     """
     Single TransformerXL block with attention and feedforward layers.
     """
+
     def __init__(self, dim, heads, dim_head, mlp_dim, dropout=0.0, mem_len=0):
         super().__init__()
         self.attention = TransformerXLAttention(
@@ -4874,19 +5090,19 @@ class TransformerXLBlock(nn.Module):
             heads=heads,
             dim_head=dim_head,
             dropout=dropout,
-            mem_len=mem_len
+            mem_len=mem_len,
         )
         self.feed_forward = FeedForward(dim, mlp_dim, dropout=dropout)
-        
+
     def forward(self, x, mems=None):
         # Self-attention with memory
         attn_out = self.attention(x, mems)
         x = x + attn_out
-        
+
         # Feed-forward
         ff_out = self.feed_forward(x)
         x = x + ff_out
-        
+
         return x
 
 
@@ -4895,13 +5111,24 @@ class TransformerXL(nn.Module):
     TransformerXL model with segment-level recurrence.
     Maintains a memory buffer across segments for long-range dependencies.
     """
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.0, mem_len=0, step_size=1):
+
+    def __init__(
+        self,
+        dim,
+        depth,
+        heads,
+        dim_head,
+        mlp_dim,
+        dropout=0.0,
+        mem_len=0,
+        step_size=1,
+    ):
         super().__init__()
         self.mem_len = mem_len
         self.norm = nn.LayerNorm(dim)
         self.layers = nn.ModuleList([])
         self.step_size = step_size
-        
+
         for _ in range(depth):
             self.layers.append(
                 TransformerXLBlock(
@@ -4910,40 +5137,41 @@ class TransformerXL(nn.Module):
                     dim_head=dim_head,
                     mlp_dim=mlp_dim,
                     dropout=dropout,
-                    mem_len=mem_len
+                    mem_len=mem_len,
                 )
             )
-        
+
         # Memory buffer to store previous segment representations
         self.memory = None
-        
+
     def _update_memory(self, new_mem):
         if new_mem is not None:
-            self.memory = new_mem[:, min(self.step_size - 1, new_mem.size(1) - 1):]
+            self.memory = new_mem[
+                :, min(self.step_size - 1, new_mem.size(1) - 1) :
+            ]
         else:
-            self.memory = new_mem  
-     
-    
+            self.memory = new_mem
+
     def forward(self, x):
         """
         Forward pass with optional external memory.
-        
+
         Args:
             x: Input tensor [B, T, D]
         """
         curr_memory = self.memory
         for i, layer in enumerate(self.layers):
             x = layer(x, curr_memory)
-            
+
         new_mem = x.detach().clone()
-        self._update_memory(new_mem) 
-        
+        self._update_memory(new_mem)
+
         return self.norm(x)
-    
+
     def reset_memory(self):
         """Reset the internal memory buffer"""
         self.memory = None
-    
+
     def set_step_size(self, step_size):
         self.step_size = step_size
 
@@ -4953,6 +5181,7 @@ class TransformerXLViTPredictor(nn.Module):
     ViT Predictor using TransformerXL architecture.
     Combines the ViT structure with TransformerXL's segment-level recurrence.
     """
+
     def __init__(
         self,
         *,
@@ -4990,7 +5219,7 @@ class TransformerXLViTPredictor(nn.Module):
             torch.randn(1, num_frames * num_patches, dim)
         )
         self.dropout = nn.Dropout(emb_dropout)
-        
+
         self.transformer = TransformerXL(
             dim=dim,
             depth=depth,
@@ -5005,32 +5234,41 @@ class TransformerXLViTPredictor(nn.Module):
     def forward(self, x):
         """
         Forward pass with optional memory.
-        
+
         Args:
             x: Input embeddings [B, T, D] where T = num_frames * num_patches
             H: Optional external memory (for compatibility with other models)
         """
         b, n, _ = x.shape
-        
+
         # Add positional embeddings
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
-        
+
         # Pass through TransformerXL
         x = self.transformer(x)
-        
+
         return x, None
 
     def reset_memory(self):
         """Reset the internal memory buffer"""
         self.transformer.reset_memory()
-    
+
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size * self.num_patches)
 
 
 class BlockRecurrentTransformerLayer(nn.Module):
-    def __init__(self, dim, heads, dim_head, mlp_dim, emb_dropout=0.0, attn_dropout=0.0, bias=None):
+    def __init__(
+        self,
+        dim,
+        heads,
+        dim_head,
+        mlp_dim,
+        emb_dropout=0.0,
+        attn_dropout=0.0,
+        bias=None,
+    ):
         super().__init__()
         inner_dim = dim_head * heads
         self.scale = dim_head**-0.5
@@ -5039,7 +5277,9 @@ class BlockRecurrentTransformerLayer(nn.Module):
         # input processing
         self.to_qkv_input = nn.Linear(dim, 3 * inner_dim, bias=False)
         self.norm_input = nn.LayerNorm(dim)
-        self.q_input_memory = nn.Linear(dim, inner_dim, bias=False) # for cross attention between input and memory
+        self.q_input_memory = nn.Linear(
+            dim, inner_dim, bias=False
+        )  # for cross attention between input and memory
 
         # memory processing
         self.to_kv_memory = nn.Linear(dim, 2 * inner_dim, bias=False)
@@ -5048,7 +5288,9 @@ class BlockRecurrentTransformerLayer(nn.Module):
         # shared
         self.attend = nn.Softmax(dim=-1)
         self.attn_dropout = nn.Dropout(attn_dropout)
-        self.to_out = nn.Sequential(nn.Linear(2 * inner_dim, dim), nn.Dropout(emb_dropout))
+        self.to_out = nn.Sequential(
+            nn.Linear(2 * inner_dim, dim), nn.Dropout(emb_dropout)
+        )
         self.ff = FeedForward(dim, mlp_dim, dropout=emb_dropout)
         self.out_norm = nn.LayerNorm(dim)
 
@@ -5056,7 +5298,9 @@ class BlockRecurrentTransformerLayer(nn.Module):
             self_attention_bias = generate_mask_matrix(NUM_PATCHES, NUM_FRAMES)
         self.register_buffer("self_attention_bias", self_attention_bias)
         if bias is None:
-            cross_attention_bias = generate_diagonal_frame_mask(NUM_PATCHES, NUM_FRAMES) # TODO: proper bias for cross attention
+            cross_attention_bias = generate_diagonal_frame_mask(
+                NUM_PATCHES, NUM_FRAMES
+            )  # TODO: proper bias for cross attention
         self.register_buffer("cross_attention_bias", cross_attention_bias)
 
     def forward(self, x, m, s_pe=None):
@@ -5066,9 +5310,14 @@ class BlockRecurrentTransformerLayer(nn.Module):
         x = self.norm_input(x)
 
         qkv_input = self.to_qkv_input(x).chunk(3, dim=-1)
-        q_in, k_in, v_in = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), qkv_input)
+        q_in, k_in, v_in = map(
+            lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads),
+            qkv_input,
+        )
         dots_in = torch.matmul(q_in, k_in.transpose(-1, -2)) * self.scale
-        dots_in = dots_in.masked_fill(self.self_attention_bias[:, :, :T, :T] == 0, float("-inf"))
+        dots_in = dots_in.masked_fill(
+            self.self_attention_bias[:, :, :T, :T] == 0, float("-inf")
+        )
         attn_in = self.attn_dropout(self.attend(dots_in))
 
         z_in = torch.matmul(attn_in, v_in)
@@ -5076,20 +5325,25 @@ class BlockRecurrentTransformerLayer(nn.Module):
 
         # memory processing
         if s_pe is not None:
-            m = m + s_pe[:, :M, :] # context ids (memory positional encodings)
+            m = m + s_pe[:, :M, :]  # context ids (memory positional encodings)
 
         m = self.norm_memory(m)
-        q_mem = self.q_input_memory(x) 
+        q_mem = self.q_input_memory(x)
         k_mem, v_mem = self.to_kv_memory(m).chunk(2, dim=-1)
-        q_mem, k_mem, v_mem = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), [q_mem, k_mem, v_mem])
+        q_mem, k_mem, v_mem = map(
+            lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads),
+            [q_mem, k_mem, v_mem],
+        )
         dots_in_mem = torch.matmul(q_mem, k_mem.transpose(-1, -2)) * self.scale
-        dots_in_mem = dots_in_mem.masked_fill(self.cross_attention_bias[:, :, :T, :M] == 0, float("-inf"))
+        dots_in_mem = dots_in_mem.masked_fill(
+            self.cross_attention_bias[:, :, :T, :M] == 0, float("-inf")
+        )
         attn_in_mem = self.attn_dropout(self.attend(dots_in_mem))
 
         z_in_mem = torch.matmul(attn_in_mem, v_mem)
         z_in_mem = rearrange(z_in_mem, "b h n d -> b n (h d)")
 
-        # concat input and memory 
+        # concat input and memory
         z = torch.cat([z_in, z_in_mem], dim=-1)
         x = x + self.to_out(z)
 
@@ -5114,11 +5368,17 @@ class BlockRecurrentTransformer(StateSpaceTransformer):
         dim_head=64,
         dt_rank: int = 16,
         use_gate: bool = False,
-        mem_layer_type: str = "all", # 'all', 'first', 'middle', 'last', 'alternate'
+        mem_layer_type: str = "all",  # 'all', 'first', 'middle', 'last', 'alternate'
         **kwargs,
     ):
         self.mem_layer_type = mem_layer_type
-        assert mem_layer_type in {'all', 'first', 'middle', 'last', 'alternate'}, "mem_layer_type must be one of 'all', 'first', 'middle', 'last', 'alternate'"
+        assert mem_layer_type in {
+            "all",
+            "first",
+            "middle",
+            "last",
+            "alternate",
+        }, "mem_layer_type must be one of 'all', 'first', 'middle', 'last', 'alternate'"
 
         super().__init__(
             dim=dim,
@@ -5138,22 +5398,23 @@ class BlockRecurrentTransformer(StateSpaceTransformer):
         )
         self.s_pe = nn.Parameter(torch.randn(1, NUM_FRAMES * NUM_PATCHES, dim))
 
-
-    def _build_transformer(self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs):
+    def _build_transformer(
+        self, depth, dim, heads, dim_head, dropout, mlp_dim, **kwargs
+    ):
         self.layers = nn.ModuleList([])
-        if self.mem_layer_type == 'all':
+        if self.mem_layer_type == "all":
             mem_layer_idx = list(range(depth))
-        elif self.mem_layer_type == 'first':
+        elif self.mem_layer_type == "first":
             mem_layer_idx = [0]
-        elif self.mem_layer_type == 'middle':
+        elif self.mem_layer_type == "middle":
             mem_layer_idx = list(range(1, depth - 1))
-        elif self.mem_layer_type == 'last':
+        elif self.mem_layer_type == "last":
             mem_layer_idx = [depth - 1]
-        elif self.mem_layer_type == 'alternate':
+        elif self.mem_layer_type == "alternate":
             mem_layer_idx = list(range(0, depth, 2))
-        
+
         self.mem_layer_idx = mem_layer_idx
-        
+
         for i in range(depth):
             if i in mem_layer_idx:
                 self.layers.append(
@@ -5168,22 +5429,26 @@ class BlockRecurrentTransformer(StateSpaceTransformer):
                 )
             else:
                 self.layers.append(
-                    nn.ModuleList([
-                        Attention(
-                            dim=dim,
-                            heads=heads,
-                            dim_head=dim_head,
-                            dropout=dropout,
-                            bias=generate_mask_matrix(NUM_PATCHES, NUM_FRAMES),
-                        ),
-                        FeedForward(
-                            dim=dim,
-                            hidden_dim=mlp_dim,
-                            dropout=dropout,
-                        )
-                    ])
+                    nn.ModuleList(
+                        [
+                            Attention(
+                                dim=dim,
+                                heads=heads,
+                                dim_head=dim_head,
+                                dropout=dropout,
+                                bias=generate_mask_matrix(
+                                    NUM_PATCHES, NUM_FRAMES
+                                ),
+                            ),
+                            FeedForward(
+                                dim=dim,
+                                hidden_dim=mlp_dim,
+                                dropout=dropout,
+                            ),
+                        ]
+                    )
                 )
-    
+
     def _mem_blocks_forward(self, x):
         B, T, D = x.shape
         x = x.clone()
@@ -5199,7 +5464,9 @@ class BlockRecurrentTransformer(StateSpaceTransformer):
         x = self.ln_in(x)
         for i, layer in enumerate(self.layers):
             if i in self.mem_layer_idx:
-                x = layer(x, M_new, self.s_pe) # residual connection inside layer
+                x = layer(
+                    x, M_new, self.s_pe
+                )  # residual connection inside layer
             else:
                 x = x + layer[0](x)
                 x = x + layer[1](x)
@@ -5223,7 +5490,7 @@ class BlockRecurrentViTPredictor(nn.Module):
         emb_dropout=0.0,
         dim_head=64,
         dt_rank: int = 16,
-        mem_layer_type: str = "all", # 'all', 'first', 'middle', 'last', 'alternate'
+        mem_layer_type: str = "all",  # 'all', 'first', 'middle', 'last', 'alternate'
     ):
         super().__init__()
         self.num_patches = num_patches
@@ -5235,14 +5502,16 @@ class BlockRecurrentViTPredictor(nn.Module):
         self.mlp_dim = mlp_dim
         self.step_size = step_size
         self.n_mem_blocks = n_mem_blocks
-        
+
         global NUM_FRAMES, NUM_PATCHES
         NUM_FRAMES = num_frames
         NUM_PATCHES = num_patches
 
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_frames * num_patches, dim))
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
         self.dropout = nn.Dropout(emb_dropout)
-        
+
         self.transformer = BlockRecurrentTransformer(
             dim=dim,
             num_patches=num_patches,
@@ -5263,9 +5532,9 @@ class BlockRecurrentViTPredictor(nn.Module):
         x = x + self.pos_embedding[:, :n]
         x = self.dropout(x)
         return self.transformer(x)
-    
+
     def reset_memory(self):
         self.transformer.reset_memory()
-    
+
     def set_step_size(self, step_size):
         self.transformer.set_step_size(step_size)

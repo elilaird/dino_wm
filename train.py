@@ -1493,7 +1493,7 @@ class Trainer:
                         for k, v in recent_memory_recall_logs.items()
                     }
                     self.logs_update(recent_memory_recall_logs)
-                print("done ")
+                print("done openloop tests")
 
         self.accelerator.wait_for_everyone()
 
